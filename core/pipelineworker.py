@@ -17,7 +17,7 @@ from core.image_processing import parse_weichen_block
 from core.linking import detect_fahrtrichtung, detect_haltepunkt_signal_group, link_haltetafel_to_gks, link_anchor_to_coord, merge_duplicate_signals
 import numpy as np
 import gc
-from config import set_classes_from_model
+from config import set_classes_from_model, canon_name
 # ============================================================================
 # WORKER THREAD (with weighted progress + unified coordinate OCR)
 # ============================================================================
@@ -81,6 +81,36 @@ class PipelineWorker(QtCore.QThread):
                 self.status.emit(f"[init] Model loaded in {time.perf_counter() - t0:.2f}s")
                 self.progress.emit(5)
                 set_classes_from_model(model)
+                # 🔍 DIAGNOSTIC: Verify class order
+                print(f"\n{'='*70}")
+                print(f"🔍 CLASS ORDER VERIFICATION")
+                print(f"{'='*70}")
+
+                critical_classes = {
+                    9: 'prellblock',
+                    10: 'haltetafel',
+                    11: 'endeweichen',
+                }
+
+                all_correct = True
+                for idx, expected in critical_classes.items():
+                    actual = CLASSES[idx] if idx < len(CLASSES) else '(missing)'
+                    status = '✅' if actual == expected else '❌'
+                    print(f"   [{idx:2d}] {status} Expected: '{expected:15s}' | Got: '{actual}'")
+                    if actual != expected:
+                        all_correct = False
+
+                if all_correct:
+                    print(f"\n✅ Class order is CORRECT!")
+                else:
+                    print(f"\n❌ Class order is WRONG! Check your config.py")
+
+                print(f"\nAliasing test:")
+                print(f"   canon_name('endeweichen') → '{canon_name('endeweichen')}'  (should be 'weichenende')")
+                print(f"   canon_name('prellblock')  → '{canon_name('prellblock')}'   (should be 'prellblock')")
+                print(f"   canon_name('haltetafel')  → '{canon_name('haltetafel')}'   (should be 'haltetafel')")
+
+                print(f"{'='*70}\n")
                 self.status.emit(f"[init] Model classes: {CLASSES}")
 
                 ALIAS_REV = {}
@@ -155,10 +185,6 @@ class PipelineWorker(QtCore.QThread):
 
                     t_det = time.perf_counter()
                     dets = run_yolo_on_page(model, bgr_color)
-                    # 🔍 DIAGNOSTIC: Check class names
-                    print(f"\n{'='*60}")
-                    print(f"🔍 CLASS NAME DIAGNOSTIC (Page {pidx})")
-                    print(f"{'='*60}")
 
                     class_counts = {}
                     for d in dets:

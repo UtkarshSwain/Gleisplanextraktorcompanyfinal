@@ -41,32 +41,34 @@ OCR_ENGINE = "paddleocr"
 # ============================================================================
 
 CLASSES = [
-    'signal',
-    'gm_block',
-    'gks_festkodiert',
-    'gks_gesteuert',
-    'weichen_block',
-    'isolierstoß',
-    'haltepunkt',
-    'sverbinder',
-    'coordinate',
-    'weichenende',
-    'prellblock',
-    'haltetafel',
-    'weichengruppeende'
+    'signal',           # 0
+    'gm_block',         # 1
+    'gks_festkodiert',  # 2
+    'gks_gesteuert',    # 3
+    'weichen_block',    # 4
+    'isolierstoß',      # 5
+    'haltepunkt',       # 6
+    'sverbinder',       # 7
+    'coordinate',       # 8
+    'prellblock',       # 9 
+    'haltetafel',       # 10 
+    'endeweichen',      # 11 
+    'weichengruppeende' # 12
 ]
-# Build index mapping
+
 def set_classes_from_model(model):
     global CLASSES, IDX
     names = getattr(model, "names", None)
     if isinstance(names, dict):
-        CLASSES = [names[i] for i in range(len(names))]
+        # ✅ FIX: Sort keys to ensure correct order
+        CLASSES = [names[i] for i in sorted(names.keys())]
     elif isinstance(names, (list, tuple)):
         CLASSES = list(names)
     else:
         names2 = getattr(getattr(model, "model", None), "names", None)
         if isinstance(names2, dict):
-            CLASSES = [names2[i] for i in range(len(names2))]
+            # ✅ FIX: Sort keys here too
+            CLASSES = [names2[i] for i in sorted(names2.keys())]
         elif isinstance(names2, (list, tuple)):
             CLASSES = list(names2)
         else:
@@ -231,29 +233,51 @@ PADDLEOCR_PARAMS = {
 # VALIDATION
 # ============================================================================
 
+# ============================================================================
+# VALIDATION
+# ============================================================================
+
 def validate_config():
     """Validate configuration consistency."""
     errors = []
     
+    # Build set of valid class names (including aliases)
+    valid_classes = set(CLASSES)
+    # Add all canonical names from aliases
+    for alias, canonical in ALIASES.items():
+        valid_classes.add(canonical)
+    
     # Check CLASS_THRESH
     for cls in CLASS_THRESH.keys():
-        if cls not in CLASSES:
+        if cls not in valid_classes:
             errors.append(f"CLASS_THRESH references unknown class: '{cls}'")
     
     # Check LINK_RULES
     for cls in LINK_RULES.keys():
-        if cls not in CLASSES:
+        if cls not in valid_classes:
             errors.append(f"LINK_RULES references unknown class: '{cls}'")
     
     # Check NUMERIC_OK
     for cls in NUMERIC_OK:
-        if cls not in CLASSES:
+        if cls not in valid_classes:
             errors.append(f"NUMERIC_OK references unknown class: '{cls}'")
     
     # Check CLASS_ID_PATTERNS
     for cls in CLASS_ID_PATTERNS.keys():
-        if cls not in CLASSES:
+        if cls not in valid_classes:
             errors.append(f"CLASS_ID_PATTERNS references unknown class: '{cls}'")
+    
+    # Check detection_padding in CARDINAL_PARAMS
+    if "detection_padding" in CARDINAL_PARAMS:
+        for cls in CARDINAL_PARAMS["detection_padding"].keys():
+            if cls not in valid_classes:
+                errors.append(f"CARDINAL_PARAMS['detection_padding'] references unknown class: '{cls}'")
+    
+    # Check detection_padding in ANGULAR_PARAMS
+    if "detection_padding" in ANGULAR_PARAMS:
+        for cls in ANGULAR_PARAMS["detection_padding"].keys():
+            if cls not in valid_classes:
+                errors.append(f"ANGULAR_PARAMS['detection_padding'] references unknown class: '{cls}'")
     
     if errors:
         print("⚠️ Configuration warnings:")
