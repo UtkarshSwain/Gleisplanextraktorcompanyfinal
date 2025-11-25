@@ -7,6 +7,8 @@ from table_editor import (
     ColumnManagerDialog, 
     FindReplaceDialog
 )
+import re
+
 class AuditingTreeWidget(QtWidgets.QTreeWidget):
     
     """Replaces AuditingTableView"""

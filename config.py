@@ -56,7 +56,22 @@ CLASSES = [
     'weichengruppeende'
 ]
 # Build index mapping
-IDX = {name: i for i, name in enumerate(CLASSES)}
+def set_classes_from_model(model):
+    global CLASSES, IDX
+    names = getattr(model, "names", None)
+    if isinstance(names, dict):
+        CLASSES = [names[i] for i in range(len(names))]
+    elif isinstance(names, (list, tuple)):
+        CLASSES = list(names)
+    else:
+        names2 = getattr(getattr(model, "model", None), "names", None)
+        if isinstance(names2, dict):
+            CLASSES = [names2[i] for i in range(len(names2))]
+        elif isinstance(names2, (list, tuple)):
+            CLASSES = list(names2)
+        else:
+            raise RuntimeError("Could not read class names from model weights.")
+    IDX = {n: i for i, n in enumerate(CLASSES)}
 
 # ============================================================================
 # ALIASES & REMAPPING

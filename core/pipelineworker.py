@@ -17,7 +17,7 @@ from core.image_processing import parse_weichen_block
 from core.linking import detect_fahrtrichtung, detect_haltepunkt_signal_group, link_haltetafel_to_gks, link_anchor_to_coord, merge_duplicate_signals
 import numpy as np
 import gc
-
+from config import set_classes_from_model
 # ============================================================================
 # WORKER THREAD (with weighted progress + unified coordinate OCR)
 # ============================================================================
@@ -80,6 +80,7 @@ class PipelineWorker(QtCore.QThread):
                 model = YOLO(self.model_path) # <-- This is the slow part
                 self.status.emit(f"[init] Model loaded in {time.perf_counter() - t0:.2f}s")
                 self.progress.emit(5)
+                set_classes_from_model(model)
                 self.status.emit(f"[init] Model classes: {CLASSES}")
 
                 ALIAS_REV = {}
@@ -154,6 +155,24 @@ class PipelineWorker(QtCore.QThread):
 
                     t_det = time.perf_counter()
                     dets = run_yolo_on_page(model, bgr_color)
+                    # 🔍 DIAGNOSTIC: Check class names
+                    print(f"\n{'='*60}")
+                    print(f"🔍 CLASS NAME DIAGNOSTIC (Page {pidx})")
+                    print(f"{'='*60}")
+
+                    class_counts = {}
+                    for d in dets:
+                        raw = d.get('raw_name', '?')
+                        canon = d.get('name', '?')
+                        
+                        if canon not in class_counts:
+                            class_counts[canon] = {'raw': raw, 'count': 0}
+                        class_counts[canon]['count'] += 1
+
+                    for canon, info in sorted(class_counts.items()):
+                        print(f"   {canon:20s} (raw: {info['raw']:20s}) → {info['count']:3d} detections")
+
+                    print(f"{'='*60}\n")
                     dt_det = time.perf_counter() - t_det
                     cnt = Counter(d['name'] for d in dets)
                     summary = ", ".join(f"{k}:{v}" for k, v in sorted(cnt.items()))
