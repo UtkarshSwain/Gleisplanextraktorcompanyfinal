@@ -17,7 +17,13 @@ class AuditingWindow(QtWidgets.QMainWindow):
         self.main_app_ref = main_app_ref
         self.setWindowTitle("Gleisplan Auditing - Multi-PDF")
         self.resize(1400, 900)
-        
+        # Initialize status bar labels FIRST (before creating menus/toolbar)
+        self.status_label = None
+        self.row_count_label = None
+        self.selection_label = None
+        # Initialize data structures
+        self.workspaces = {}
+        self.tree_window = None
         # Tab widget
         self.tab_widget = QtWidgets.QTabWidget()
         self.tab_widget.setTabsClosable(True)
@@ -25,13 +31,13 @@ class AuditingWindow(QtWidgets.QMainWindow):
         self.tab_widget.tabCloseRequested.connect(self.on_close_tab)
         self.tab_widget.currentChanged.connect(self.on_tab_changed)
         self.setCentralWidget(self.tab_widget)
-        
+        # Create UI elements IN THIS ORDER
+        self._create_status_bar()  # Create status bar FIRST
+        self._create_menus()       # Then menus (which reference status_label)
+        self._create_toolbar()     # Then toolbar
         # Track open workspaces
         self.workspaces: Dict[int, WorkspaceWidget] = {}
-        
-        # Build menus and toolbars
-        self._create_menus()
-        self._create_toolbar()
+        self.tab_widget.currentChanged.connect(self.update_status_bar)
         
         self.statusBar().showMessage("Bereit - Öffnen Sie mehrere PDFs")
     
@@ -156,12 +162,52 @@ class AuditingWindow(QtWidgets.QMainWindow):
         act_paste.triggered.connect(self.on_paste)
 
         edit_menu.addSeparator()
-
+        # Bulk operations
+        act_bulk = edit_menu.addAction("✏️ Massenbearbeitung...")
+        act_bulk.triggered.connect(self.on_bulk_edit)
+        
+        act_clear = edit_menu.addAction("🗑️ Zelleninhalt löschen")
+        act_clear.setShortcut("Delete")
+        act_clear.triggered.connect(self.on_clear_cells)
+        
+        edit_menu.addSeparator()
+        # Column management
         act_edit_headers = edit_menu.addAction("✏️ Spaltenüberschriften bearbeiten")
         act_edit_headers.triggered.connect(self.on_edit_headers)
 
         act_manage_columns = edit_menu.addAction("📊 Spalten verwalten")
         act_manage_columns.triggered.connect(self.on_manage_columns)
+        # Insert Menu
+        insert_menu = mb.addMenu("Einfügen")
+
+        act_add_row = insert_menu.addAction("➕ Zeile hinzufügen")
+        act_add_row.setShortcut("Ctrl+Shift+N")
+        act_add_row.triggered.connect(self.on_add_row)
+
+        act_add_col = insert_menu.addAction("➕ Spalte hinzufügen")
+        act_add_col.triggered.connect(self.on_add_column)
+        # DELETE MENU
+        delete_menu = mb.addMenu("🗑️ Löschen")
+        
+        act_del_rows = delete_menu.addAction("📝 Zeilen löschen")
+        act_del_rows.setShortcut("Ctrl+D")
+        act_del_rows.triggered.connect(self.on_delete_selected_table_rows)
+        
+        act_del_col = delete_menu.addAction("📊 Spalte löschen...")
+        act_del_col.triggered.connect(self.on_delete_column)
+        # Data Menu
+        data_menu = mb.addMenu("Daten")
+
+        act_sort = data_menu.addAction("🔀 Sortieren")
+        act_sort.triggered.connect(self.on_sort)
+
+        act_filter = data_menu.addAction("🔍 Filter")
+        act_filter.triggered.connect(self.on_filter)
+
+        data_menu.addSeparator()
+
+        act_stats = data_menu.addAction("📈 Statistik")
+        act_stats.triggered.connect(self.on_statistics)
         # Compare Menu
         compare_menu = mb.addMenu("Vergleichen")
         
@@ -170,6 +216,16 @@ class AuditingWindow(QtWidgets.QMainWindow):
         
         # View Menu
         view_menu = mb.addMenu("Ansicht")
+        act_resize = view_menu.addAction("📏 Spaltenbreite anpassen")
+        act_resize.triggered.connect(self.on_resize_columns)
+        
+        view_menu.addSeparator()
+        
+        act_expand_all = view_menu.addAction("📂 Alle ausklappen")
+        act_expand_all.triggered.connect(self.on_expand_all)
+        
+        act_collapse_all = view_menu.addAction("📁 Alle einklappen")
+        act_collapse_all.triggered.connect(self.on_collapse_all)
         view_menu.addAction("Dunkles Thema", lambda: self.main_app_ref._set_theme("dark"))
         view_menu.addAction("Helles Thema", lambda: self.main_app_ref._set_theme("light"))
 
@@ -184,7 +240,23 @@ class AuditingWindow(QtWidgets.QMainWindow):
         toolbar = self.addToolBar("Hauptwerkzeuge")
         toolbar.setMovable(False)
         toolbar.setIconSize(QtCore.QSize(24, 24))
+        # CLIPBOARD SECTION
+        act_copy = QtWidgets.QAction("📋", self)
+        act_copy.setToolTip("Kopieren (Ctrl+C)")
+        act_copy.triggered.connect(self.on_copy)
+        toolbar.addAction(act_copy)
         
+        act_cut = QtWidgets.QAction("✂️", self)
+        act_cut.setToolTip("Ausschneiden (Ctrl+X)")
+        act_cut.triggered.connect(self.on_cut)
+        toolbar.addAction(act_cut)
+        
+        act_paste = QtWidgets.QAction("📌", self)
+        act_paste.setToolTip("Einfügen (Ctrl+V)")
+        act_paste.triggered.connect(self.on_paste)
+        toolbar.addAction(act_paste)
+        
+        toolbar.addSeparator()
         # Save actions
         act_save = QtWidgets.QAction("💾 Speichern", self)
         act_save.setShortcut("Ctrl+S")
@@ -197,22 +269,48 @@ class AuditingWindow(QtWidgets.QMainWindow):
         toolbar.addAction(act_save_all)
         
         toolbar.addSeparator()
-        # Edit actions
-        act_find = QtWidgets.QAction("🔍 Suchen", self)
-        act_find.setShortcut("Ctrl+F")
+        # EDIT SECTION
+        act_find = QtWidgets.QAction("🔍", self)
         act_find.setToolTip("Suchen und Ersetzen (Ctrl+F)")
         act_find.triggered.connect(self.on_find_replace)
         toolbar.addAction(act_find)
-
-        act_headers = QtWidgets.QAction("✏️ Überschriften", self)
+        
+        act_bulk = QtWidgets.QAction("✏️", self)
+        act_bulk.setToolTip("Massenbearbeitung")
+        act_bulk.triggered.connect(self.on_bulk_edit)
+        toolbar.addAction(act_bulk)
+        
+        toolbar.addSeparator()
+        # DATA SECTION
+        act_sort = QtWidgets.QAction("🔀", self)
+        act_sort.setToolTip("Sortieren")
+        act_sort.triggered.connect(self.on_sort)
+        toolbar.addAction(act_sort)
+        
+        act_filter = QtWidgets.QAction("🔍", self)
+        act_filter.setToolTip("Filter (Ctrl+Shift+F)")
+        act_filter.triggered.connect(self.on_filter)
+        toolbar.addAction(act_filter)
+        
+        act_stats = QtWidgets.QAction("📊", self)
+        act_stats.setToolTip("Statistik anzeigen")
+        act_stats.triggered.connect(self.on_statistics)
+        toolbar.addAction(act_stats)
+        
+        toolbar.addSeparator()
+        
+        # COLUMN SECTION
+        act_headers = QtWidgets.QAction("📝", self)
         act_headers.setToolTip("Spaltenüberschriften bearbeiten")
         act_headers.triggered.connect(self.on_edit_headers)
         toolbar.addAction(act_headers)
-
-        act_columns = QtWidgets.QAction("📊 Spalten", self)
-        act_columns.setToolTip("Spalten ein-/ausblenden")
+        
+        act_columns = QtWidgets.QAction("📊", self)
+        act_columns.setToolTip("Spalten verwalten")
         act_columns.triggered.connect(self.on_manage_columns)
         toolbar.addAction(act_columns)
+        
+        toolbar.addSeparator()
         # Export actions
         act_excel = QtWidgets.QAction("📊 Excel", self)
         act_excel.triggered.connect(self.on_export_excel)
@@ -223,12 +321,71 @@ class AuditingWindow(QtWidgets.QMainWindow):
         toolbar.addAction(act_json)
         
         toolbar.addSeparator()
+        # INSERT/DELETE SECTION
+        act_add_row = QtWidgets.QAction("➕📝", self)
+        act_add_row.setToolTip("Zeile hinzufügen (Ctrl+Shift+N)")
+        act_add_row.triggered.connect(self.on_add_row)
+        toolbar.addAction(act_add_row)
         
+        act_del_row = QtWidgets.QAction("🗑️📝", self)
+        act_del_row.setToolTip("Zeilen löschen (Ctrl+D)")
+        act_del_row.triggered.connect(self.on_delete_selected_table_rows)
+        toolbar.addAction(act_del_row)
+        
+        toolbar.addSeparator()
         # Compare action
         act_compare = QtWidgets.QAction("🔍 Vergleichen", self)
         act_compare.triggered.connect(self.on_compare_pdfs)
         toolbar.addAction(act_compare)
     
+    def _create_status_bar(self):
+        """Create status bar with info"""
+        self.status_bar = self.statusBar()
+        
+        # Create labels
+        self.status_label = QtWidgets.QLabel("Bereit")
+        self.row_count_label = QtWidgets.QLabel("Zeilen: 0")
+        self.selection_label = QtWidgets.QLabel("Auswahl: 0")
+        
+        # Add to status bar
+        self.status_bar.addWidget(self.status_label, 1)
+        self.status_bar.addPermanentWidget(self.selection_label)
+        self.status_bar.addPermanentWidget(self.row_count_label)
+        
+        # Update on selection change
+        self.tab_widget.currentChanged.connect(self.update_status_bar)
+    # ADD THIS NEW METHOD HERE (after _create_status_bar)
+    def _set_status(self, message: str):
+        """Safely set status bar message"""
+        if self.status_label is not None:
+            self.status_label.setText(message)
+        else:
+            print(f"[STATUS] {message}")  # Fallback to console
+    def update_status_bar(self):
+        """Update status bar information"""
+        # Check if status bar widgets exist
+        if self.row_count_label is None or self.selection_label is None:
+            return
+        
+        idx = self.tab_widget.currentIndex()
+        workspace = self.workspaces.get(idx)
+        
+        if workspace and hasattr(workspace, 'tree'):
+            # Count total rows
+            total_rows = 0
+            for i in range(workspace.tree.topLevelItemCount()):
+                total_rows += workspace.tree.topLevelItem(i).childCount()
+            
+            self.row_count_label.setText(f"Zeilen: {total_rows}")
+            
+            # Count selection (only child items)
+            selected = workspace.tree.selectedItems()
+            child_selected = len([item for item in selected if item.childCount() == 0])
+            self.selection_label.setText(f"Auswahl: {child_selected}")
+        else:
+            self.row_count_label.setText("Zeilen: 0")
+            self.selection_label.setText("Auswahl: 0")
+
     def on_save_current(self):
         """Save currently active workspace"""
         idx = self.tab_widget.currentIndex()
@@ -374,30 +531,231 @@ class AuditingWindow(QtWidgets.QMainWindow):
         if workspace:
             workspace.tree.find_replace()
 
+
+    def _get_current_tree(self):
+        """Helper to get current workspace tree"""
+        idx = self.tab_widget.currentIndex()
+        workspace = self.workspaces.get(idx)
+        return workspace.tree if workspace else None
+    
+    # Clipboard operations
     def on_copy(self):
-        """Copy selection in current workspace"""
-        idx = self.tab_widget.currentIndex()
-        workspace = self.workspaces.get(idx)
-        if workspace:
-            workspace.tree.copy_selection()
-
+        tree = self._get_current_tree()
+        if tree:
+            tree.copy_selection()
+            self._set_status("Kopiert")
+    
+    def on_cut(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.cut_selection()
+            self._set_status("Ausgeschnitten")
+    
     def on_paste(self):
-        """Paste in current workspace"""
-        idx = self.tab_widget.currentIndex()
-        workspace = self.workspaces.get(idx)
-        if workspace:
-            workspace.tree.paste_from_clipboard()
-
+        tree = self._get_current_tree()
+        if tree:
+            tree.paste_from_clipboard()
+            self._set_status("Eingefügt")
+    
+    
+    # Bulk operations
+    def on_bulk_edit(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.bulk_edit()
+    
+    def on_clear_cells(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.clear_cells()
+            self._set_status("Zellen geleert")
+    
+    # Column management
     def on_edit_headers(self):
-        """Edit column headers for current workspace"""
-        idx = self.tab_widget.currentIndex()
-        workspace = self.workspaces.get(idx)
-        if workspace:
-            workspace.tree.edit_headers()
-
+        tree = self._get_current_tree()
+        if tree:
+            if tree.edit_headers():
+                self._set_status("Überschriften aktualisiert")
+    
     def on_manage_columns(self):
-        """Manage column visibility for current workspace"""
+        tree = self._get_current_tree()
+        if tree:
+            if tree.manage_columns():
+                self._set_status("Spalten aktualisiert")
+    
+    # Insert operations
+    def on_add_row(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.add_row()
+            self.update_status_bar()
+    
+    def on_add_column(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.add_column()
+    
+    # Delete operations
+    def on_delete_column(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.delete_column()
+    
+    # Data operations
+    def on_sort(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.show_sort_dialog()
+    
+    def on_filter(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.show_filter_dialog()
+    
+    def on_clear_filter(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.clear_filter()
+            self._set_status("Filter gelöscht")
+    
+    def on_statistics(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.show_statistics()
+    
+    # View operations
+    def on_resize_columns(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.resize_columns_to_contents()
+            self._set_status("Spaltenbreite angepasst")
+    
+    def on_expand_all(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.expandAll()
+    
+    def on_collapse_all(self):
+        tree = self._get_current_tree()
+        if tree:
+            tree.collapseAll()
+    
+    # HelpK
+    def show_shortcuts(self):
+        """Show keyboard shortcuts dialog"""
+        shortcuts_text = """
+        TASTENKOMBINATIONEN:
+        
+        Zwischenablage:
+        • Ctrl+C         - Kopieren
+        • Ctrl+X         - Ausschneiden
+        • Ctrl+V         - Einfügen
+        
+        Bearbeiten:
+        • Ctrl+F         - Suchen und Ersetzen
+        • Delete         - Zelleninhalt löschen
+        
+        Einfügen/Löschen:
+        • Ctrl+Shift+N   - Zeile hinzufügen
+        • Ctrl+D         - Zeilen löschen
+        
+        Daten:
+        • Ctrl+Shift+F   - Filter
+        
+        Datei:
+        • Ctrl+E         - Exportieren
+        • Ctrl+W         - Schließen
+        """
+        
+        QtWidgets.QMessageBox.information(
+            self,
+            "Tastenkombinationen",
+            shortcuts_text
+        )
+    
+    def show_about(self):
+        """Show about dialog"""
+        QtWidgets.QMessageBox.about(
+            self,
+            "Über Auditing Window",
+            "Auditing Window mit Excel-ähnlichen Funktionen\n\n"
+            "Features:\n"
+            "• Zeilen/Spalten hinzufügen und löschen\n"
+            "• Kopieren, Ausschneiden, Einfügen\n"
+            "• Suchen und Ersetzen\n"
+            "• Sortieren und Filtern\n"
+            "• Massenbearbeitung\n"
+            "• Statistiken\n"
+        )
+
+    def on_delete_selected_table_rows(self):
+        """Delete selected rows from current workspace"""
+        tree = self._get_current_tree()
+        if not tree:
+            return
+        
+        selected = tree.selectedItems()
+        if not selected:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Keine Auswahl",
+                "Bitte wählen Sie Zeilen zum Löschen aus."
+            )
+            return
+        
+        # Filter out parent items (categories), only delete child rows
+        child_items = [item for item in selected if item.childCount() == 0]
+        
+        if not child_items:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Keine Zeilen ausgewählt",
+                "Bitte wählen Sie Datenzeilen (keine Kategorien) zum Löschen aus."
+            )
+            return
+        
+        # Confirm deletion
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Zeilen löschen",
+            f"Möchten Sie {len(child_items)} Zeile(n) wirklich löschen?\n\n"
+            "Diese Aktion kann nicht rückgängig gemacht werden.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No
+        )
+        
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+        
+        # Get current workspace
         idx = self.tab_widget.currentIndex()
         workspace = self.workspaces.get(idx)
-        if workspace:
-            workspace.tree.manage_columns()
+        if not workspace:
+            return
+        
+        # Delete items
+        row_ids_deleted = []
+        for item in child_items:
+            parent = item.parent()
+            if parent:
+                # Get row_id before removing
+                row_id = item.data(0, QtCore.Qt.UserRole)
+                if row_id is not None:
+                    row_ids_deleted.append(row_id)
+                
+                # Remove from tree
+                parent.removeChild(item)
+        
+        # Remove from workspace data
+        if hasattr(workspace, 'df_all') and workspace.df_all is not None:
+            workspace.df_all = workspace.df_all[~workspace.df_all['row_id'].isin(row_ids_deleted)]
+        
+        # Remove from current page df
+        if hasattr(workspace, 'page_dfs') and hasattr(workspace, 'current_page'):
+            df_page = workspace.page_dfs.get(workspace.current_page)
+            if df_page is not None:
+                workspace.page_dfs[workspace.current_page] = df_page[~df_page['row_id'].isin(row_ids_deleted)]
+        
+        # Update UI
+        self.update_status_bar()
+        self._set_status(f"{len(child_items)} Zeile(n) gelöscht")

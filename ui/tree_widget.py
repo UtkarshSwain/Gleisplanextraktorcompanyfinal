@@ -1,20 +1,31 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
 from core.pipelineworker import NO_OCR_CLASSES
-from ui.auditing_window import AuditingWindow
+from typing import List, Dict, Tuple, Optional, Any, TYPE_CHECKING
+import re
+if TYPE_CHECKING:
+    from ui.auditing_window import AuditingWindow
+    from ui.workspace_widget import WorkspaceWidget
+
 from table_editor import (
     TableEditorDelegate, 
     HeaderEditDialog, 
     ColumnManagerDialog, 
-    FindReplaceDialog
+    FindReplaceDialog,
+    AddRowDialog,
+    AddColumnDialog,
+    SortDialog,
+    FilterDialog,
+    StatisticsDialog,
+    BulkEditDialog
 )
 import re
 
 class AuditingTreeWidget(QtWidgets.QTreeWidget):
     
     """Replaces AuditingTableView"""
-    def __init__(self, auditing_window_ref: 'AuditingWindow', *a, **kw):
-        super().__init__(*a, **kw)
-        self.auditing_window_ref = auditing_window_ref
+    def __init__(self, workspace_ref: 'WorkspaceWidget'):
+        super().__init__()
+        self.workspace_ref = workspace_ref
         self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_menu)
         self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
@@ -25,23 +36,69 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
         self._column_visibility = [True, True, True, True]  # 4 columns
         self._original_headers = ["Text/Nummer", "Koordinatentext", "Fahrtrichtung", "Seite"]
         self._display_headers = self._original_headers.copy()
-
+        self.setSortingEnabled(False)  # We'll handle sorting manually
+        
+        # Filter state
+        self._active_filter = None
+        self._filtered_items = set()
+        # Connect selection changed signal
+        self.itemSelectionChanged.connect(self._update_selection_count)
+        
+        # Connect item changed signal for row count updates
+        self.model().rowsInserted.connect(self._update_row_count)
+        self.model().rowsRemoved.connect(self._update_row_count)
+        
     def _show_menu(self, pos: QtCore.QPoint):
             m = QtWidgets.QMenu(self)
-            # Edit menu
+            selected = self.selectedItems()
+            has_selection = len(selected) > 0
+        # EDIT MENU
             edit_menu = m.addMenu("✏️ Bearbeiten")
             
             act_copy = edit_menu.addAction("Kopieren (Ctrl+C)")
+            act_copy.setEnabled(has_selection)
             act_copy.triggered.connect(self.copy_selection)
+            
+            act_cut = edit_menu.addAction("Ausschneiden (Ctrl+X)")
+            act_cut.setEnabled(has_selection)
+            act_cut.triggered.connect(self.cut_selection)
             
             act_paste = edit_menu.addAction("Einfügen (Ctrl+V)")
             act_paste.triggered.connect(self.paste_from_clipboard)
             
             edit_menu.addSeparator()
             
+            act_bulk = edit_menu.addAction("Massenbearbeitung...")
+            act_bulk.setEnabled(has_selection)
+            act_bulk.triggered.connect(self.bulk_edit)
+            
+            edit_menu.addSeparator()
+            
             act_find = edit_menu.addAction("Suchen und Ersetzen... (Ctrl+F)")
             act_find.triggered.connect(self.find_replace)
+            # INSERT MENU
+            insert_menu = m.addMenu("➕ Einfügen")
+        
+            act_add_row = insert_menu.addAction("Zeile hinzufügen...")
+            act_add_row.triggered.connect(self.add_row)
+
+            act_add_col = insert_menu.addAction("Spalte hinzufügen...")
+            act_add_col.triggered.connect(self.add_column)
+            # DELETE MENU
+            delete_menu = m.addMenu("🗑️ Löschen")
             
+            act_del_rows = delete_menu.addAction("Ausgewählte Zeilen löschen")
+            act_del_rows.setEnabled(has_selection)
+            act_del_rows.triggered.connect(self.workspace_ref.on_delete_selected_table_rows)
+            
+            act_del_col = delete_menu.addAction("Spalte löschen...")
+            act_del_col.triggered.connect(self.delete_column)
+            
+            delete_menu.addSeparator()
+            
+            act_clear_cells = delete_menu.addAction("Zelleninhalt löschen")
+            act_clear_cells.setEnabled(has_selection)
+            act_clear_cells.triggered.connect(self.clear_cells)
             # Column menu
             column_menu = m.addMenu("📊 Spalten")
             
@@ -51,13 +108,31 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
             act_manage_columns = column_menu.addAction("Spalten verwalten...")
             act_manage_columns.triggered.connect(self.manage_columns)
             
+            column_menu.addSeparator()
+            
+            act_resize = column_menu.addAction("Spaltenbreite anpassen")
+            act_resize.triggered.connect(self.resize_columns_to_contents)
+            # DATA MENU
+            data_menu = m.addMenu("📈 Daten")
+            
+            act_sort = data_menu.addAction("Sortieren...")
+            act_sort.triggered.connect(self.show_sort_dialog)
+            
+            act_filter = data_menu.addAction("Filter...")
+            act_filter.triggered.connect(self.show_filter_dialog)
+            
+            data_menu.addSeparator()
+            
+            act_stats = data_menu.addAction("Statistik anzeigen")
+            act_stats.triggered.connect(self.show_statistics)
+            
             m.addSeparator()
             # Pop-out/Dock actions
             # --- THIS IS THE FIX ---
-            if self.auditing_window_ref.tree_window is None:
-                m.addAction("Tabelle auskoppeln", self.auditing_window_ref.on_pop_out_tree)
+            if self.workspace_ref.tree_window is None:
+                m.addAction("Tabelle auskoppeln", self.workspace_ref.on_pop_out_tree)
             else:
-                m.addAction("Tabelle andocken", self.auditing_window_ref.on_redock_tree)
+                m.addAction("Tabelle andocken", self.workspace_ref.on_redock_tree)
             # --- END OF FIX ---
             
             m.addSeparator()
@@ -73,22 +148,446 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
                 
                 # ✅ Only columns 0 and 1 can be re-OCR'd (not Fahrtrichtung or Page)
                 if row_id is not None and current_column in [0, 1]:
-                    cls = self.auditing_window_ref.get_class_for_row_id(row_id)
+                    cls = self.workspace_ref.get_class_for_row_id(row_id)
                     
                     # Only show for classes that have OCR
                     if cls and cls not in NO_OCR_CLASSES:
                         act_h = m.addAction("Re-OCR (Horizontal/Cardinal)")
                         act_a = m.addAction("Re-OCR (Angular/Tilted)")
                         
-                        act_h.triggered.connect(lambda: self.auditing_window_ref.on_rerun_ocr(row_id, 'horizontal'))
-                        act_a.triggered.connect(lambda: self.auditing_window_ref.on_rerun_ocr(row_id, 'angular'))
+                        act_h.triggered.connect(lambda: self.workspace_ref.on_rerun_ocr(row_id, 'horizontal'))
+                        act_a.triggered.connect(lambda: self.workspace_ref.on_rerun_ocr(row_id, 'angular'))
                         
                         m.addSeparator()
 
-            act_del = m.addAction("Ausgewählte Zeilen löschen", self.auditing_window_ref.on_delete_selected_table_rows)
+            act_del = m.addAction("Ausgewählte Zeilen löschen", self.workspace_ref.on_delete_selected_table_rows)
             act_del.setEnabled(len(selected) > 0)
             m.exec_(self.mapToGlobal(pos))
-        # ✅ NEW: Table editing methods
+    # ✅ NEW METHODS FOR ADDING/DELETING
+    
+    def add_row(self):
+        """Add new row"""
+        # Get categories
+        categories = []
+        for i in range(self.topLevelItemCount()):
+            categories.append(self.topLevelItem(i).text(0))
+        
+        if not categories:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Keine Kategorien",
+                "Keine Kategorien vorhanden."
+            )
+            return
+        
+        dialog = AddRowDialog(categories, self.columnCount(), self)
+        
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            category, position, data = dialog.get_data()
+            
+            # Find category parent
+            parent = None
+            for i in range(self.topLevelItemCount()):
+                if self.topLevelItem(i).text(0) == category:
+                    parent = self.topLevelItem(i)
+                    break
+            
+            if not parent:
+                return
+            
+            # Create new item
+            new_item = QtWidgets.QTreeWidgetItem()
+            for col, value in enumerate(data):
+                new_item.setText(col, value)
+            
+            new_item.setFlags(new_item.flags() | QtCore.Qt.ItemIsEditable)
+            
+            # Insert at position
+            if position == 'end':
+                parent.addChild(new_item)
+            elif position == 'before':
+                current = self.currentItem()
+                if current and current.parent() == parent:
+                    index = parent.indexOfChild(current)
+                    parent.insertChild(index, new_item)
+                else:
+                    parent.addChild(new_item)
+            else:  # after
+                current = self.currentItem()
+                if current and current.parent() == parent:
+                    index = parent.indexOfChild(current)
+                    parent.insertChild(index + 1, new_item)
+                else:
+                    parent.addChild(new_item)
+            
+            # Expand parent and select new item
+            parent.setExpanded(True)
+            self.setCurrentItem(new_item)
+    
+    def add_column(self):
+        """Add new column"""
+        dialog = AddColumnDialog(self._display_headers, self)
+        
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            name, position, default = dialog.get_data()
+            
+            if not name:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Fehler",
+                    "Bitte geben Sie einen Spaltennamen ein."
+                )
+                return
+            
+            # Determine insert position
+            if position == 'end':
+                col_index = self.columnCount()
+            elif position == 'before':
+                col_index = self.currentColumn()
+            else:  # after
+                col_index = self.currentColumn() + 1
+            
+            # Insert column
+            self.setColumnCount(self.columnCount() + 1)
+            
+            # Shift existing columns if needed
+            if col_index < self.columnCount() - 1:
+                for i in range(self.topLevelItemCount()):
+                    parent = self.topLevelItem(i)
+                    for j in range(parent.childCount()):
+                        item = parent.child(j)
+                        # Shift values
+                        for c in range(self.columnCount() - 1, col_index, -1):
+                            item.setText(c, item.text(c - 1))
+                        item.setText(col_index, default)
+            
+            # Update headers
+            self._display_headers.insert(col_index, name)
+            self._original_headers.insert(col_index, name)
+            self._column_visibility.insert(col_index, True)
+            self.setHeaderLabels(self._display_headers)
+    
+    def delete_column(self):
+        """Delete a column"""
+        if self.columnCount() <= 1:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Fehler",
+                "Mindestens eine Spalte muss vorhanden bleiben."
+            )
+            return
+        
+        # Ask which column
+        col_name, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Spalte löschen",
+            "Wählen Sie die zu löschende Spalte:",
+            self._display_headers,
+            0,
+            False
+        )
+        
+        if not ok:
+            return
+        
+        col_index = self._display_headers.index(col_name)
+        
+        # Confirm
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Spalte löschen",
+            f"Möchten Sie die Spalte '{col_name}' wirklich löschen?\n\n"
+            "Diese Aktion kann nicht rückgängig gemacht werden.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+        )
+        
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+        
+        # Remove column data
+        for i in range(self.topLevelItemCount()):
+            parent = self.topLevelItem(i)
+            for j in range(parent.childCount()):
+                item = parent.child(j)
+                # Shift values left
+                for c in range(col_index, self.columnCount() - 1):
+                    item.setText(c, item.text(c + 1))
+                item.setText(self.columnCount() - 1, "")
+        
+        # Remove column
+        self.setColumnCount(self.columnCount() - 1)
+        
+        # Update headers
+        del self._display_headers[col_index]
+        del self._original_headers[col_index]
+        del self._column_visibility[col_index]
+        self.setHeaderLabels(self._display_headers)
+    
+    def clear_cells(self):
+        """Clear content of selected cells"""
+        selected = self.selectedItems()
+        if not selected:
+            return
+        
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Zelleninhalt löschen",
+            f"Möchten Sie den Inhalt von {len(selected)} Zelle(n) löschen?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+        )
+        
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+        
+        for item in selected:
+            if item.childCount() == 0:  # Only child items
+                for col in range(self.columnCount()):
+                    item.setText(col, "")
+    
+    def cut_selection(self):
+        """Cut selected cells"""
+        self.copy_selection()
+        self.clear_cells()
+    
+    def bulk_edit(self):
+        """Bulk edit selected cells"""
+        selected = self.selectedItems()
+        if not selected:
+            return
+        
+        # Filter child items only
+        child_items = [item for item in selected if item.childCount() == 0]
+        if not child_items:
+            return
+        
+        dialog = BulkEditDialog(len(child_items), self)
+        
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            operation, value = dialog.get_operation()
+            current_col = self.currentColumn()
+            
+            for item in child_items:
+                current_text = item.text(current_col)
+                
+                if operation == 'set':
+                    item.setText(current_col, value)
+                elif operation == 'append':
+                    item.setText(current_col, current_text + value)
+                elif operation == 'prepend':
+                    item.setText(current_col, value + current_text)
+                elif operation == 'clear':
+                    item.setText(current_col, "")
+    
+    def resize_columns_to_contents(self):
+        """Auto-resize all columns"""
+        for i in range(self.columnCount()):
+            self.resizeColumnToContents(i)
+    
+    def show_sort_dialog(self):
+        """Show sort dialog"""
+        dialog = SortDialog(self._display_headers, self)
+        
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            sort_params = dialog.get_sort_params()
+            self.sort_by_columns(sort_params)
+    
+    def sort_by_columns(self, params: List[Tuple[int, bool]]):
+        """Sort tree by multiple columns"""
+        if not params:
+            return
+        
+        # Sort each category separately
+        for i in range(self.topLevelItemCount()):
+            parent = self.topLevelItem(i)
+            
+            # Get all child items
+            items = []
+            for j in range(parent.childCount()):
+                items.append(parent.child(j))
+            
+            # Remove from tree
+            for item in items:
+                parent.removeChild(item)
+            
+            # Sort items
+            def sort_key(item):
+                keys = []
+                for col_idx, ascending in params:
+                    text = item.text(col_idx)
+                    # Try numeric sort
+                    try:
+                        keys.append(float(text))
+                    except ValueError:
+                        keys.append(text.lower())
+                return tuple(keys)
+            
+            items.sort(key=sort_key, reverse=not params[0][1])
+            
+            # Re-add sorted items
+            for item in items:
+                parent.addChild(item)
+    
+    def show_filter_dialog(self):
+        """Show filter dialog"""
+        dialog = FilterDialog(self._display_headers, self)
+        
+        # Connect buttons
+        dialog.btn_apply.clicked.connect(lambda: self._apply_filter(dialog))
+        dialog.btn_clear.clicked.connect(self.clear_filter)
+    
+    def _apply_filter(self, dialog: FilterDialog):
+        """Apply filter"""
+        params = dialog.get_filter_params()
+        if not params:
+            return
+        
+        col_idx, operator, value, case_sensitive, use_regex = params
+        
+        # Prepare pattern
+        if use_regex:
+            try:
+                pattern = re.compile(value, 0 if case_sensitive else re.IGNORECASE)
+            except re.error:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Regex-Fehler",
+                    "Ungültiger regulärer Ausdruck"
+                )
+                return
+        
+        # Filter items
+        self._filtered_items.clear()
+        
+        for i in range(self.topLevelItemCount()):
+            parent = self.topLevelItem(i)
+            
+            for j in range(parent.childCount()):
+                item = parent.child(j)
+                text = item.text(col_idx)
+                
+                # Apply operator
+                match = False
+                
+                if operator == "enthält":
+                    if use_regex:
+                        match = bool(pattern.search(text))
+                    else:
+                        compare_text = text if case_sensitive else text.lower()
+                        compare_value = value if case_sensitive else value.lower()
+                        match = compare_value in compare_text
+                
+                elif operator == "enthält nicht":
+                    if use_regex:
+                        match = not bool(pattern.search(text))
+                    else:
+                        compare_text = text if case_sensitive else text.lower()
+                        compare_value = value if case_sensitive else value.lower()
+                        match = compare_value not in compare_text
+                
+                elif operator == "ist gleich":
+                    compare_text = text if case_sensitive else text.lower()
+                    compare_value = value if case_sensitive else value.lower()
+                    match = compare_text == compare_value
+                
+                elif operator == "ist nicht gleich":
+                    compare_text = text if case_sensitive else text.lower()
+                    compare_value = value if case_sensitive else value.lower()
+                    match = compare_text != compare_value
+                
+                elif operator == "beginnt mit":
+                    compare_text = text if case_sensitive else text.lower()
+                    compare_value = value if case_sensitive else value.lower()
+                    match = compare_text.startswith(compare_value)
+                
+                elif operator == "endet mit":
+                    compare_text = text if case_sensitive else text.lower()
+                    compare_value = value if case_sensitive else value.lower()
+                    match = compare_text.endswith(compare_value)
+                
+                elif operator == "ist leer":
+                    match = not text.strip()
+                
+                elif operator == "ist nicht leer":
+                    match = bool(text.strip())
+                
+                # Hide/show item
+                item.setHidden(not match)
+                
+                if not match:
+                    self._filtered_items.add(id(item))
+        
+        self._active_filter = params
+        dialog.accept()
+    
+    def clear_filter(self):
+        """Clear active filter"""
+        # Show all items
+        for i in range(self.topLevelItemCount()):
+            parent = self.topLevelItem(i)
+            for j in range(parent.childCount()):
+                parent.child(j).setHidden(False)
+        
+        self._filtered_items.clear()
+        self._active_filter = None
+    
+    def show_statistics(self):
+        """Show table statistics"""
+        stats = self._calculate_statistics()
+        
+        dialog = StatisticsDialog(stats, self)
+        dialog.exec_()
+    
+    def _calculate_statistics(self) -> Dict[str, Any]:
+        """Calculate table statistics"""
+        stats = {}
+        
+        # Count rows and categories
+        total_rows = 0
+        category_counts = {}
+        
+        for i in range(self.topLevelItemCount()):
+            parent = self.topLevelItem(i)
+            cat_name = parent.text(0)
+            count = parent.childCount()
+            
+            category_counts[cat_name] = count
+            total_rows += count
+        
+        stats['total_rows'] = total_rows
+        stats['total_categories'] = self.topLevelItemCount()
+        stats['total_columns'] = self.columnCount()
+        stats['category_counts'] = category_counts
+        
+        # Column statistics
+        column_stats = {}
+        
+        for col in range(self.columnCount()):
+            col_name = self._display_headers[col]
+            filled = 0
+            empty = 0
+            unique_values = set()
+            
+            for i in range(self.topLevelItemCount()):
+                parent = self.topLevelItem(i)
+                for j in range(parent.childCount()):
+                    item = parent.child(j)
+                    text = item.text(col)
+                    
+                    if text.strip():
+                        filled += 1
+                        unique_values.add(text)
+                    else:
+                        empty += 1
+            
+            column_stats[col_name] = {
+                'filled': filled,
+                'empty': empty,
+                'unique': len(unique_values)
+            }
+        
+        stats['column_stats'] = column_stats
+        
+        return stats
     
     def edit_headers(self):
         """Show header edit dialog"""
@@ -133,40 +632,91 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
         
         dialog.exec_()
     
-    def _find_next(self, dialog: FindReplaceDialog):
+    def _find_next(self, dialog: 'FindReplaceDialog'):
         """Find next occurrence"""
         search_text = dialog.find_input.text()
         if not search_text:
             return
         
         case_sensitive = dialog.case_sensitive.isChecked()
+        whole_word = dialog.whole_word.isChecked()
         use_regex = dialog.regex_mode.isChecked()
-        all_columns = dialog.all_columns.isChecked()
         
-        # Get current selection
-        current_item = self.currentItem()
-        current_col = self.currentColumn()
-        
-        # Start search from current position
-        start_item = current_item if current_item else self.topLevelItem(0)
-        start_col = current_col + 1 if current_item else 0
-        
-        # Search
-        found = self._search_from(
-            start_item, start_col, search_text,
-            case_sensitive, use_regex, all_columns
+        # Get current position
+        current = self.currentItem()        
+        # Start search from next item
+        iterator = QtWidgets.QTreeWidgetItemIterator(
+            self,
+            QtWidgets.QTreeWidgetItemIterator.NoChildren  # Only child items
         )
         
-        if found:
-            item, col = found
-            self.setCurrentItem(item)
-            self.scrollToItem(item)
-            self.setCurrentColumn(col)
-        else:
+        # Skip to current position
+        if current:
+            while iterator.value() and iterator.value() != current:
+                iterator += 1
+            iterator += 1  # Move to next
+        
+        # Search forward
+        while iterator.value():
+            item = iterator.value()
+            
+            # Search all columns
+            for col in range(self.columnCount()):
+                text = item.text(col)
+                
+                if self._matches(text, search_text, case_sensitive, whole_word, use_regex):
+                    # Found matchk
+                    self.setCurrentItem(item, col)  # ✅ FIXED: Use setCurrentItem()
+                    self.scrollToItem(item)
+                    
+                    # Highlight the match
+                    item.setSelected(True)
+                    
+                    # Update status
+                    if hasattr(self, 'parent_workspace') and self.parent_workspace:
+                        if hasattr(self.parent_workspace, 'parent_auditing'):
+                            self.parent_workspace.parent_auditing._set_status(
+                                f"Gefunden: '{search_text}' in Zeile {self.indexOfTopLevelItem(item.parent()) + 1}"
+                            )
+                    return
+            
+            iterator += 1
+        
+        # Not found - wrap around?
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Suche",
+            f"'{search_text}' nicht gefunden.\n\nVon Anfang an suchen?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+        )
+        
+        if reply == QtWidgets.QMessageBox.Yes:
+            # Reset iterator to beginning
+            iterator = QtWidgets.QTreeWidgetItemIterator(
+                self,
+                QtWidgets.QTreeWidgetItemIterator.NoChildren
+            )
+            
+            # Search from beginning
+            while iterator.value():
+                item = iterator.value()
+                
+                for col in range(self.columnCount()):
+                    text = item.text(col)
+                    
+                    if self._matches(text, search_text, case_sensitive, whole_word, use_regex):
+                        self.setCurrentItem(item, col)  # ✅ FIXED: Use setCurrentItem()
+                        self.scrollToItem(item)
+                        item.setSelected(True)
+                        return
+                
+                iterator += 1
+            
+            # Still not found
             QtWidgets.QMessageBox.information(
                 self,
                 "Suche",
-                f"'{search_text}' nicht gefunden."
+                f"'{search_text}' wurde nicht gefunden."
             )
     
     def _search_from(self, start_item, start_col, search_text, 
@@ -428,3 +978,89 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
                     break
                 
                 item.setText(col, value)
+
+    def _matches(self, text: str, search_text: str, case_sensitive: bool, 
+                whole_word: bool, use_regex: bool) -> bool:
+        """
+        Check if text matches search criteria
+        
+        Args:
+            text: Text to search in
+            search_text: Text to search for
+            case_sensitive: Whether to match case
+            whole_word: Whether to match whole words only
+            use_regex: Whether to use regex matching
+        
+        Returns:
+            True if text matches search criteria
+        """
+        if not text or not search_text:
+            return False
+        
+        try:
+            if use_regex:
+                # Regex matching
+                flags = 0 if case_sensitive else re.IGNORECASE
+                pattern = re.compile(search_text, flags)
+                return pattern.search(text) is not None
+            
+            elif whole_word:
+                # Whole word matching
+                if case_sensitive:
+                    # Case-sensitive whole word
+                    pattern = r'\b' + re.escape(search_text) + r'\b'
+                    return re.search(pattern, text) is not None
+                else:
+                    # Case-insensitive whole word
+                    pattern = r'\b' + re.escape(search_text) + r'\b'
+                    return re.search(pattern, text, re.IGNORECASE) is not None
+            
+            else:
+                # Simple substring matching
+                if case_sensitive:
+                    return search_text in text
+                else:
+                    return search_text.lower() in text.lower()
+        
+        except re.error as e:
+            # Invalid regex pattern
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Ungültiger regulärer Ausdruck",
+                f"Fehler im regulären Ausdruck:\n{str(e)}"
+            )
+            return False
+        
+    def _update_selection_count(self):
+        """Update selection count in status bar"""
+        selected_count = len(self.selectedItems())
+        
+        if hasattr(self, 'parent_workspace') and self.parent_workspace:
+            if hasattr(self.parent_workspace, 'parent_auditing'):
+                # Update the selection label
+                auditing = self.parent_workspace.parent_auditing
+                if hasattr(auditing, 'selection_label'):
+                    auditing.selection_label.setText(f"Auswahl: {selected_count}")
+
+    def _update_row_count(self):
+        """Update total row count in status bar"""
+        total_rows = self._count_data_rows()
+        
+        if hasattr(self, 'parent_workspace') and self.parent_workspace:
+            if hasattr(self.parent_workspace, 'parent_auditing'):
+                # Update the row count label
+                auditing = self.parent_workspace.parent_auditing
+                if hasattr(auditing, 'row_count_label'):
+                    auditing.row_count_label.setText(f"Zeilen: {total_rows}")
+
+    def _count_data_rows(self) -> int:
+        """Count total number of data rows (excluding category headers)"""
+        count = 0
+        
+        # Iterate through all top-level items (categories)
+        for i in range(self.topLevelItemCount()):
+            category_item = self.topLevelItem(i)
+            # Count children (actual data rows)
+            count += category_item.childCount()
+        
+        return count

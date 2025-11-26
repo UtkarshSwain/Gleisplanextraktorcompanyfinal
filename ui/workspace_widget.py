@@ -18,7 +18,9 @@ from config import ZOOM_SIZE
 from utils.helpers import _is_deleted
 from core.image_processing import qpolygonf_from_pts
 from PIL import Image, ImageFile
-from ui.auditing_window import AuditingWindow
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ui.auditing_window import AuditingWindow
 
 # ============================================================================
 # WORKSPACE WIDGET - Single PDF workspace
@@ -68,6 +70,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self.undo_stack: List[Dict] = []
         self.redo_stack: List[Dict] = []
         self.max_undo_steps = 50
+        self._is_undoing_or_redoing = False
+        self._is_loading_data = False 
+
         self.graphics_window: Optional[GraphicsWindow] = None
         
         # Placeholder widgets
@@ -79,7 +84,17 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self.track_overlay_items = []
         
         self._build_ui()
-    
+
+    def _set_status(self, message: str):
+        """Safely update status bar"""
+        try:
+            if self.parent_auditing and hasattr(self.parent_auditing, 'statusBar'):
+                self.parent_auditing.statusBar().showMessage(message)
+            else:
+                print(f"[STATUS] {message}")
+        except Exception as e:
+            print(f"[STATUS ERROR] {message} ({e})")
+
     def _build_ui(self):
         from ui.tree_widget import AuditingTreeWidget
 
@@ -89,7 +104,18 @@ class WorkspaceWidget(QtWidgets.QWidget):
         
         # Top controls
         top_layout = QtWidgets.QHBoxLayout()
+        # ADD UNDO/REDO BUTTONS
+        self.btn_undo = QtWidgets.QPushButton("↶ Rückgängig")
+        self.btn_undo.setToolTip("Letzte Aktion rückgängig machen (Strg+Z)")
+        self.btn_undo.clicked.connect(self.undo)
+        top_layout.addWidget(self.btn_undo)
         
+        self.btn_redo = QtWidgets.QPushButton("↷ Wiederholen")
+        self.btn_redo.setToolTip("Rückgängig gemachte Aktion wiederholen (Strg+Y)")
+        self.btn_redo.clicked.connect(self.redo)
+        top_layout.addWidget(self.btn_redo)
+        
+        top_layout.addWidget(QtWidgets.QLabel("|"))  # Separator
         # Page controls
         top_layout.addWidget(QtWidgets.QLabel("Seite:"))
         self.page_spin = QtWidgets.QSpinBox()
@@ -222,6 +248,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self.view.rect_drawn.connect(self.on_rect_drawn)
         self.view.rotated_rect_drawn.connect(self.on_rotated_rect_drawn)
         self.scene.selectionChanged.connect(self.on_scene_selection)
+        self._setup_undo_redo_shortcuts()
 
     def _setup_table_shortcuts(self):
         """Setup keyboard shortcuts for table editing"""
@@ -403,6 +430,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         if not row_ids_to_delete:
             self.tree.blockSignals(False)
             return
+        self._save_state(f"{len(row_ids_to_delete)} Zeilen gelöscht", row_ids_to_delete)
 
         try:
             # 1. Remove from DataFrames
@@ -436,8 +464,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     parent.removeChild(item)
             
             # Use the parent's status bar
-            self.parent_auditing.statusBar().showMessage(f"{len(row_ids_to_delete)} Zeilen gelöscht.")
-
+            self._set_status(f"{len(row_ids_to_delete)} Zeilen gelöscht.")
+            self.tree._update_row_count()
+            self.tree._update_selection_count()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Fehler beim Löschen", str(e))
         finally:
@@ -447,106 +476,124 @@ class WorkspaceWidget(QtWidgets.QWidget):
     def load_data(self, df_all: pd.DataFrame, page_base_pix: Dict, 
                 page_dfs: Dict, page_bgr_arrays: Dict, track_skeleton: Optional[np.ndarray] = None):
         """Load data into workspace - with database check"""
-        incoming_track_skeleton = track_skeleton
+        
+        # ✅ SET FLAG TO PREVENT STATE SAVING DURING LOAD
+        self._is_loading_data = True
+        
+        try:
+            incoming_track_skeleton = track_skeleton
 
-        # Check if there's saved data in database
-        from database3 import get_workspace_data
-        saved_result = get_workspace_data(self.layout_name)
-        
-        if saved_result:
-            saved_data, saved_track_skeleton = saved_result
+            # Check if there's saved data in database
+            from database3 import get_workspace_data
+            saved_result = get_workspace_data(self.layout_name)
             
-            reply = QtWidgets.QMessageBox.question(
-                self,
-                "Gespeicherte Daten gefunden",
-                f"Es gibt gespeicherte Daten für '{os.path.basename(self.layout_name)}'.\n\n"
-                "Möchten Sie die gespeicherten Daten laden statt der neuen Verarbeitung?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
-            )
+            if saved_result:
+                saved_data, saved_track_skeleton = saved_result
+                
+                reply = QtWidgets.QMessageBox.question(
+                    self,
+                    "Gespeicherte Daten gefunden",
+                    f"Es gibt gespeicherte Daten für '{os.path.basename(self.layout_name)}'.\n\n"
+                    "Möchten Sie die gespeicherten Daten laden statt der neuen Verarbeitung?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+                )
+                
+                if reply == QtWidgets.QMessageBox.Yes:
+                    # Load from database
+                    df_all = pd.DataFrame(saved_data)
+                    
+                    # Use saved track skeleton instead of new one
+                    track_skeleton = saved_track_skeleton
+                    
+                    # Rebuild page_dfs from df_all
+                    page_dfs = {}
+                    for page_num in df_all['page'].unique():
+                        page_dfs[int(page_num)] = df_all[df_all['page'] == page_num].copy()
             
-            if reply == QtWidgets.QMessageBox.Yes:
-                # Load from database
-                df_all = pd.DataFrame(saved_data)
-                
-                # Use saved track skeleton instead of new one
-                track_skeleton = saved_track_skeleton
-                
-                # Rebuild page_dfs from df_all
-                page_dfs = {}
-                for page_num in df_all['page'].unique():
-                    page_dfs[int(page_num)] = df_all[df_all['page'] == page_num].copy()
-        """Load data into workspace"""
-        self.df_all = df_all
-        self.page_base_pix = page_base_pix
-        self.page_dfs = page_dfs
-        self.page_bgr_arrays = page_bgr_arrays
-        
-        # Fill class selector
-        self.class_selector_combo.clear()
-        self.class_selector_combo.addItem("Alle Klassen")
-        all_classes = sorted(self.df_all['cls'].unique().tolist())
-        for cls in all_classes:
-            self.class_selector_combo.addItem(cls)
-            self._class_confidence_thresholds.setdefault(cls, 0.0)
-        self._class_confidence_thresholds.setdefault('__all__', 0.0)
-        self.class_selector_combo.setCurrentText("Alle Klassen")
-        self.on_class_selector_changed("Alle Klassen")
-        
-        # Build row specs per page
-        self.all_page_row_specs.clear()
-        for pidx, df_page in self.page_dfs.items():
-            specs = {}
-            for _, row in df_page.iterrows():
-                label = f"{row['cls']} {row.get('conf','')}"
-                if pd.notna(row.get('anchor_text')) and row['anchor_text']:
-                    label += f" | {row['anchor_text']}"
-                if pd.notna(row.get('coord_text')) and row['coord_text']:
-                    label += f" | {row['coord_text']}"
-                if 'angle' in df_page.columns and pd.notna(row.get('angle')):
-                    try:
-                        label += f" θ={float(row['angle']):.1f}°"
-                    except Exception:
-                        pass
-                
-                spec = {"label": label, "is_poly": False}
-                poly = row.get("poly", None)
-                
-                if isinstance(poly, (list, tuple)) and len(poly) == 4:
-                    try:
-                        pts = np.array(poly, dtype=np.float32).reshape(4, 2)
-                        spec.update({"is_poly": True, "pts": pts})
-                        specs[int(row['row_id'])] = spec
+            # ✅ CLEAR UNDO/REDO STACKS ON NEW LOAD
+            self.undo_stack.clear()
+            self.redo_stack.clear()
+            
+            # Load data into workspace
+            self.df_all = df_all
+            self.page_base_pix = page_base_pix
+            self.page_dfs = page_dfs
+            self.page_bgr_arrays = page_bgr_arrays
+            
+            # Fill class selector
+            self.class_selector_combo.clear()
+            self.class_selector_combo.addItem("Alle Klassen")
+            all_classes = sorted(self.df_all['cls'].unique().tolist())
+            for cls in all_classes:
+                self.class_selector_combo.addItem(cls)
+                self._class_confidence_thresholds.setdefault(cls, 0.0)
+            self._class_confidence_thresholds.setdefault('__all__', 0.0)
+            self.class_selector_combo.setCurrentText("Alle Klassen")
+            self.on_class_selector_changed("Alle Klassen")
+            
+            # Build row specs per page
+            self.all_page_row_specs.clear()
+            for pidx, df_page in self.page_dfs.items():
+                specs = {}
+                for _, row in df_page.iterrows():
+                    label = f"{row['cls']} {row.get('conf','')}"
+                    if pd.notna(row.get('anchor_text')) and row['anchor_text']:
+                        label += f" | {row['anchor_text']}"
+                    if pd.notna(row.get('coord_text')) and row['coord_text']:
+                        label += f" | {row['coord_text']}"
+                    if 'angle' in df_page.columns and pd.notna(row.get('angle')):
+                        try:
+                            label += f" θ={float(row['angle']):.1f}°"
+                        except Exception:
+                            pass
+                    
+                    spec = {"label": label, "is_poly": False}
+                    poly = row.get("poly", None)
+                    
+                    if isinstance(poly, (list, tuple)) and len(poly) == 4:
+                        try:
+                            pts = np.array(poly, dtype=np.float32).reshape(4, 2)
+                            spec.update({"is_poly": True, "pts": pts})
+                            specs[int(row['row_id'])] = spec
+                            continue
+                        except Exception:
+                            pass
+                    
+                    if row['cls'] == 'coordinate':
+                        x1, y1, x2, y2 = row['cx1'], row['cy1'], row['cx2'], row['cy2']
+                    else:
+                        x1, y1, x2, y2 = row['ax1'], row['ay1'], row['ax2'], row['ay2']
+                    
+                    if pd.isna(x1) or x1 is None:
                         continue
-                    except Exception:
-                        pass
+                    
+                    w = int(x2 - x1)
+                    h = int(y2 - y1)
+                    spec.update({"rect": (int(x1), int(y1), w, h)})
+                    specs[int(row['row_id'])] = spec
                 
-                if row['cls'] == 'coordinate':
-                    x1, y1, x2, y2 = row['cx1'], row['cy1'], row['cx2'], row['cy2']
-                else:
-                    x1, y1, x2, y2 = row['ax1'], row['ay1'], row['ax2'], row['ay2']
-                
-                if pd.isna(x1) or x1 is None:
-                    continue
-                
-                w = int(x2 - x1)
-                h = int(y2 - y1)
-                spec.update({"rect": (int(x1), int(y1), w, h)})
-                specs[int(row['row_id'])] = spec
+                self.all_page_row_specs[pidx] = specs
             
-            self.all_page_row_specs[pidx] = specs
+            max_page = max(self.page_dfs.keys()) if self.page_dfs else 1
+            self.page_spin.setMaximum(max_page)
+            self.page_spin.setValue(1)
+            
+            # Store track skeleton
+            self.track_skeleton = track_skeleton
+            if track_skeleton is not None:
+                self.btn_toggle_tracks.setEnabled(True)
+                self._set_status(f"✓ Track detection verfügbar: {self.layout_name}")
+            
+            self.on_page_changed(1)
+            
+            # ✅ UPDATE UNDO/REDO BUTTON STATES
+            if hasattr(self, '_update_undo_redo_buttons'):
+                self._update_undo_redo_buttons()
         
-        max_page = max(self.page_dfs.keys()) if self.page_dfs else 1
-        self.page_spin.setMaximum(max_page)
-        self.page_spin.setValue(1)
-        
-        # Store track skeleton
-        self.track_skeleton = track_skeleton
-        if track_skeleton is not None:
-            self.btn_toggle_tracks.setEnabled(True)
-            self.parent_auditing.statusBar().showMessage(f"✓ Track detection verfügbar: {self.layout_name}")
-        
-        self.on_page_changed(1)
-        
+        finally:
+            # ✅ ALWAYS CLEAR FLAG AFTER LOADING
+            self._is_loading_data = False
+
     def on_toggle_track_overlay(self, checked: bool):
         """Toggle track centerline overlay (7px thick FLASHY RED line)"""
         # Clear existing overlay
@@ -556,7 +603,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self.track_overlay_items.clear()
         
         if not checked or self.track_skeleton is None:
-            self.parent_auditing.statusBar().showMessage(f"Bereit: {os.path.basename(self.layout_name)}")
+            self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
             return
         
         try:
@@ -580,7 +627,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             overlay_item.setOpacity(1.0)  # FULL OPACITY - NO TRANSPARENCY
             self.track_overlay_items.append(overlay_item)
             
-            self.parent_auditing.statusBar().showMessage("🛤️ Gleise sichtbar (7px FLASHY ROT)")
+            self._set_status("🛤️ Gleise sichtbar (7px FLASHY ROT)")
             
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Overlay-Fehler", f"Konnte Gleis-Overlay nicht erstellen:\n{e}")
@@ -733,7 +780,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 self.row_id_to_tree_item[row_id] = child_item
         
         self._apply_all_filters()
-    
+        self.tree._update_row_count()
+        self.tree._update_selection_count()
+
+
     def _apply_all_filters(self):
         """Apply all filters to tree"""
         self.tree.blockSignals(True)
@@ -1105,7 +1155,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
             if row_id is None:
                 self.tree.blockSignals(False)
                 return
-            
+            self._save_state("Zelle bearbeitet", [row_id])
+
             new_text = item.text(column)
             cls = self.get_class_for_row_id(row_id)
             is_coord_class = (cls == 'coordinate')
@@ -1257,7 +1308,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     else: self.btn_manual_ocr_angular.setChecked(False)
                     
                     # --- ADD THIS ---
-                    self.parent_auditing.statusBar().showMessage(f"Bereit: {os.path.basename(self.layout_name)}")
+                    self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
                     # --- END ADD ---
                     return
                 
@@ -1270,7 +1321,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     else: self.btn_manual_ocr_angular.setChecked(False)
                     
                     # --- ADD THIS ---
-                    self.parent_auditing.statusBar().showMessage(f"Bereit: {os.path.basename(self.layout_name)}")
+                    self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
                     # --- END ADD ---
                     return
                 
@@ -1280,7 +1331,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     else: self.btn_manual_ocr_angular.setChecked(False)
                     
                     # --- ADD THIS ---
-                    self.parent_auditing.statusBar().showMessage(f"Bereit: {os.path.basename(self.layout_name)}")
+                    self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
                     # --- END ADD ---
                     return
                 
@@ -1294,18 +1345,18 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                 # --- ADD THIS (logic for different messages) ---
                 if mode == 'angular':
-                    self.parent_auditing.statusBar().showMessage(
+                    self._set_status(
                         "📐 Manuelles OCR (Angular): 1. Zelle auswählen. 2. Klicken Sie Start- & Endpunkt der Text-Basislinie. 3. Klicken Sie ein drittes Mal, um die Höhe festzulegen."
                     )
                 else:
-                    self.parent_auditing.statusBar().showMessage(
+                    self._set_status(
                         "📏 Manuelles OCR (Horizontal): 1. Zelle in Tabelle auswählen. 2. Ziehen Sie ein horizontales Rechteck auf dem Bild."
                     )
                 # --- END ADD ---
 
             else:
                 # --- ADD THIS (for toggling off) ---
-                self.parent_auditing.statusBar().showMessage(f"Bereit: {os.path.basename(self.layout_name)}")
+                self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
                 # --- END ADD ---
 
                 self.is_drawing_mode = False
@@ -1331,6 +1382,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 raise Exception("No target element")
             
             row_id = item_to_update.data(0, QtCore.Qt.UserRole)
+            
             cls = self.get_class_for_row_id(row_id)
             if cls is None:
                 raise Exception("Class not found")
@@ -1383,6 +1435,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
             result = msg.exec_()
             
             if result == QtWidgets.QMessageBox.Yes:
+                row_id = item_to_update.data(0, QtCore.Qt.UserRole)
+        
+                if row_id:
+                    self._save_state("Manuelles OCR", [row_id])
                 item_to_update.setText(col_to_update, new_text)
         
         except Exception as e:
@@ -1513,7 +1569,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
             result = msg.exec_()
             
             if result == QtWidgets.QMessageBox.Yes:
-                item_to_update.setText(col_to_update, new_text)
+                row_id = item_to_update.data(0, QtCore.Qt.UserRole)
+        
+            if row_id:
+                self._save_state("Manuelles OCR", [row_id])
+            item_to_update.setText(col_to_update, new_text)
         
         except Exception as e:
             import traceback
@@ -1531,7 +1591,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             
             if checked:
                 # --- ADD THIS ---
-                self.parent_auditing.statusBar().showMessage(
+                self._set_status(
                     "Verknüpfungsmodus: 1. Klicken Sie auf ein Ankerelement (z.B. Signal). 2. Klicken Sie auf die zugehörige Koordinate."
                 )
                 # --- END ADD ---
@@ -1548,7 +1608,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 self.link_drag_line = None
             else:
                 # --- ADD THIS ---
-                self.parent_auditing.statusBar().showMessage(f"Bereit: {os.path.basename(self.layout_name)}")
+                self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
                 # --- END ADD ---
                 
                 self.view.setCursor(QtCore.Qt.ArrowCursor)
@@ -1644,7 +1704,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
         
         if reply != QtWidgets.QMessageBox.Yes:
             return
-        
+        self._save_state("Koordinate verknüpft", [anchor_row_id])
+
         anchor_idx_list = self.df_all.index[self.df_all['row_id'] == anchor_row_id].tolist()
         if anchor_idx_list:
             idx = anchor_idx_list[0]
@@ -1768,6 +1829,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             import traceback
             traceback.print_exc()
             QtWidgets.QMessageBox.critical(self, "Export-Fehler", str(e))
+
     def _execute_excel_export(self, filename: str, config: dict):
         """Execute the Excel export with given configuration"""
         
@@ -2021,7 +2083,301 @@ class WorkspaceWidget(QtWidgets.QWidget):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Fehler", str(e))
 
-    # In WorkspaceWidget class:
+    def _save_state(self, action_name: str, affected_row_ids: List[int]):
+        """
+        Save current state to undo stack
+        
+        Args:
+            action_name: Description of the action
+            affected_row_ids: List of row IDs that were modified
+        """
+
+        if self._is_undoing_or_redoing:
+            return
+        
+        if self._is_loading_data:
+            return
+        
+        if not affected_row_ids:
+            return        
+        
+        # Get current state of affected rows
+        state = {
+            'action': action_name,
+            'timestamp': pd.Timestamp.now(),
+            'rows': {}
+        }
+        
+        for row_id in affected_row_ids:
+            row_data = self.df_all[self.df_all['row_id'] == row_id]
+            if not row_data.empty:
+                # Store complete row as dict
+                row_dict = row_data.iloc[0].to_dict()
+                
+                # Filter out numpy arrays (convert to lists)
+                filtered_dict = {}
+                for col, value in row_dict.items():
+                    if isinstance(value, np.ndarray):
+                        try:
+                            filtered_dict[col] = value.tolist()
+                        except:
+                            continue
+                    else:
+                        filtered_dict[col] = value
+                
+                state['rows'][row_id] = filtered_dict
+        
+        # Add to undo stack
+        self.undo_stack.append(state)
+        
+        # Limit stack size
+        if len(self.undo_stack) > self.max_undo_steps:
+            self.undo_stack.pop(0)
+        
+        # Clear redo stack (new action invalidates redo history)
+        self.redo_stack.clear()
+        
+        self._set_status(f"💾 {action_name} - Rückgängig: Strg+Z")
+        
+        # Update button states
+        if hasattr(self, '_update_undo_redo_buttons'):
+            self._update_undo_redo_buttons()
+
+
+    def undo(self):
+        """Undo last action"""
+        
+        if not self.undo_stack:
+            self._set_status("⚠️ Nichts rückgängig zu machen")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Rückgängig",
+                "Keine Aktionen zum Rückgängigmachen vorhanden."
+            )
+            return
+        
+        # ✅ SET FLAG TO PREVENT STATE SAVING
+        self._is_undoing_or_redoing = True
+        
+        try:
+            # Pop last state
+            state = self.undo_stack.pop()
+            
+            # Save current state to redo stack BEFORE undoing
+            redo_state = {
+                'action': f"Redo: {state['action']}",
+                'timestamp': pd.Timestamp.now(),
+                'rows': {}
+            }
+            
+            for row_id in state['rows'].keys():
+                row_data = self.df_all[self.df_all['row_id'] == row_id]
+                if not row_data.empty:
+                    row_dict = row_data.iloc[0].to_dict()
+                    
+                    # Filter out numpy arrays
+                    filtered_dict = {}
+                    for col, value in row_dict.items():
+                        if isinstance(value, np.ndarray):
+                            try:
+                                filtered_dict[col] = value.tolist()
+                            except:
+                                continue
+                        else:
+                            filtered_dict[col] = value
+                    
+                    redo_state['rows'][row_id] = filtered_dict
+            
+            self.redo_stack.append(redo_state)
+            
+            # Restore old state
+            for row_id, row_dict in state['rows'].items():
+                # Update df_all
+                mask = self.df_all['row_id'] == row_id
+                if mask.any():
+                    idx = self.df_all[mask].index[0]
+                    
+                    for col, value in row_dict.items():
+                        if col not in self.df_all.columns:
+                            continue
+                        
+                        try:
+                            # Convert lists back to numpy arrays if needed
+                            if col == 'poly' and isinstance(value, list):
+                                value = np.array(value)
+                            
+                            self.df_all.at[idx, col] = value
+                        except Exception as e:
+                            print(f"⚠️ Could not restore column '{col}': {e}")
+                
+                # Update page_dfs
+                page = row_dict.get('page')
+                if page in self.page_dfs:
+                    page_mask = self.page_dfs[page]['row_id'] == row_id
+                    if page_mask.any():
+                        page_idx = self.page_dfs[page][page_mask].index[0]
+                        
+                        for col, value in row_dict.items():
+                            if col not in self.page_dfs[page].columns:
+                                continue
+                            
+                            try:
+                                # Convert lists back to numpy arrays if needed
+                                if col == 'poly' and isinstance(value, list):
+                                    value = np.array(value)
+                                
+                                self.page_dfs[page].at[page_idx, col] = value
+                            except Exception as e:
+                                print(f"⚠️ Could not restore page column '{col}': {e}")
+                
+                # Update tree widget (block signals to prevent triggering _save_state)
+                tree_item = self.row_id_to_tree_item.get(row_id)
+                if tree_item:
+                    self.tree.blockSignals(True)
+                    
+                    cls = row_dict.get('cls')
+                    
+                    if cls == 'coordinate':
+                        tree_item.setText(0, str(row_dict.get('coord_text', '')))
+                    else:
+                        tree_item.setText(0, str(row_dict.get('anchor_text', '')))
+                        tree_item.setText(1, str(row_dict.get('coord_text', '')))
+                        
+                        if cls == 'signal' and pd.notna(row_dict.get('fahrtrichtung')):
+                            tree_item.setText(2, str(row_dict.get('fahrtrichtung', '')))
+                    
+                    self.tree.blockSignals(False)
+            
+            # Rebuild graphics
+            self._rebuild_row_specs_for_current_page()
+            self.on_page_changed(self.current_page)
+            
+            self._set_status(f"↶ Rückgängig: {state['action']} - Wiederholen: Strg+Y")
+            
+            # Update button states
+            self._update_undo_redo_buttons()
+            
+        
+        finally:
+            # ✅ ALWAYS CLEAR FLAG
+            self._is_undoing_or_redoing = False
+
+    def redo(self):
+        """Redo last undone action"""        
+        if not self.redo_stack:
+            self._set_status("⚠️ Nichts wiederherzustellen")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Wiederholen",
+                "Keine Aktionen zum Wiederherstellen vorhanden."
+            )
+            return
+        
+        # ✅ SET FLAG TO PREVENT STATE SAVING
+        self._is_undoing_or_redoing = True
+        
+        try:
+            # Pop from redo stack
+            state = self.redo_stack.pop()            
+            # Save current state to undo stack
+            undo_state = {
+                'action': state['action'].replace('Redo: ', ''),
+                'timestamp': pd.Timestamp.now(),
+                'rows': {}
+            }
+            
+            for row_id in state['rows'].keys():
+                row_data = self.df_all[self.df_all['row_id'] == row_id]
+                if not row_data.empty:
+                    row_dict = row_data.iloc[0].to_dict()
+                    
+                    # Filter out numpy arrays
+                    filtered_dict = {}
+                    for col, value in row_dict.items():
+                        if isinstance(value, np.ndarray):
+                            try:
+                                filtered_dict[col] = value.tolist()
+                            except:
+                                continue
+                        else:
+                            filtered_dict[col] = value
+                    
+                    undo_state['rows'][row_id] = filtered_dict
+            
+            self.undo_stack.append(undo_state)
+            
+            # Restore redo state
+            for row_id, row_dict in state['rows'].items():
+                # Update df_all
+                mask = self.df_all['row_id'] == row_id
+                if mask.any():
+                    idx = self.df_all[mask].index[0]
+                    
+                    for col, value in row_dict.items():
+                        if col not in self.df_all.columns:
+                            continue
+                        
+                        try:
+                            # Convert lists back to numpy arrays if needed
+                            if col == 'poly' and isinstance(value, list):
+                                value = np.array(value)
+                            
+                            self.df_all.at[idx, col] = value
+                        except Exception as e:
+                            print(f"⚠️ Could not restore column '{col}': {e}")
+                
+                # Update page_dfs
+                page = row_dict.get('page')
+                if page in self.page_dfs:
+                    page_mask = self.page_dfs[page]['row_id'] == row_id
+                    if page_mask.any():
+                        page_idx = self.page_dfs[page][page_mask].index[0]
+                        
+                        for col, value in row_dict.items():
+                            if col not in self.page_dfs[page].columns:
+                                continue
+                            
+                            try:
+                                # Convert lists back to numpy arrays if needed
+                                if col == 'poly' and isinstance(value, list):
+                                    value = np.array(value)
+                                
+                                self.page_dfs[page].at[page_idx, col] = value
+                            except Exception as e:
+                                print(f"⚠️ Could not restore page column '{col}': {e}")
+                
+                # Update tree widget (block signals to prevent triggering _save_state)
+                tree_item = self.row_id_to_tree_item.get(row_id)
+                if tree_item:
+                    self.tree.blockSignals(True)
+                    
+                    cls = row_dict.get('cls')
+                    
+                    if cls == 'coordinate':
+                        tree_item.setText(0, str(row_dict.get('coord_text', '')))
+                    else:
+                        tree_item.setText(0, str(row_dict.get('anchor_text', '')))
+                        tree_item.setText(1, str(row_dict.get('coord_text', '')))
+                        
+                        if cls == 'signal' and pd.notna(row_dict.get('fahrtrichtung')):
+                            tree_item.setText(2, str(row_dict.get('fahrtrichtung', '')))
+                    
+                    self.tree.blockSignals(False)
+            
+            # Rebuild graphics
+            self._rebuild_row_specs_for_current_page()
+            self.on_page_changed(self.current_page)
+            
+            self._set_status(f"↷ Wiederhergestellt: {state['action']}")
+            
+            # Update button states
+            self._update_undo_redo_buttons()
+            
+        
+        finally:
+            # ✅ ALWAYS CLEAR FLAG
+            self._is_undoing_or_redoing = False
+
 
     def run_validation(self):
         """Run enhanced validation with auto-correction support"""
@@ -2073,6 +2429,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
     def _apply_corrections(self, validator: 'EnhancedDataValidator', corrections: List['ValidationIssue']):
         """Apply selected corrections to DataFrame AND update linked elements"""
         try:
+            affected_row_ids = [issue.row_id for issue in corrections]
+            self._save_state(f"{len(corrections)} Validierungskorrekturen", affected_row_ids)
             corrections_count = 0
             coordinate_updates = {}
             
@@ -2144,7 +2502,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 # Re-run validation
                 QtCore.QTimer.singleShot(100, self.run_validation)
             else:
-                self.parent_auditing.statusBar().showMessage(
+                self._set_status(
                     f"✏️ {corrections_count} Korrekturen angewendet - Nicht gespeichert!"
                 )
         
@@ -2244,7 +2602,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         specs = {}
         
         for _, row in df_page.iterrows():
-            # Rebuild label with updated data
+            # Rebuild label with updated datak
             label = f"{row['cls']} {row.get('conf','')}"
             if pd.notna(row.get('anchor_text')) and row['anchor_text']:
                 label += f" | {row['anchor_text']}"
@@ -2285,3 +2643,58 @@ class WorkspaceWidget(QtWidgets.QWidget):
         
         # Update the specs dictionary
         self.all_page_row_specs[pidx] = specs
+
+    def _setup_undo_redo_shortcuts(self):
+        """Setup undo/redo keyboard shortcuts"""
+        # Undo: Ctrl+Z
+        self.undo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence.Undo, self)
+        self.undo_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        self.undo_shortcut.activated.connect(self._on_undo_shortcut)
+        
+        # Redo: Ctrl+Y (Windows) and Ctrl+Shift+Z (Mac/Linux)
+        self.redo_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence.Redo, self)
+        self.redo_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        self.redo_shortcut.activated.connect(self._on_redo_shortcut)
+        
+        # Alternative Redo: Ctrl+Shift+Z
+        self.redo_shortcut2 = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Shift+Z"), self)
+        self.redo_shortcut2.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        self.redo_shortcut2.activated.connect(self._on_redo_shortcut)
+        
+        print("✅ Undo/Redo shortcuts initialized")
+
+    def _on_undo_shortcut(self):
+        """Handle undo shortcut activation"""
+        print("🔵 Undo shortcut triggered (Ctrl+Z)")
+        self.undo()
+
+    def _on_redo_shortcut(self):
+        """Handle redo shortcut activation"""
+        print("🔵 Redo shortcut triggered (Ctrl+Y)")
+        self.redo()
+
+    def _update_undo_redo_buttons(self):
+        """Update undo/redo button states"""
+        if hasattr(self, 'btn_undo'):
+            has_undo = len(self.undo_stack) > 0
+            self.btn_undo.setEnabled(has_undo)
+            
+            if has_undo:
+                last_action = self.undo_stack[-1]['action']
+                self.btn_undo.setToolTip(f"Rückgängig: {last_action} (Strg+Z)")
+                self.btn_undo.setText(f"↶ Rückgängig ({len(self.undo_stack)})")
+            else:
+                self.btn_undo.setToolTip("Nichts rückgängig zu machen")
+                self.btn_undo.setText("↶ Rückgängig")
+        
+        if hasattr(self, 'btn_redo'):
+            has_redo = len(self.redo_stack) > 0
+            self.btn_redo.setEnabled(has_redo)
+            
+            if has_redo:
+                last_action = self.redo_stack[-1]['action']
+                self.btn_redo.setToolTip(f"Wiederholen: {last_action} (Strg+Y)")
+                self.btn_redo.setText(f"↷ Wiederholen ({len(self.redo_stack)})")
+            else:
+                self.btn_redo.setToolTip("Nichts wiederherzustellen")
+                self.btn_redo.setText("↷ Wiederholen")
