@@ -156,7 +156,7 @@ CLASS_THRESH = {
     # EXCELLENT PERFORMERS (mAP50 > 0.99) - Lower thresholds for edge cases
     "gm_block": 0.22,            # ↓ Very confident class
     "sverbinder": 0.50,          # ↓ Very confident class
-    "prellblock": 0.22,          # ↓ Very confident class
+    "prellblock": 0.30,          # ↓ Very confident class
     "endeweichen": 0.28,         # ↓ Excellent performer
     "weichengruppeende": 0.32,   # ↓ Very good
     
