@@ -15,6 +15,12 @@ from core.pipelineworker import PipelineWorker
 import time
 import cv2
 from core.image_processing import qpolygonf_from_pts
+
+# ============================================================================
+# IMPORT POPPLER PATH FROM CONFIG
+# ============================================================================
+from config import POPPLER_PATH, TESSERACT_PATH
+
 # -------- Setup & Run (connects to REAL PipelineWorker signals) --------
 class SetupAndRunWindow(QtWidgets.QMainWindow):
     processing_done = QtCore.pyqtSignal(pd.DataFrame, object, object, object, object, object)  # df_all, page_base_pix, page_dfs, page_bgr_arrays, exception    started_processing = QtCore.pyqtSignal()
@@ -861,7 +867,10 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 padding: 2px 0px;
             """)
             self.lbl_resolution_hint.show()
-    # REAL worker wiring (page_ready + done(df_all, overlays))
+    
+    # ============================================================================
+    # REAL WORKER WIRING - WITH POPPLER PATH FIX
+    # ============================================================================
     def on_run(self):
         if not self.pdf_path:
             QtWidgets.QMessageBox.warning(self, "Fehler: Kein Gleisplan", "Bitte einen Gleisplan auswählen (PDF oder Bild).")
@@ -915,9 +924,16 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                         pil_img = pil_img.convert('RGB')
                     pages = [pil_img]
                 else:
-                    # Load PDF pages
+                    # ✅ FIXED: Load PDF with Poppler path
                     from pdf2image import convert_from_path
-                    pages = convert_from_path(self.pdf_path, dpi=dpi)
+                    
+                    self.on_status(f"Verwende Poppler: {POPPLER_PATH}")
+                    
+                    pages = convert_from_path(
+                        self.pdf_path,
+                        dpi=dpi,
+                        poppler_path=POPPLER_PATH  # ← Pass Poppler path explicitly
+                    )
                 
                 self._page_base_pix.clear()
                 self._page_dfs.clear()
@@ -1524,7 +1540,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         if dialog.exec_() == QtWidgets.QDialog.Accepted:
             # Apply settings
             self.ocr_engine = ocr_combo.currentText()
-            self.combo_ocr.setCurrentText(self.ocr_engine)
             
             # Store other settings (you can add instance variables for these)
             self.yolo_conf_threshold = conf_spin.value()
@@ -1929,19 +1944,19 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             if file_path.lower().endswith('.pdf'):
                 # For PDF, load the first page
                 try:
-                    import fitz
-                    doc = fitz.open(file_path)
-                    page = doc[0]
-                    pix = page.get_pixmap(dpi=500)  # Match main pipeline DPI
-                    import numpy as np
-                    img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-                    if pix.n == 4:  # RGBA
-                        current_page_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
-                    else:  # RGB
-                        current_page_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-                    doc.close()
+                    from pdf2image import convert_from_path
+                    
+                    pages = convert_from_path(
+                        file_path,
+                        dpi=500,
+                        poppler_path=POPPLER_PATH  # ← Use Poppler path
+                    )
+                    
+                    if pages:
+                        pil_img = pages[0]
+                        current_page_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
                 except Exception as e:
-                    QtWidgets.QMessageBox.warning(self, "Fehler", f"Datei konnte nicht geladen werden:\n{e}")
+                    QtWidgets.QMessageBox.warning(self, "Fehler", f"PDF konnte nicht geladen werden:\n{e}")
                     return
             else:
                 current_page_bgr = cv2.imread(file_path)
