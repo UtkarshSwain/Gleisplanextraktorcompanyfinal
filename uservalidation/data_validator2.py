@@ -475,17 +475,42 @@ class EnhancedDataValidator:
         return issues
     
     def check_fahrtrichtung_validity(self) -> List[ValidationIssue]:
-        """Check Fahrtrichtung values"""
+        """Check Fahrtrichtung values - both invalid AND missing for non-V-signals"""
         issues = []
         signals = self.df[self.df['cls'] == 'signal']
-        
+
         for _, row in signals.iterrows():
             fahrt = row.get('fahrtrichtung')
-            
-            if pd.notna(fahrt) and fahrt not in ['A', 'B', '', None]:
-                # Try to fix
+            anchor_text = row.get('anchor_text', '') or ''
+
+            # ✅ NEW: Check for MISSING Fahrtrichtung on non-V-signals
+            # V-signals (Vorsignale) don't require Fahrtrichtung
+            is_v_signal = anchor_text.upper().startswith('V')
+
+            if not is_v_signal and (pd.isna(fahrt) or fahrt == '' or fahrt is None):
+                issues.append(ValidationIssue(
+                    row_id=row['row_id'],
+                    severity='warning',
+                    category='missing_data',
+                    field='fahrtrichtung',
+                    message=f"Signal '{anchor_text}': Fehlende Fahrtrichtung",
+                    current_value=None,
+                    suggested_value=None,
+                    auto_correctable=False,
+                    confidence=0.0,
+                    context={
+                        'allowed_values': ['A', 'B'],
+                        'position': (float(row['xc']), float(row['yc'])) if pd.notna(row.get('xc')) else None,
+                        'can_jump': True,
+                        'suggested_action': 'manual_edit',
+                        'alternative_actions': ['review'],
+                        'action_description': 'Signal benötigt eine Fahrtrichtung (A oder B). Bitte manuell eintragen.',
+                    }
+                ))
+            elif pd.notna(fahrt) and fahrt not in ['A', 'B', '', None]:
+                # Check for invalid values (existing logic)
                 fahrt_upper = str(fahrt).upper().strip()
-                
+
                 if fahrt_upper in ['A', 'B']:
                     suggested = fahrt_upper
                     auto_correctable = True
@@ -494,7 +519,7 @@ class EnhancedDataValidator:
                     suggested = None
                     auto_correctable = False
                     confidence = 0.0
-                
+
                 issues.append(ValidationIssue(
                     row_id=row['row_id'],
                     severity='error',
@@ -515,7 +540,7 @@ class EnhancedDataValidator:
                         'action_description': 'Fahrtrichtung muss A oder B sein. Bearbeiten Sie den Wert in der Tabelle.',
                     }
                 ))
-        
+
         return issues
     
     def check_signal_duplicates(self) -> List[ValidationIssue]:
