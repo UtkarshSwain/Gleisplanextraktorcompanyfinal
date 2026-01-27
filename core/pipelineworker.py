@@ -1,0 +1,1399 @@
+from PyQt5 import QtCore, QtGui, QtWidgets
+import pandas as pd
+import time
+import os
+from PIL import Image, ImageFile
+import cv2
+import re
+from config import POPPLER_PATH, DEBUG_ANGLE_ROUTING, MAX_OCR_WORKERS, CLASS_THRESH, CLASSES, LINK_RULES, ALIASES, DPI, TILE_SIZE
+from pdf2image import convert_from_path, pdfinfo_from_path
+from core.yolo_detection import run_yolo_on_page, run_combined_detection, box_color, pil_to_bgr, tile_image, OVERLAP_PCT, color_masks
+from ultralytics import YOLO
+from collections import Counter
+from core.ocr_engine import ocr_coordinate_unified, _clean_coordinate_overlap, _fix_coordinate_brackets
+from core.linking import parse_coord
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from core.ocr_engine import ocr_anchor_name, ocr_best_angle, ocr_text, ocr_custom_symbol_text
+from core.image_processing import parse_weichen_block
+from core.linking import detect_fahrtrichtung, detect_haltepunkt_signal_group, link_haltetafel_to_gks, link_anchor_to_coord, merge_duplicate_signals, link_isolierstoss_fallback
+import numpy as np
+import gc
+from config import set_classes_from_model, canon_name
+import uuid  # Keep for backward compatibility
+from utils.uuid_utils import generate_deterministic_uuid, extract_base_layout_name
+import logging
+
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# WORKER THREAD (with weighted progress + unified coordinate OCR)
+# ============================================================================
+
+NO_OCR_CLASSES = ["isolierstoß", "haltepunkt", "sverbinder", "weichenende", "weichengruppeende", "haltetafel"]
+FIXED_TEXT_CLASSES = {"gm_block": "GM","prellblock": "PB"}
+
+class PipelineWorker(QtCore.QThread):
+    progress = QtCore.pyqtSignal(int)  # 0..100
+    status = QtCore.pyqtSignal(str)    # log lines
+    page_processed = QtCore.pyqtSignal(int, object, pd.DataFrame)
+    done = QtCore.pyqtSignal(pd.DataFrame, object, object, object) # df, page_dfs, track_skeleton, exception
+    track_detection_progress = QtCore.pyqtSignal(str)
+
+    # Supported image formats (loaded directly without conversion)
+    IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
+
+    def __init__(self, file_path: str, model_path: str, ocr_engine: str, parent=None, run_analysis=True, detect_tracks=False):
+        super().__init__(parent)
+        self.file_path = file_path  # Can be PDF or image file
+        self.pdf_path = file_path   # Keep for backward compatibility
+        self.model_path = model_path
+        self.ocr_engine = ocr_engine
+        self._is_interrupted = False
+        self.run_analysis = run_analysis
+        self.detect_tracks = detect_tracks
+
+        # Determine if input is an image file
+        self._is_image_file = file_path.lower().endswith(self.IMAGE_EXTENSIONS)
+        
+    def requestInterruption(self) -> None:
+        self._is_interrupted = True
+        super().requestInterruption()
+
+    def run(self):
+        try:
+            # Extract base layout name for deterministic UUIDs
+            base_layout_name = extract_base_layout_name(self.pdf_path)
+            print(f"\n🔑 Base layout name for UUID generation: '{base_layout_name}'")
+
+            # Helper function to generate deterministic UUID
+            def make_uuid(element_dict):
+                """Generate deterministic UUID for an element"""
+                return generate_deterministic_uuid(element_dict, base_layout_name)
+            
+            # --- helper to emit weighted progress ---
+            def emit_progress(pages_done: int, sub: float):
+                if n_pages > 0:
+                    per_page = 0.95 / n_pages
+                    pct = 0.05 + pages_done * per_page + sub * per_page
+                else:
+                    pct = 1.0
+                self.progress.emit(int(round(100 * max(0.0, min(1.0, pct)))))
+
+            # Define defaults
+            model = None
+            n_pages = 0
+            all_rows = []
+            page_bgr_arrays = {}
+            page_dfs = {}
+            track_skeleton = None  # ✅ Define at top level
+
+            # 1. ALWAYS get page count
+            if self._is_image_file:
+                # Image files are single-page
+                n_pages = 1
+                self.status.emit(f"[image] Bilddatei erkannt: {os.path.basename(self.file_path)}")
+            else:
+                # PDF: get page count
+                info = pdfinfo_from_path(self.pdf_path, poppler_path=POPPLER_PATH)
+                n_pages = int(info["Pages"])
+                self.status.emit(f"[pdf] {n_pages} page(s) total")
+
+            # 2. CONDITIONALLY load model
+            if self.run_analysis:
+                # -------- Model load (5%) --------
+                t0 = time.perf_counter()
+                msg = f"[init] Loading model: {self.model_path}"
+                self.status.emit(msg); print(msg)
+                model = YOLO(self.model_path)
+                self.status.emit(f"[init] Model loaded in {time.perf_counter() - t0:.2f}s")
+                self.progress.emit(5)
+                set_classes_from_model(model)
+                
+                # 🔍 DIAGNOSTIC: Verify class order
+                print(f"\n{'='*70}")
+                print(f"🔍 CLASS ORDER VERIFICATION")
+                print(f"{'='*70}")
+
+                critical_classes = {
+                    9: 'prellblock',
+                    10: 'haltetafel',
+                    11: 'endeweichen',
+                }
+
+                all_correct = True
+                for idx, expected in critical_classes.items():
+                    actual = CLASSES[idx] if idx < len(CLASSES) else '(missing)'
+                    status = '✅' if actual == expected else '❌'
+                    print(f"   [{idx:2d}] {status} Expected: '{expected:15s}' | Got: '{actual}'")
+                    if actual != expected:
+                        all_correct = False
+
+                if all_correct:
+                    print(f"\n✅ Class order is CORRECT!")
+                else:
+                    print(f"\n❌ Class order is WRONG! Check your config.py")
+
+                print(f"\nAliasing test:")
+                print(f"   canon_name('endeweichen') → '{canon_name('endeweichen')}'  (should be 'weichenende')")
+                print(f"   canon_name('prellblock')  → '{canon_name('prellblock')}'   (should be 'prellblock')")
+                print(f"   canon_name('haltetafel')  → '{canon_name('haltetafel')}'   (should be 'haltetafel')")
+
+                print(f"{'='*70}\n")
+                self.status.emit(f"[init] Model classes: {CLASSES}")
+
+                ALIAS_REV = {}
+                for variant, canonical in ALIASES.items():
+                    ALIAS_REV.setdefault(canonical, set()).add(variant)
+
+                def _class_present(canonical: str) -> bool:
+                    if canonical in CLASSES:
+                        return True
+                    for variant in ALIAS_REV.get(canonical, ()):
+                        if variant in CLASSES:
+                            return True
+                    return False
+
+                missing_thresh = [k for k in CLASS_THRESH if not _class_present(k)]
+                if missing_thresh:
+                    self.status.emit(f"[warn] CLASS_THRESH has unknown classes: {missing_thresh}")
+
+                missing_rules = [k for k in LINK_RULES if not _class_present(k)]
+                if missing_rules:
+                    self.status.emit(f"[warn] LINK_RULES has unknown classes: {missing_rules}")
+            
+            else:
+                self.status.emit("[init] Schnell-Laden: Überspringe Modell-Laden.")
+                self.progress.emit(5)
+
+            # per-page subweights sum to 1.0
+            W = dict(raster=0.15, prep=0.05, det=0.35, ocr_c=0.20, ocr_a=0.15, link=0.10)
+
+            for pidx in range(1, n_pages + 1):
+                if self._is_interrupted:
+                    break
+                
+                # --- RASTERIZING / IMAGE LOADING (ALWAYS RUNS) ---
+                emit_progress(pidx - 1, 0.0)
+                t_load = time.perf_counter()
+
+                if self._is_image_file:
+                    # Load image directly with PIL (no conversion needed)
+                    self.status.emit(f"[page {pidx}/{n_pages}] Lade Bilddatei...")
+                    pil = Image.open(self.file_path)
+                    # Convert to RGB if necessary (handles RGBA, grayscale, etc.)
+                    if pil.mode != 'RGB':
+                        pil = pil.convert('RGB')
+                    self.status.emit(f"[page {pidx}] Bild geladen in {time.perf_counter() - t_load:.2f}s ({pil.width}x{pil.height})")
+                else:
+                    # PDF: Rasterize at specified DPI
+                    self.status.emit(f"[page {pidx}/{n_pages}] Rasterizing at {DPI} DPI…")
+                    pil = convert_from_path(
+                        self.pdf_path, dpi=DPI, poppler_path=POPPLER_PATH,
+                        first_page=pidx, last_page=pidx, fmt="png",
+                        thread_count=2, strict=False
+                    )[0]
+                    self.status.emit(f"[page {pidx}] Rasterized in {time.perf_counter() - t_load:.2f}s")
+
+                emit_progress(pidx - 1, W['raster'])
+
+                if self._is_interrupted:
+                    break
+
+                self.status.emit(f"[page {pidx}] Preparing image…")
+                bgr_color = pil_to_bgr(pil)
+                
+                df_page = pd.DataFrame()
+
+                if self.run_analysis:
+                    self.status.emit(f"[page {pidx}] Führe YOLO/OCR-Analyse aus...")
+                    
+                    _ = tile_image(bgr_color, tile=TILE_SIZE, overlap_pct=OVERLAP_PCT)
+                    emit_progress(pidx - 1, W['raster'] + W['prep'])
+
+                    if self._is_interrupted:
+                        break
+
+                    t_det = time.perf_counter()
+                    # Use combined detection: YOLO + Custom Symbols
+                    dets = run_combined_detection(model, bgr_color, detect_custom=True)
+
+                    # Count by source (YOLO vs CUSTOM)
+                    yolo_count = sum(1 for d in dets if not d.get('is_custom_symbol', False))
+                    custom_count = sum(1 for d in dets if d.get('is_custom_symbol', False))
+
+                    class_counts = {}
+                    for d in dets:
+                        raw = d.get('raw_name', '?')
+                        canon = d.get('name', '?')
+
+                        if canon not in class_counts:
+                            class_counts[canon] = {'raw': raw, 'count': 0, 'custom': 0}
+                        class_counts[canon]['count'] += 1
+                        if d.get('is_custom_symbol', False):
+                            class_counts[canon]['custom'] += 1
+
+                    for canon, info in sorted(class_counts.items()):
+                        custom_marker = f" [+{info['custom']} custom]" if info['custom'] > 0 else ""
+                        print(f"   {canon:20s} (raw: {info['raw']:20s}) → {info['count']:3d} detections{custom_marker}")
+
+                    print(f"{'='*60}\n")
+                    dt_det = time.perf_counter() - t_det
+                    cnt = Counter(d['name'] for d in dets)
+                    summary = ", ".join(f"{k}:{v}" for k, v in sorted(cnt.items()))
+
+                    # Status message with custom symbol count
+                    status_msg = f"[page {pidx}] YOLO: {yolo_count} boxes"
+                    if custom_count > 0:
+                        status_msg += f" + {custom_count} custom symbols"
+                    status_msg += f" in {dt_det:.2f}s [{summary}]"
+                    self.status.emit(status_msg)
+                    emit_progress(pidx - 1, W['raster'] + W['prep'] + W['det'])
+
+                    mask_red, mask_yel = color_masks(bgr_color)
+                    coords = [d for d in dets if d["name"] == "coordinate"]
+                    anchors = [d for d in dets if d["name"] != "coordinate"]
+                    self.status.emit(f"[page {pidx}] OCR: coords={len(coords)}, anchors={len(anchors)}")
+
+                    # Coordinate OCR
+                    coord_meta = {}
+                    t_ocr = time.perf_counter()
+
+                    def _do_coord(c):
+                        try:
+                            txt = ocr_coordinate_unified(c, bgr_color, self.ocr_engine)
+                        except Exception:
+                            txt = ""
+                        
+                        if DEBUG_ANGLE_ROUTING and txt:
+                            print(f"\n   [OCR Coordinate] Raw OCR output: '{txt}'")
+                        
+                        txt_cleaned = _clean_coordinate_overlap(txt)
+                        txt_fixed = _fix_coordinate_brackets(txt_cleaned)
+                        
+                        txt_fixed = re.sub(r'\s*[a-zA-Z]\s*$', '', txt_fixed)
+                        txt_fixed = re.sub(r'\s*[|/\\]\s*$', '', txt_fixed)
+                        
+                        if DEBUG_ANGLE_ROUTING and txt:
+                            if txt_cleaned != txt:
+                                print(f"   [OCR Coordinate] After clean_overlap: '{txt}' → '{txt_cleaned}'")
+                            if txt_fixed != txt_cleaned:
+                                print(f"   [OCR Coordinate] After fix_brackets: '{txt_cleaned}' → '{txt_fixed}'")
+                        
+                        val, gi = parse_coord(txt_fixed)
+                        
+                        if DEBUG_ANGLE_ROUTING and txt:
+                            print(f"   [OCR Coordinate] Final parse result: value={val}, gi_gl={gi}")
+                            print(f"   [OCR Coordinate] Complete flow: '{txt}' → '{txt_fixed}' → value={val}, gi_gl={gi}\n")
+                        
+                        c_color = box_color(mask_red, mask_yel, c["x1"], c["y1"], c["x2"], c["y2"])
+                        return (id(c), dict(text=txt_fixed, value=val, gi=gi, color=c_color))
+
+                    if coords:
+                        with ThreadPoolExecutor(max_workers=MAX_OCR_WORKERS) as ex:
+                            for f in as_completed([ex.submit(_do_coord, c) for c in coords]):
+                                k, v = f.result()
+                                coord_meta[k] = v
+
+                    self.status.emit(f"[page {pidx}] OCR coords done in {time.perf_counter() - t_ocr:.2f}s (threads={MAX_OCR_WORKERS})")
+                    emit_progress(pidx - 1, W['raster'] + W['prep'] + W['det'] + W['ocr_c'])
+
+                    if self._is_interrupted:
+                        break
+
+                    # Anchors OCR
+                    anchor_results = []
+
+                    # Load custom symbol config for OCR
+                    custom_symbol_config = {}
+                    loaded_from_db = False
+
+                    # Try loading from database first
+                    try:
+                        from database3 import is_db_available, get_all_custom_symbols
+                        if is_db_available():
+                            db_symbols = get_all_custom_symbols()
+                            for sym_data in db_symbols:
+                                name = sym_data['symbol_name']
+                                cfg = sym_data['config']
+                                custom_symbol_config[name] = cfg
+                            if db_symbols:
+                                loaded_from_db = True
+                                logger.info(f"Loaded {len(custom_symbol_config)} custom symbol configs from database for OCR")
+                    except Exception as e:
+                        logger.debug(f"Could not load custom symbols from database: {e}")
+
+                    # Fall back to JSON file if database not available or empty
+                    if not loaded_from_db:
+                        try:
+                            import json
+                            from pathlib import Path
+                            config_path = Path("custom_symbols.json")
+                            if config_path.exists():
+                                with open(config_path, 'r') as f:
+                                    custom_symbol_config = json.load(f)
+                                logger.info(f"Loaded {len(custom_symbol_config)} custom symbol configs from JSON for OCR")
+                        except Exception as e:
+                            logger.debug(f"Could not load custom symbols from JSON: {e}")
+
+                    # DEBUG: Print loaded configs
+                    print(f"\n🔍 DEBUG: Loaded {len(custom_symbol_config)} custom symbol configs:")
+                    for sym_name, sym_cfg in custom_symbol_config.items():
+                        has_text = sym_cfg.get("has_text", False)
+                        text_region = sym_cfg.get("text_region_offset", None)
+                        print(f"  - {sym_name}: has_text={has_text}, text_region_offset={text_region}")
+
+                    def _do_anchor(a):
+                        a_color = box_color(mask_red, mask_yel, a["x1"], a["y1"], a["x2"], a["y2"])
+                        # ✅ Initialize all variables at the top to avoid UnboundLocalError
+                        ocr_bbox = None
+                        ocr_position = None
+                        ocr_conf = 0.0
+                        weichen_coords = []
+
+                        if a["name"] in NO_OCR_CLASSES:
+                            name_txt = ""
+                        elif a["name"] in FIXED_TEXT_CLASSES:
+                            name_txt = FIXED_TEXT_CLASSES[a["name"]]
+                        elif a.get("is_custom_symbol") and a["name"] in custom_symbol_config:
+                            # Custom symbol with specific text position (or precise region)
+                            sym_cfg = custom_symbol_config[a["name"]]
+                            print(f"\n🔍 Processing custom symbol: {a['name']}")
+                            print(f"   Config: has_text={sym_cfg.get('has_text', False)}, text_position={sym_cfg.get('text_position')}, text_region_offset={sym_cfg.get('text_region_offset')}")
+                            if sym_cfg.get("has_text", False):
+                                text_pos = sym_cfg.get("text_position", "left")
+                                text_region = sym_cfg.get("text_region_offset", None)
+                                print(f"   Calling ocr_custom_symbol_text with text_region_offset={text_region}")
+                                # ocr_custom_symbol_text now returns (text, bbox, position, confidence)
+                                name_txt, ocr_bbox, ocr_position, ocr_conf = ocr_custom_symbol_text(
+                                    a, bgr_color, text_pos, self.ocr_engine,
+                                    text_region_offset=text_region
+                                )
+                                # Debug: Show OCR bbox result
+                                if ocr_bbox:
+                                    print(f"   ✅ OCR bbox returned: {ocr_bbox}, position={ocr_position}, conf={ocr_conf:.2f}")
+                                else:
+                                    print(f"   ⚠️ No OCR bbox returned (text='{name_txt}')")
+                            else:
+                                print(f"   ⚠️ Symbol has has_text=False, skipping OCR")
+                                name_txt = ""
+                        elif a.get("is_custom_symbol"):
+                            # Custom symbol but NOT in config - this is the problem case!
+                            print(f"\n⚠️ WARNING: Custom symbol '{a['name']}' detected but NOT in custom_symbol_config!")
+                            print(f"   Available configs: {list(custom_symbol_config.keys())}")
+                            ocr_result = ocr_anchor_name(a, bgr_color, self.ocr_engine)
+                            name_txt = ocr_result
+                        else:
+                            ocr_result = ocr_anchor_name(a, bgr_color, self.ocr_engine)
+                            if a["name"] == "weichen_block":
+                                parsed = parse_weichen_block(ocr_result)
+                                name_txt = parsed['id']
+                                weichen_coords = parsed['coordinates']
+                            else:
+                                name_txt = ocr_result
+                        return (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf)
+
+                    if anchors:
+                        with ThreadPoolExecutor(max_workers=MAX_OCR_WORKERS) as ex:
+                            for f in as_completed([ex.submit(_do_anchor, a) for a in anchors]):
+                                anchor_results.append(f.result())
+
+                    emit_progress(pidx - 1, W['raster'] + W['prep'] + W['det'] + W['ocr_c'] + W['ocr_a'])
+                    
+                    # ========================================
+                    # STEP: TRACK DETECTION (before Fahrtrichtung)
+                    # ========================================
+                    track_bounds = None  # ✅ Initialize track_bounds
+
+                    if self.detect_tracks:
+                        print(f"\n{'='*70}")
+                        print(f"🛤️  TRACK DETECTION - Page {pidx}")
+                        print(f"{'='*70}")
+                        
+                        try:
+                            from track_detection import detect_main_tracks
+                            from core.linking import get_track_bounds  # ✅ Import track bounds function
+                            
+                            def track_progress(msg):
+                                self.track_detection_progress.emit(msg)
+                                print(msg)
+
+                            # Detect tracks BEFORE Fahrtrichtung detection
+                            # For images, pass the BGR array directly; for PDFs, use pdf_path
+                            if self._is_image_file:
+                                track_skeleton, _, _ = detect_main_tracks(
+                                    image_array=bgr_color,
+                                    tile_size=TILE_SIZE,
+                                    overlap=int(TILE_SIZE * OVERLAP_PCT / 100),
+                                    progress_callback=track_progress
+                                )
+                            else:
+                                track_skeleton, _, _ = detect_main_tracks(
+                                    pdf_path=self.pdf_path,
+                                    page_idx=pidx - 1,  # 0-indexed
+                                    dpi=DPI,
+                                    tile_size=TILE_SIZE,
+                                    overlap=int(TILE_SIZE * OVERLAP_PCT / 100),
+                                    progress_callback=track_progress
+                                )
+                            
+                            track_pixels = np.count_nonzero(track_skeleton)
+                            print(f"✅ Track detection complete: {track_pixels} pixels")
+                            print(f"   Track skeleton shape: {track_skeleton.shape}")
+                            
+                            # ✅ Calculate track bounds
+                            if track_skeleton is not None and track_pixels > 0:
+                                track_bounds = get_track_bounds(track_skeleton)
+                                print(f"   Track bounds: Y=[{track_bounds['y_min']}, {track_bounds['y_max']}] (height={track_bounds['height']}px)")
+                                print(f"                 X=[{track_bounds['x_min']}, {track_bounds['x_max']}] (width={track_bounds['width']}px)")
+                            
+                            print(f"{'='*70}\n")
+                            
+                        except Exception as e:
+                            import traceback
+                            print(f"❌ Track detection failed: {e}")
+                            traceback.print_exc()
+                            self.status.emit(f"[track] ⚠️ Track detection failed: {e}")
+                            track_skeleton = None
+                            track_bounds = None  # ✅ Ensure track_bounds is None on failure
+                    
+                    # ========================================
+                    # STEP: FAHRTRICHTUNG DETECTION (GKS ONLY)
+                    # ========================================
+                    print(f"\n{'='*70}")
+                    print(f"🧭 FAHRTRICHTUNG DETECTION - Page {pidx} (GKS-based only)")
+                    print(f"{'='*70}")
+                    
+                    signal_dets = [a for a, _, _, _, _, _, _ in anchor_results if a["name"] == "signal"]
+                    gks_dets = [a for a, _, _, _, _, _, _ in anchor_results if a["name"] == "gks_gesteuert"]
+                    fahrtrichtung_map = {}
+                    
+                    print(f"   Signals to process: {len(signal_dets)}")
+                    print(f"   GKS boxes available: {len(gks_dets)}")
+                    
+                    # ✅ GKS-based detection ONLY (no track fallback yet)
+                    for signal_det in signal_dets:
+                        signal_text = None
+                        for a, _, name_txt, _, _, _, _ in anchor_results:
+                            if id(a) == id(signal_det):
+                                signal_text = name_txt
+                                break
+                        signal_det["text"] = signal_text or ""
+                        
+                        # GKS-based detection only
+                        fahrtrichtung = detect_fahrtrichtung(
+                            signal_det, 
+                            gks_dets, 
+                            track_skeleton=None,  # ✅ Don't use track yet
+                            track_bounds=None,    # ✅ NEW: Pass track_bounds (None for now)
+                            max_distance=250
+                        )
+                        
+                        if fahrtrichtung:
+                            # ✅ CHANGE 1: Store as dict with source tracking
+                            fahrtrichtung_map[id(signal_det)] = {
+                                'fahrtrichtung': fahrtrichtung,
+                                'source': 'gks'
+                            }
+                            print(f"   ✅ Signal '{signal_text}': Fahrtrichtung = {fahrtrichtung} (GKS)")
+                        else:
+                            print(f"   ⚠️ Signal '{signal_text}': No Fahrtrichtung from GKS")
+                    
+                    print(f"\n{'='*70}")
+                    print(f"   Total Fahrtrichtung from GKS: {len(fahrtrichtung_map)}/{len(signal_dets)}")
+                    print(f"{'='*70}\n")
+                                
+                    # ✅ NEW: Haltepunkt-Signal-Coordinate grouping detection
+                    print(f"\n{'='*70}")
+                    print(f"🏢 HALTEPUNKT GROUP DETECTION - Page {pidx}")
+                    print(f"{'='*70}")
+
+                    haltepunkt_dets = [a for a, _, _, _, _, _, _ in anchor_results if a["name"] == "haltepunkt"]
+                    haltepunkt_groups = {}
+                    
+                    print(f"   Haltepunkt detections: {len(haltepunkt_dets)}")
+                    
+                    # Prepare coordinate detections with their OCR text
+                    coord_dets_with_text = []
+                    for c in coords:
+                        meta = coord_meta.get(id(c), {})
+                        c_with_text = {
+                            'x1': c.get('x1'),
+                            'y1': c.get('y1'),
+                            'x2': c.get('x2'),
+                            'y2': c.get('y2'),
+                            'cx1': c.get('x1'),
+                            'cy1': c.get('y1'),
+                            'cx2': c.get('x2'),
+                            'cy2': c.get('y2'),
+                            'angle': c.get('angle', 0.0),
+                            'angle_raw': c.get('angle_raw', 0.0),
+                            'text': meta.get('text', '')
+                        }
+                        coord_dets_with_text.append(c_with_text)
+
+                    # ✅ NEW: Track which signal detections are haltepunkt-referenced
+                    haltepunkt_referenced_signals = set()
+
+                    # Detect groups for each haltepunkt
+                    for haltepunkt_det in haltepunkt_dets:
+                        group = detect_haltepunkt_signal_group(
+                            haltepunkt_det, 
+                            signal_dets,
+                            coord_dets_with_text,
+                            max_distance=250
+                        )
+                        
+                        if group:
+                            haltepunkt_groups[id(haltepunkt_det)] = group
+                            
+                            # ✅ Mark the signal detection to skip
+                            if group.get('signal_det'):
+                                haltepunkt_referenced_signals.add(id(group['signal_det']))
+                                print(f"   ✅ Haltepunkt group: signal='{group['signal']}' (will skip signal processing)")
+                            else:
+                                print(f"   ✅ Haltepunkt group: signal='{group['signal']}', coordinate='{group.get('coordinate', '')}'")
+
+                    print(f"   Total groups detected: {len(haltepunkt_groups)}")
+                    print(f"   Signals to skip: {len(haltepunkt_referenced_signals)}")
+                    print(f"{'='*70}\n")
+                    
+                    # Linking + rows
+                    used_coord_ids = set()
+                    learned_patterns = {}
+
+                    # ✅ STEP 1: Build a map of GKS → coordinate FIRST
+                    gks_coord_map = {}
+
+                    print(f"\n{'='*70}")
+                    print(f"🔗 STEP 1: Pre-linking GKS boxes to coordinates")
+                    print(f"{'='*70}")
+
+                    for (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf) in anchor_results:
+                        if a["name"] in ["gks_festkodiert", "gks_gesteuert"]:
+                            available_coords = [c for c in coords if id(c) not in used_coord_ids]
+                            linked = link_anchor_to_coord(a, available_coords, learned_patterns)
+                            
+                            if linked is not None:
+                                used_coord_ids.add(id(linked))
+                                gks_coord_map[id(a)] = linked
+                                
+                                # Record pattern
+                                dx_offset = linked["cx"] - a["cx"]
+                                dy_offset = linked["cy"] - a["cy"]
+                                if a["name"] not in learned_patterns:
+                                    learned_patterns[a["name"]] = []
+                                learned_patterns[a["name"]].append((dx_offset, dy_offset))
+                                
+                                meta = coord_meta.get(id(linked), {})
+                                coord_txt = meta.get("text", "?")
+                                if coord_txt:
+                                    coord_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', coord_txt)
+                                    coord_txt = re.sub(r'\s*[|/\\]\s*$', '', coord_txt)
+                                    coord_txt = ' '.join(coord_txt.split()).strip()
+                                    print(f"   GKS '{name_txt}' → coordinate '{coord_txt}'")
+
+                    print(f"   Total GKS linked: {len(gks_coord_map)}")
+                    print(f"{'='*70}\n")
+
+                    # ========================================
+                    # ✅ STEP 1B: Pre-link SVERBINDER to coordinates
+                    # ========================================
+                    print(f"\n{'='*70}")
+                    print(f"🔗 STEP 1B: Pre-linking Sverbinder to coordinates")
+                    print(f"{'='*70}")
+
+                    sverbinder_coord_map = {}
+                    sverbinder_dets = [a for a, _, _, _, _, _, _ in anchor_results if a["name"] == "sverbinder"]
+
+                    print(f"   Sverbinder detections: {len(sverbinder_dets)}")
+
+                    for sverbinder_det in sverbinder_dets:
+                        available_coords = [c for c in coords if id(c) not in used_coord_ids]
+                        linked = link_anchor_to_coord(sverbinder_det, available_coords, learned_patterns)
+                        
+                        if linked is not None:
+                            used_coord_ids.add(id(linked))
+                            sverbinder_coord_map[id(sverbinder_det)] = linked
+                            
+                            # Record pattern
+                            dx_offset = linked["cx"] - sverbinder_det["cx"]
+                            dy_offset = linked["cy"] - sverbinder_det["cy"]
+                            if sverbinder_det["name"] not in learned_patterns:
+                                learned_patterns[sverbinder_det["name"]] = []
+                            learned_patterns[sverbinder_det["name"]].append((dx_offset, dy_offset))
+                            
+                            meta = coord_meta.get(id(linked), {})
+                            coord_txt = meta.get("text", "?")
+                            if coord_txt:
+                                coord_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', coord_txt)
+                                coord_txt = re.sub(r'\s*[|/\\]\s*$', '', coord_txt)
+                                coord_txt = ' '.join(coord_txt.split()).strip()
+                                print(f"   Sverbinder → coordinate '{coord_txt}'")
+
+                    print(f"   Total Sverbinder linked: {len(sverbinder_coord_map)}")
+                    print(f"{'='*70}\n")
+
+                    print(f"\n{'='*70}")
+                    print(f"🔗 STEP 2: Linking all elements (including haltetafel)")
+                    print(f"{'='*70}")
+
+                    # ✅ STEP 2: Now process ALL elements (including haltetafel)
+                    for (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf) in anchor_results:
+                        row_id = len(all_rows)
+                        fahrtrichtung = None
+                        fahrtrichtung_source = 'none'  # ✅ CHANGE 2: Default source
+                        
+                        # ✅ NEW: SKIP if this signal is haltepunkt-referenced
+                        if a["name"] == "signal" and id(a) in haltepunkt_referenced_signals:
+                            print(f"   ⏭️  SKIPPING signal '{name_txt}' (haltepunkt-referenced)")
+                            continue  # ✅ Don't process this signal at all
+                        
+                        if a["name"] == "signal":
+                            # ✅ CHANGE 2: Extract fahrtrichtung and source from map
+                            fahr_data = fahrtrichtung_map.get(id(a))
+                            if fahr_data:
+                                if isinstance(fahr_data, dict):
+                                    # ✅ NEW FORMAT: {'fahrtrichtung': 'A', 'source': 'gks'}
+                                    fahrtrichtung = fahr_data.get('fahrtrichtung')
+                                    fahrtrichtung_source = fahr_data.get('source', 'gks')
+                                else:
+                                    # ✅ OLD FORMAT: Just the string 'A' or 'B' (backward compatibility)
+                                    fahrtrichtung = fahr_data
+                                    fahrtrichtung_source = 'gks'
+                        
+                        # ✅ SPECIAL HANDLING FOR HALTEPUNKT
+                        if a["name"] == "haltepunkt":
+                            group = haltepunkt_groups.get(id(a))
+                            haltepunkt_counter = sum(1 for r in all_rows if r['cls'] == 'haltepunkt') + 1
+                            
+                            # Get signal name from group
+                            if group and group.get('signal'):
+                                signal_text = group['signal']
+                                haltepunkt_name = f"haltepunkt {haltepunkt_counter} ({signal_text})"
+                            else:
+                                haltepunkt_name = f"haltepunkt {haltepunkt_counter}"
+                            
+                            coord_txt, coord_val, gi = None, None, None
+                            cbbox = (None, None, None, None)
+                            
+                            # ========================================
+                            # STEP 1: Try to get coordinate from group detection
+                            # ========================================
+                            if group and group.get('coordinate'):
+                                coord_txt = group['coordinate']
+                                coord_val, gi = parse_coord(coord_txt)
+                                
+                                # Try to find the coordinate detection to get its bounding box
+                                for c in coords:
+                                    meta = coord_meta.get(id(c), {})
+                                    if meta.get('text') == coord_txt:
+                                        cbbox = (c["x1"], c["y1"], c["x2"], c["y2"])
+                                        break
+                                
+                                print(f"   ✅ Haltepunkt '{haltepunkt_name}' → '{coord_txt}' (from group detection)")
+                            
+                            # ========================================
+                            # STEP 2: Fallback - try direct linking (exclude sverbinder coords)
+                            # ========================================
+                            else:
+                                print(f"   ⚠️ Haltepunkt '{haltepunkt_name}' - no coordinate from group, trying direct linking")
+                                
+                                # ✅ Build blacklist: coordinates already linked to sverbinder (from pre-linking)
+                                # Extract the IDs of the coordinate dicts (not the dicts themselves)
+                                sverbinder_coord_ids = set()
+                                for coord_det in sverbinder_coord_map.values():
+                                    sverbinder_coord_ids.add(id(coord_det))
+
+                                if sverbinder_coord_ids:
+                                    print(f"      🚫 Blacklisting {len(sverbinder_coord_ids)} sverbinder coordinates")
+                                    # Find the actual coordinate dicts to print their text
+                                    for c in coords:
+                                        if id(c) in sverbinder_coord_ids:
+                                            meta = coord_meta.get(id(c), {})
+                                            coord_txt_bl = meta.get('text', '?')
+                                            print(f"         - '{coord_txt_bl}'")
+
+                                # ✅ Filter out sverbinder coordinates (by ID)
+                                available_coords = [c for c in coords if id(c) not in sverbinder_coord_ids]
+
+                                print(f"      Available coordinates: {len(available_coords)} (excluded {len(sverbinder_coord_ids)} sverbinder coords)")
+                                
+                                linked = link_anchor_to_coord(a, available_coords, learned_patterns)
+                                
+                                if linked is not None:
+                                    # ✅ DON'T add to used_coord_ids (it's shared, not claimed)
+                                    
+                                    meta = coord_meta.get(id(linked), {})
+                                    coord_txt, coord_val, gi = meta.get("text"), meta.get("value"), meta.get("gi")
+                                    cbbox = (linked["x1"], linked["y1"], linked["x2"], linked["y2"])
+                                    
+                                    print(f"   ✅ Haltepunkt '{haltepunkt_name}' → '{coord_txt}' (direct linking)")
+                                else:
+                                    print(f"   ⚠️ Haltepunkt '{haltepunkt_name}' → NO COORDINATE")
+                            
+                            # ========================================
+                            # STEP 3: Create row
+                            # ========================================
+                            element_for_uuid = {
+                                'cls': a["name"],
+                                'page': pidx,
+                                'obb_cx': a.get("obb_cx"),
+                                'obb_cy': a.get("obb_cy"),
+                                'anchor_text': haltepunkt_name,
+                                'coord_text': coord_txt
+                            }
+                            
+                            all_rows.append(dict(
+                                detection_id=make_uuid(element_for_uuid),
+                                row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
+                                anchor_text=haltepunkt_name,
+                                anchor_conf=ocr_conf,
+                                coord_text=coord_txt,
+                                coord_value=coord_val,
+                                gi_gl=gi,
+                                ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
+                                cx1=cbbox[0], cy1=cbbox[1], cx2=cbbox[2], cy2=cbbox[3],
+                                angle=a.get("angle"), angle_raw=a.get("angle_raw"),
+                                obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
+                                obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
+                                poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
+                                ocr_x1=ocr_bbox[0] if ocr_bbox else None,
+                                ocr_y1=ocr_bbox[1] if ocr_bbox else None,
+                                ocr_x2=ocr_bbox[2] if ocr_bbox else None,
+                                ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                                ocr_region_source=ocr_position,
+                                notes="", weichen_coordinates=[],
+                                fahrtrichtung=None,
+                                _fahrtrichtung_source='none'  # ✅ CHANGE 3
+                            ))
+                            # Debug: Verify OCR coords were stored
+                            if ocr_bbox:
+                                print(f"   💾 Stored OCR coords for row {row_id}: ocr_x1={ocr_bbox[0]:.0f}, ocr_y1={ocr_bbox[1]:.0f}, ocr_x2={ocr_bbox[2]:.0f}, ocr_y2={ocr_bbox[3]:.0f}")
+                            continue
+                        
+                        # ✅ SPECIAL HANDLING FOR WEICHEN_BLOCK
+                        if a["name"] == "weichen_block":
+                            coord_text_combined = " | ".join(weichen_coords) if weichen_coords else None
+                            
+                            element_for_uuid = {
+                                'cls': a["name"],
+                                'page': pidx,
+                                'obb_cx': a.get("obb_cx"),
+                                'obb_cy': a.get("obb_cy"),
+                                'anchor_text': name_txt,
+                                'coord_text': coord_text_combined
+                            }
+                            
+                            all_rows.append(dict(
+                                detection_id=make_uuid(element_for_uuid),
+                                row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
+                                anchor_text=name_txt, anchor_conf=ocr_conf, coord_text=coord_text_combined, coord_value=None, gi_gl=None,
+                                ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
+                                cx1=None, cy1=None, cx2=None, cy2=None, angle=a.get("angle"), angle_raw=a.get("angle_raw"),
+                                obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"), obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
+                                poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
+                                ocr_x1=ocr_bbox[0] if ocr_bbox else None,
+                                ocr_y1=ocr_bbox[1] if ocr_bbox else None,
+                                ocr_x2=ocr_bbox[2] if ocr_bbox else None,
+                                ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                                ocr_region_source=ocr_position,
+                                notes="", weichen_coordinates=weichen_coords,
+                                fahrtrichtung=None,
+                                _fahrtrichtung_source='none'  # ✅ CHANGE 3
+                            ))
+                            continue
+                        
+                        # ✅ NEW: SPECIAL HANDLING FOR HALTETAFEL
+                        if a["name"] == "haltetafel":
+                            # First try normal coordinate linking
+                            available_coords = [c for c in coords if id(c) not in used_coord_ids]
+                            linked = link_anchor_to_coord(a, available_coords, learned_patterns)
+                            
+                            # If no direct coordinate found, try linking via GKS
+                            if linked is None:
+                                gks_dets_for_haltetafel = [det for det, _, _, _, _, _, _ in anchor_results if det["name"] == "gks_festkodiert"]
+                                linked = link_haltetafel_to_gks(a, gks_dets_for_haltetafel, coords, gks_coord_map)
+                                
+                                if linked:
+                                    meta = coord_meta.get(id(linked), {})
+                                    coord_txt = meta.get("text", "?")
+                                    print(f"   ✅ Haltetafel inherited coordinate from GKS: '{coord_txt}'")
+                            
+                            # Process coordinate
+                            coord_txt, coord_val, gi = None, None, None
+                            cbbox = (None, None, None, None)
+                            
+                            if linked is not None:
+                                # Only mark as used if it was a direct link (not inherited from GKS)
+                                if id(linked) not in [id(c) for c in gks_coord_map.values()]:
+                                    used_coord_ids.add(id(linked))
+                                
+                                # Record pattern
+                                dx_offset = linked["cx"] - a["cx"]
+                                dy_offset = linked["cy"] - a["cy"]
+                                if a["name"] not in learned_patterns:
+                                    learned_patterns[a["name"]] = []
+                                learned_patterns[a["name"]].append((dx_offset, dy_offset))
+                                
+                                meta = coord_meta.get(id(linked), {})
+                                coord_txt, coord_val, gi = meta.get("text"), meta.get("value"), meta.get("gi")
+                                cbbox = (linked["x1"], linked["y1"], linked["x2"], linked["y2"])
+                            
+                            element_for_uuid = {
+                                'cls': a["name"],
+                                'page': pidx,
+                                'obb_cx': a.get("obb_cx"),
+                                'obb_cy': a.get("obb_cy"),
+                                'anchor_text': name_txt,
+                                'coord_text': coord_txt
+                            }
+                            
+                            all_rows.append(dict(
+                                detection_id=make_uuid(element_for_uuid),
+                                row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
+                                anchor_text=name_txt, anchor_conf=ocr_conf, coord_text=coord_txt, coord_value=coord_val, gi_gl=gi,
+                                ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
+                                cx1=cbbox[0], cy1=cbbox[1], cx2=cbbox[2], cy2=cbbox[3],
+                                angle=a.get("angle"), angle_raw=a.get("angle_raw"),
+                                obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
+                                obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
+                                poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
+                                ocr_x1=ocr_bbox[0] if ocr_bbox else None,
+                                ocr_y1=ocr_bbox[1] if ocr_bbox else None,
+                                ocr_x2=ocr_bbox[2] if ocr_bbox else None,
+                                ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                                ocr_region_source=ocr_position,
+                                notes="", weichen_coordinates=[],
+                                fahrtrichtung=None,
+                                _fahrtrichtung_source='none'  # ✅ CHANGE 3
+                            ))
+                            # Debug: Verify OCR coords were stored
+                            if ocr_bbox:
+                                print(f"   💾 Stored OCR coords for row {row_id}: ocr_x1={ocr_bbox[0]:.0f}, ocr_y1={ocr_bbox[1]:.0f}, ocr_x2={ocr_bbox[2]:.0f}, ocr_y2={ocr_bbox[3]:.0f}")
+                            continue
+                        
+                        # ✅ SPECIAL HANDLING FOR SVERBINDER (use pre-linked coordinate)
+                        if a["name"] == "sverbinder":
+                            # Retrieve the already-linked coordinate from STEP 1B
+                            linked = sverbinder_coord_map.get(id(a))
+                            
+                            coord_txt, coord_val, gi = None, None, None
+                            cbbox = (None, None, None, None)
+                            
+                            if linked is not None:
+                                # DON'T add to used_coord_ids again (already done in STEP 1B)
+                                
+                                meta = coord_meta.get(id(linked), {})
+                                coord_txt, coord_val, gi = meta.get("text"), meta.get("value"), meta.get("gi")
+                                if coord_txt:
+                                    coord_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', coord_txt)
+                                    coord_txt = re.sub(r'\s*[|/\\]\s*$', '', coord_txt)
+                                    coord_txt = ' '.join(coord_txt.split()).strip()
+                                cbbox = (linked["x1"], linked["y1"], linked["x2"], linked["y2"])
+                            
+                            element_for_uuid = {
+                                'cls': a["name"],
+                                'page': pidx,
+                                'obb_cx': a.get("obb_cx"),
+                                'obb_cy': a.get("obb_cy"),
+                                'anchor_text': name_txt,
+                                'coord_text': coord_txt
+                            }
+                            
+                            all_rows.append(dict(
+                                detection_id=make_uuid(element_for_uuid),
+                                row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
+                                anchor_text=name_txt, anchor_conf=ocr_conf, coord_text=coord_txt, coord_value=coord_val, gi_gl=gi,
+                                ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
+                                cx1=cbbox[0], cy1=cbbox[1], cx2=cbbox[2], cy2=cbbox[3],
+                                angle=a.get("angle"), angle_raw=a.get("angle_raw"),
+                                obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
+                                obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
+                                poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
+                                ocr_x1=ocr_bbox[0] if ocr_bbox else None,
+                                ocr_y1=ocr_bbox[1] if ocr_bbox else None,
+                                ocr_x2=ocr_bbox[2] if ocr_bbox else None,
+                                ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                                ocr_region_source=ocr_position,
+                                notes="", weichen_coordinates=[],
+                                fahrtrichtung=fahrtrichtung,
+                                _fahrtrichtung_source=fahrtrichtung_source  # ✅ CHANGE 3
+                            ))
+                            continue
+                        
+                        # ✅ SKIP GKS (already processed in STEP 1)
+                        if a["name"] in ["gks_festkodiert", "gks_gesteuert"]:
+                            # Retrieve the already-linked coordinate
+                            linked = gks_coord_map.get(id(a))
+                            
+                            coord_txt, coord_val, gi = None, None, None
+                            cbbox = (None, None, None, None)
+                            
+                            if linked is not None:
+                                meta = coord_meta.get(id(linked), {})
+                                coord_txt, coord_val, gi = meta.get("text"), meta.get("value"), meta.get("gi")
+                                if coord_txt:
+                                    coord_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', coord_txt)
+                                    coord_txt = re.sub(r'\s*[|/\\]\s*$', '', coord_txt)
+                                    coord_txt = ' '.join(coord_txt.split()).strip()
+                                cbbox = (linked["x1"], linked["y1"], linked["x2"], linked["y2"])
+                            
+                            element_for_uuid = {
+                                'cls': a["name"],
+                                'page': pidx,
+                                'obb_cx': a.get("obb_cx"),
+                                'obb_cy': a.get("obb_cy"),
+                                'anchor_text': name_txt,
+                                'coord_text': coord_txt
+                            }
+                            
+                            all_rows.append(dict(
+                                detection_id=make_uuid(element_for_uuid),
+                                row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
+                                anchor_text=name_txt, anchor_conf=ocr_conf, coord_text=coord_txt, coord_value=coord_val, gi_gl=gi,
+                                ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
+                                cx1=cbbox[0], cy1=cbbox[1], cx2=cbbox[2], cy2=cbbox[3],
+                                angle=a.get("angle"), angle_raw=a.get("angle_raw"),
+                                obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
+                                obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
+                                poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
+                                ocr_x1=ocr_bbox[0] if ocr_bbox else None,
+                                ocr_y1=ocr_bbox[1] if ocr_bbox else None,
+                                ocr_x2=ocr_bbox[2] if ocr_bbox else None,
+                                ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                                ocr_region_source=ocr_position,
+                                notes="", weichen_coordinates=[],
+                                fahrtrichtung=fahrtrichtung,
+                                _fahrtrichtung_source=fahrtrichtung_source  # ✅ CHANGE 3
+                            ))
+                            continue
+                        
+                        # ✅ SPECIAL HANDLING FOR ISOLIERSTOSS (with fallback)
+                        if a["name"] == "isolierstoß":
+                            # First: Try normal linking (mode="above")
+                            available_coords = [c for c in coords if id(c) not in used_coord_ids]
+                            linked = link_anchor_to_coord(a, available_coords, learned_patterns)
+
+                            # If normal linking fails, try fallback (search all around for unlinked coords)
+                            if linked is None:
+                                if DEBUG_ANGLE_ROUTING:
+                                    print(f"\n   ⚠️ Isolierstoß: Normal linking failed, trying fallback...")
+
+                                # Fallback: search in all directions for nearest unlinked coordinate
+                                linked = link_isolierstoss_fallback(a, coords, used_coord_ids, max_radius=300)
+
+                            # Process coordinate
+                            coord_txt, coord_val, gi = None, None, None
+                            cbbox = (None, None, None, None)
+
+                            if linked is not None:
+                                used_coord_ids.add(id(linked))
+
+                                # Record pattern
+                                dx_offset = linked["cx"] - a["cx"]
+                                dy_offset = linked["cy"] - a["cy"]
+                                if a["name"] not in learned_patterns:
+                                    learned_patterns[a["name"]] = []
+                                learned_patterns[a["name"]].append((dx_offset, dy_offset))
+
+                                meta = coord_meta.get(id(linked), {})
+                                coord_txt, coord_val, gi = meta.get("text"), meta.get("value"), meta.get("gi")
+                                if coord_txt:
+                                    coord_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', coord_txt)
+                                    coord_txt = re.sub(r'\s*[|/\\]\s*$', '', coord_txt)
+                                    coord_txt = ' '.join(coord_txt.split()).strip()
+                                cbbox = (linked["x1"], linked["y1"], linked["x2"], linked["y2"])
+
+                                if DEBUG_ANGLE_ROUTING:
+                                    print(f"   ✅ Isolierstoß → coordinate '{coord_txt}'")
+
+                            element_for_uuid = {
+                                'cls': a["name"],
+                                'page': pidx,
+                                'obb_cx': a.get("obb_cx"),
+                                'obb_cy': a.get("obb_cy"),
+                                'anchor_text': name_txt,
+                                'coord_text': coord_txt
+                            }
+
+                            all_rows.append(dict(
+                                detection_id=make_uuid(element_for_uuid),
+                                row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
+                                anchor_text=name_txt, anchor_conf=ocr_conf, coord_text=coord_txt, coord_value=coord_val, gi_gl=gi,
+                                ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
+                                cx1=cbbox[0], cy1=cbbox[1], cx2=cbbox[2], cy2=cbbox[3],
+                                angle=a.get("angle"), angle_raw=a.get("angle_raw"),
+                                obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
+                                obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
+                                poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
+                                notes="", weichen_coordinates=[],
+                                fahrtrichtung=fahrtrichtung,
+                                _fahrtrichtung_source=fahrtrichtung_source
+                            ))
+                            continue
+
+                        # ✅ EXISTING CODE FOR OTHER CLASSES
+                        available_coords = [c for c in coords if id(c) not in used_coord_ids]
+                        linked = link_anchor_to_coord(a, available_coords, learned_patterns)
+                        
+                        coord_txt, coord_val, gi = None, None, None
+                        cbbox = (None, None, None, None)
+                        
+                        if linked is not None:
+                            used_coord_ids.add(id(linked))
+                            
+                            dx_offset = linked["cx"] - a["cx"]
+                            dy_offset = linked["cy"] - a["cy"]
+                            if a["name"] not in learned_patterns:
+                                learned_patterns[a["name"]] = []
+                            learned_patterns[a["name"]].append((dx_offset, dy_offset))
+                            
+                            meta = coord_meta.get(id(linked), {})
+                            coord_txt, coord_val, gi = meta.get("text"), meta.get("value"), meta.get("gi")
+                            if coord_txt:
+                                coord_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', coord_txt)
+                                coord_txt = re.sub(r'\s*[|/\\]\s*$', '', coord_txt)
+                                coord_txt = ' '.join(coord_txt.split())
+                                coord_txt = coord_txt.strip()
+
+                            cbbox = (linked["x1"], linked["y1"], linked["x2"], linked["y2"])
+                        
+                        element_for_uuid = {
+                            'cls': a["name"],
+                            'page': pidx,
+                            'obb_cx': a.get("obb_cx"),
+                            'obb_cy': a.get("obb_cy"),
+                            'anchor_text': name_txt,
+                            'coord_text': coord_txt
+                        }
+                        
+                        all_rows.append(dict(
+                            detection_id=make_uuid(element_for_uuid),
+                            row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
+                            anchor_text=name_txt, anchor_conf=ocr_conf, coord_text=coord_txt, coord_value=coord_val, gi_gl=gi,
+                            ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
+                            cx1=cbbox[0], cy1=cbbox[1], cx2=cbbox[2], cy2=cbbox[3],
+                            angle=a.get("angle"), angle_raw=a.get("angle_raw"),
+                            obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
+                            obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
+                            poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
+                            notes="", weichen_coordinates=[], 
+                            fahrtrichtung=fahrtrichtung,
+                            _fahrtrichtung_source=fahrtrichtung_source  # ✅ CHANGE 3
+                        ))
+
+                    for c in coords:
+                        row_id = len(all_rows)
+                        meta = coord_meta.get(id(c), {})
+                        
+                        element_for_uuid = {
+                            'cls': "coordinate",
+                            'page': pidx,
+                            'obb_cx': c.get("obb_cx"),
+                            'obb_cy': c.get("obb_cy"),
+                            'cx1': c["x1"],
+                            'cy1': c["y1"],
+                            'coord_text': meta.get("text")
+                        }
+                        
+                        all_rows.append(dict(
+                            detection_id=make_uuid(element_for_uuid),
+                            row_id=row_id, page=pidx, cls="coordinate", conf=round(c["conf"], 3), color=meta.get("color", "none"),
+                            anchor_text="", coord_text=meta.get("text"), coord_value=meta.get("value"), gi_gl=meta.get("gi"),
+                            ax1=None, ay1=None, ax2=None, ay2=None,
+                            cx1=c["x1"], cy1=c["y1"], cx2=c["x2"], cy2=c["y2"],
+                            angle=c.get("angle"), angle_raw=c.get("angle_raw"),
+                            obb_cx=c.get("obb_cx"), obb_cy=c.get("obb_cy"),
+                            obb_w=c.get("obb_w"), obb_h=c.get("obb_h"),
+                            poly=(c.get("poly").tolist() if isinstance(c.get("poly"), np.ndarray) else c.get("poly")),
+                            ocr_x1=None, ocr_y1=None, ocr_x2=None, ocr_y2=None,
+                            ocr_region_source=None,
+                            notes="", weichen_coordinates=[],
+                            fahrtrichtung=None,
+                            _fahrtrichtung_source='none'  # ✅ CHANGE 3
+                        ))
+                        
+                    emit_progress(pidx - 1, W['raster'] + W['prep'] + W['det'] + W['ocr_c'] + W['ocr_a'] + W['link'])
+
+                    df_page = pd.DataFrame([r for r in all_rows if r["page"] == pidx])
+                
+                else:
+                    self.status.emit(f"[page {pidx}] Extrahiere Bild (Überspringe Analyse)...")
+                    emit_progress(pidx - 1, 1.0)
+
+                page_bgr_arrays[pidx] = bgr_color
+                page_dfs[pidx] = df_page
+                
+                self.page_processed.emit(pidx, bgr_color, df_page)
+                
+                self.status.emit(f"[page {pidx}] Done.")
+
+                del pil, bgr_color
+                if self.run_analysis:
+                    del mask_red, mask_yel, coords, anchors, coord_meta, dets
+                gc.collect()
+            
+            df_all = pd.DataFrame(all_rows)
+
+            if self.run_analysis:
+                self.status.emit(f"[done] Total rows: {len(df_all)}")
+                
+                print(f"\n{'='*70}")
+                print(f"🔄 MERGING DUPLICATE SIGNALS")
+                print(f"{'='*70}")
+                original_len = len(all_rows)
+
+                # ✅ Merge WITHOUT track fallback
+                all_rows = merge_duplicate_signals(
+                    all_rows,
+                    track_skeleton=None,  # ✅ Don't pass track skeleton to merge
+                    gks_dets=gks_dets if 'gks_dets' in locals() else []
+                )
+                df_all = pd.DataFrame(all_rows)
+
+                merged_len = len(all_rows)
+                if original_len != merged_len:
+                    print(f"   Merge complete: {original_len} → {merged_len} (saved {original_len - merged_len} rows)")
+                print(f"{'='*70}\n")
+                
+                # ========================================
+                # ✅ TRACK FALLBACK FOR MERGED SIGNALS (MAJORITY VOTE)
+                # ========================================
+
+                if track_skeleton is not None:
+                    print(f"\n{'='*70}")
+                    print(f"🛤️  TRACK FALLBACK - Filling missing Fahrtrichtung (MAJORITY VOTE)")
+                    print(f"{'='*70}")
+                    
+                    # ✅ Find signals that need track fallback (only those WITHOUT Fahrtrichtung)
+                    signals_needing_fallback = [
+                        row for row in all_rows 
+                        if row['cls'] == 'signal' 
+                        and not row.get('_hidden')
+                        and not row.get('fahrtrichtung')  # ✅ Only fill missing values
+                    ]
+                    
+                    print(f"   Signals without Fahrtrichtung: {len(signals_needing_fallback)}")
+                    
+                    fallback_success = 0
+                    fallback_failed = 0
+                    
+                    for row in signals_needing_fallback:
+                        signal_text = row.get('anchor_text', '?')
+                        
+                        # Skip V-signals
+                        if signal_text and signal_text.startswith('V'):
+                            continue
+                        
+                        print(f"\n   🛤️  Trying track fallback for '{signal_text}'")
+                        
+                        # ========================================
+                        # ✅ MAJORITY VOTE - Check ALL signal instances
+                        # ========================================
+                        
+                        signal_positions = row.get('_signal_positions', {})
+                        
+                        if signal_positions:
+                            print(f"      📊 Found {len(signal_positions)} signal instances - using MAJORITY VOTE")
+                            
+                            votes = []  # List of (instance_name, fahrtrichtung)
+                            
+                            for instance_name, pos_data in signal_positions.items():
+                                # ✅ SKIP haltepunkt-referenced signal instances
+                                # These are the actual signal detections that were near haltepunkt markers
+                                # We only want the coordinate_signal and bare haltepunkt_signal for voting
+                                if instance_name == 'haltepunkt_signal':
+                                    print(f"         {instance_name}: skipped (haltepunkt-referenced)")
+                                    continue
+                                
+                                # ✅ Calculate center from THIS instance's bounding box
+                                instance_cx = (pos_data['ax1'] + pos_data['ax2']) / 2
+                                instance_cy = (pos_data['ay1'] + pos_data['ay2']) / 2
+                                
+                                # Create detection dict for this instance
+                                instance_det = {
+                                    'x1': pos_data['ax1'],
+                                    'y1': pos_data['ay1'],
+                                    'x2': pos_data['ax2'],
+                                    'y2': pos_data['ay2'],
+                                    'cx': instance_cx,  # ✅ Use THIS instance's center
+                                    'cy': instance_cy,  # ✅ Use THIS instance's center
+                                    'text': signal_text,
+                                    'angle': row.get('angle', 0.0),
+                                    'angle_raw': row.get('angle_raw', row.get('angle', 0.0)),
+                                    'obb_w': row.get('obb_w', 0),
+                                    'obb_h': row.get('obb_h', 0)
+                                }
+                                
+                                # Check this instance
+                                fahr = detect_fahrtrichtung(
+                                    instance_det,
+                                    gks_dets=[],
+                                    track_skeleton=track_skeleton,
+                                    track_bounds=track_bounds,  # ✅ NEW: Pass track bounds
+                                    track_sample_distance=300,
+                                    track_search_radius=500
+                                )
+                                
+                                if fahr:
+                                    votes.append((instance_name, fahr))
+                                    print(f"         {instance_name}: {fahr}")
+                                else:
+                                    print(f"         {instance_name}: undetermined")
+                            
+                            # Count votes
+                            if votes:
+                                vote_counts = Counter([v[1] for v in votes])
+                                
+                                print(f"      📊 Vote results: {dict(vote_counts)}")
+                                
+                                # Get majority
+                                if len(vote_counts) == 1:
+                                    # Unanimous
+                                    fahrtrichtung_from_track = votes[0][1]
+                                    print(f"      ✅ UNANIMOUS: All instances agree on '{fahrtrichtung_from_track}'")
+                                else:
+                                    # Majority wins
+                                    majority_fahr, majority_count = vote_counts.most_common(1)[0]
+                                    total_votes = len(votes)
+                                    
+                                    if majority_count > total_votes / 2:
+                                        fahrtrichtung_from_track = majority_fahr
+                                        print(f"      ✅ MAJORITY: '{majority_fahr}' ({majority_count}/{total_votes} votes)")
+                                    else:
+                                        # Tie - use PRIMARY instance as tiebreaker
+                                        fahrtrichtung_from_track = None
+                                        print(f"      ⚠️ TIE: No clear majority - fallback failed")
+                            else:
+                                # No votes - all instances failed
+                                fahrtrichtung_from_track = None
+                                print(f"      ❌ All instances failed track detection")
+                        
+                        else:
+                            # ========================================
+                            # FALLBACK: No _signal_positions (single instance)
+                            # ========================================
+                            print(f"      ⚠️ No _signal_positions found - using PRIMARY instance only")
+                            
+                            signal_det_for_track = {
+                                'x1': row['ax1'],
+                                'y1': row['ay1'],
+                                'x2': row['ax2'],
+                                'y2': row['ay2'],
+                                'cx': row.get('obb_cx'),
+                                'cy': row.get('obb_cy'),
+                                'text': signal_text,
+                                'angle': row.get('angle', 0.0),
+                                'angle_raw': row.get('angle_raw', row.get('angle', 0.0)),
+                                'obb_w': row.get('obb_w', 0),
+                                'obb_h': row.get('obb_h', 0)
+                            }
+                            
+                            fahrtrichtung_from_track = detect_fahrtrichtung(
+                            signal_det_for_track,
+                            gks_dets=[],
+                            track_skeleton=track_skeleton,
+                            track_bounds=track_bounds,  # ✅ NEW: Pass track bounds
+                            track_sample_distance=300,
+                            track_search_radius=500
+                        )
+                        # ========================================
+                        # Apply result
+                        # ========================================
+                        if fahrtrichtung_from_track:
+                            row['fahrtrichtung'] = fahrtrichtung_from_track
+                            row['_fahrtrichtung_source'] = 'track'
+                            fallback_success += 1
+                            print(f"      ✅ SUCCESS: Fahrtrichtung '{fahrtrichtung_from_track}' (track)")
+                        else:
+                            row['_fahrtrichtung_source'] = 'none'
+                            fallback_failed += 1
+                            print(f"      ❌ FAILED: No track found")
+                    
+                    print(f"\n{'='*70}")
+                    print(f"   Track fallback results:")
+                    print(f"      Success: {fallback_success}")
+                    print(f"      Failed: {fallback_failed}")
+                    print(f"{'='*70}\n")
+                    
+                    # Rebuild DataFrame with updated Fahrtrichtung
+                    df_all = pd.DataFrame(all_rows)
+                
+                # Rebuild page_dfs from merged data
+                print(f"\n🔄 Rebuilding page_dfs from merged data...")
+                page_dfs = {}
+                if not df_all.empty and 'page' in df_all.columns:
+                    for page_num in df_all['page'].unique():
+                        page_num_int = int(page_num)
+                        page_dfs[page_num_int] = df_all[df_all['page'] == page_num].copy()
+
+                        if '_all_bboxes' in page_dfs[page_num_int].columns:
+                            signals_with_multi = page_dfs[page_num_int][page_dfs[page_num_int]['_all_bboxes'].notna()]
+                            print(f"   Page {page_num_int}: {len(signals_with_multi)} signals with _all_bboxes")
+                        else:
+                            print(f"   ⚠️ Page {page_num_int}: _all_bboxes column missing!")
+                else:
+                    print(f"   ⚠️ No data to rebuild (df_all is empty)")
+
+                print(f"✅ Rebuilt {len(page_dfs)} page DataFrames\n")
+
+            # ✅ ADD link_coord_row_id TRACKING
+            # After all processing is complete, map anchors to their linked coordinates
+            # Use the dataframe itself - find anchors that have coord_text matching a coordinate
+            if self.run_analysis and not df_all.empty and 'cls' in df_all.columns:
+                print(f"\n{'='*70}")
+                print(f"🔗 ADDING link_coord_row_id TRACKING")
+                print(f"{'='*70}")
+
+                # Create link_coord_row_id column
+                df_all['link_coord_row_id'] = None
+
+                # Find all anchors that have been linked (they have coord_text and coordinate bbox)
+                linked_anchors = df_all[
+                    (df_all['cls'] != 'coordinate') &  # Not a coordinate itself
+                    (df_all['coord_text'].notna()) &    # Has coord_text
+                    (df_all['cx1'].notna())             # Has coordinate bbox
+                ]
+
+                print(f"   Found {len(linked_anchors)} anchors with linked coordinates")
+
+                link_count = 0
+                for idx in linked_anchors.index:
+                    anchor_row = df_all.loc[idx]
+                    anchor_cls = anchor_row['cls']
+                    anchor_coord_text = anchor_row['coord_text']
+                    anchor_cx1 = anchor_row['cx1']
+                    anchor_cy1 = anchor_row['cy1']
+
+                    # Find the coordinate with matching text and bbox
+                    matching_coords = df_all[
+                        (df_all['cls'] == 'coordinate') &
+                        (df_all['coord_text'] == anchor_coord_text) &
+                        (df_all['cx1'] == anchor_cx1) &
+                        (df_all['cy1'] == anchor_cy1)
+                    ]
+
+                    if not matching_coords.empty:
+                        coord_row_id = matching_coords.iloc[0]['row_id']
+                        df_all.at[idx, 'link_coord_row_id'] = coord_row_id
+                        link_count += 1
+
+                print(f"   ✅ Added {link_count} link_coord_row_id references")
+
+                # Rebuild page_dfs to include link_coord_row_id
+                print(f"   🔄 Updating page_dfs with link_coord_row_id...")
+                for page_num in df_all['page'].unique():
+                    page_num_int = int(page_num)
+                    page_dfs[page_num_int] = df_all[df_all['page'] == page_num].copy()
+
+                print(f"{'='*70}\n")
+
+            self.progress.emit(100)
+            self.done.emit(df_all, page_dfs, track_skeleton if self.detect_tracks else None, None)
+            
+        except Exception as e:
+            import traceback
+            tb_str = traceback.format_exc()
+            self.status.emit(f"[error] {e}\n{tb_str}")
+            df_err = pd.DataFrame([{"error": str(e)}])
+            self.done.emit(df_err, {}, None, e)

@@ -1,0 +1,2666 @@
+from typing import Tuple, Optional
+import numpy as np
+import cv2
+from PIL import Image
+import re
+import threading
+import logging
+from config import DEBUG_ANGLE_ROUTING,PADDLEOCR_PARAMS, DEBUG_SIGNALS, SIG_LINE_THICK, SIG_USE_TIGHTEN, SIGNAL_TEXT_HEIGHT_HINT, SIG_SCORE_MIN, CLASS_ID_PATTERNS, COORD_RE, CARDINAL_PARAMS, NUMERIC_OK
+from core.image_processing import perspective_crop_from_det, rotated_crop_from_det, rotated_crop_pil, _upscale_if_tiny,_remove_long_lines_oriented, _pil_to_gray_np, _enhance_contrast, _binarize_for_text, _invert, crop_pil, _deskew_small
+from utils.helpers import _is_cardinal,_debug_angle
+from typing import List, Dict, Tuple, Optional, Any
+from core.linking import LINK_RULES, name_windows_for
+import os 
+
+
+# ============================================================================
+# PADDLEOCR HELPER FUNCTIONS
+# ============================================================================
+
+def preprocess_for_paddleocr(pil_img: Image.Image, cls_name: str = "default") -> np.ndarray:
+    """
+    Minimal preprocessing for PaddleOCR.
+    PaddleOCR has strong built-in preprocessing.
+    
+    Args:
+        pil_img: PIL Image
+        cls_name: Class name for class-specific preprocessing
+    
+    Returns:
+        BGR numpy array ready for PaddleOCR
+    """
+    # Convert to grayscale array
+    if isinstance(pil_img, Image.Image):
+        arr = np.array(pil_img.convert('L'))
+    else:
+        arr = pil_img
+    
+    # CLAHE for contrast enhancement (fast and effective)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    arr = clahe.apply(arr)
+    
+    # Morphology for GKS digits (helps with frames and broken digits)
+    if cls_name in ["gks_gesteuert", "gks_festkodiert"]:
+        # Close small gaps in digits
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        arr = cv2.morphologyEx(arr, cv2.MORPH_CLOSE, kernel, iterations=1)
+        
+        # Remove thin lines (frames) while preserving thick strokes (digits)
+        # Vertical lines
+        k_vert = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
+        no_vert = cv2.morphologyEx(arr, cv2.MORPH_OPEN, k_vert)
+        arr = arr - no_vert  # Remove vertical lines
+        
+        # Horizontal lines
+        k_horiz = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
+        no_horiz = cv2.morphologyEx(arr, cv2.MORPH_OPEN, k_horiz)
+        arr = arr - no_horiz  # Remove horizontal lines
+        
+        # Slight thickening to repair any damage
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        arr = cv2.dilate(arr, kernel, iterations=1)
+    
+    # Light sharpening for signals and coordinates
+    elif cls_name in ["signal", "coordinate"]:
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+        arr = cv2.filter2D(arr, -1, kernel)
+    
+    # Convert to BGR for PaddleOCR
+    return cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+
+
+def paddleocr_recognize(
+    pil_img: Image.Image, 
+    cls_name: str = "default",
+    whitelist: str = None
+) -> Tuple[str, float]:
+    """
+    Run PaddleOCR on PIL image.
+    
+    Args:
+        pil_img: PIL Image to recognize
+        cls_name: Class name for class-specific processing
+        whitelist: Character whitelist (filtering applied post-OCR)
+    
+    Returns:
+        (recognized_text, confidence_0_to_1)
+    """
+    paddle = get_paddleocr_instance()
+    
+    if paddle is None:
+        return "", 0.0
+    
+    try:
+        # Preprocess
+        arr = preprocess_for_paddleocr(pil_img, cls_name)
+        
+        # Run PaddleOCR
+        results = paddle.ocr(arr, cls=False)
+        
+        if not results or results[0] is None or len(results[0]) == 0:
+            return "", 0.0
+        
+        # Extract all text and confidence
+        texts = []
+        confs = []
+        for line in results[0]:
+            if line is None:
+                continue
+            bbox, (text, conf) = line
+            texts.append(text)
+            confs.append(conf)
+        
+        if not texts:
+            return "", 0.0
+        
+        # Combine multiple detections
+        final_text = " ".join(texts)
+        final_conf = sum(confs) / len(confs)
+        
+        # Apply whitelist filtering if provided
+        if whitelist:
+            filtered = ''.join(c for c in final_text if c in whitelist or c.isspace())
+            if filtered.strip():
+                final_text = filtered
+        
+        return final_text.strip(), final_conf
+        
+    except Exception as e:
+        if DEBUG_SIGNALS:
+            print(f"⚠️ PaddleOCR error ({cls_name}): {e}")
+        return "", 0.0
+
+
+def paddleocr_recognize_multiline(
+    pil_img: Image.Image,
+    cls_name: str = "weichen_block",
+    whitelist: str = None
+) -> Tuple[str, float]:
+    """
+    Run PaddleOCR on PIL image for multi-line text (weichen_block).
+    Preserves line structure by joining lines with newlines instead of spaces.
+
+    Args:
+        pil_img: PIL Image to recognize
+        cls_name: Class name for class-specific processing
+        whitelist: Character whitelist (filtering applied post-OCR)
+
+    Returns:
+        (recognized_text_with_newlines, confidence_0_to_1)
+    """
+    paddle = get_paddleocr_instance()
+
+    if paddle is None:
+        return "", 0.0
+
+    try:
+        # Preprocess
+        arr = preprocess_for_paddleocr(pil_img, cls_name)
+
+        # Run PaddleOCR
+        results = paddle.ocr(arr, cls=False)
+
+        if not results or results[0] is None or len(results[0]) == 0:
+            return "", 0.0
+
+        # Extract all text and confidence, preserving line structure
+        texts = []
+        confs = []
+        for line in results[0]:
+            if line is None:
+                continue
+            bbox, (text, conf) = line
+            texts.append(text)
+            confs.append(conf)
+
+        if not texts:
+            return "", 0.0
+
+        # ✅ Join with newlines to preserve multi-line structure for weichen_block
+        final_text = "\n".join(texts)
+        final_conf = sum(confs) / len(confs)
+
+        # Apply whitelist filtering if provided (preserve newlines)
+        if whitelist:
+            filtered_lines = []
+            for line in final_text.split('\n'):
+                filtered_line = ''.join(c for c in line if c in whitelist or c.isspace())
+                if filtered_line.strip():
+                    filtered_lines.append(filtered_line)
+            if filtered_lines:
+                final_text = '\n'.join(filtered_lines)
+
+        return final_text.strip(), final_conf
+
+    except Exception as e:
+        if DEBUG_SIGNALS:
+            print(f"⚠️ PaddleOCR multiline error ({cls_name}): {e}")
+        return "", 0.0
+
+
+def paddleocr_multi_rotation(
+    pil_img: Image.Image,
+    cls_name: str = "default",
+    rotations: list = [0, 90, 180, 270],
+    whitelist: str = None
+) -> Tuple[str, float]:
+    """
+    Try PaddleOCR with multiple rotations, return best result.
+    Useful for cardinal/horizontal text that may be in any orientation.
+    
+    Args:
+        pil_img: PIL Image
+        cls_name: Class name
+        rotations: List of rotation angles to try
+        whitelist: Character whitelist
+    
+    Returns:
+        (best_text, best_confidence)
+    """
+    best_txt, best_conf = "", 0.0
+    
+    for rot in rotations:
+        if rot == 0:
+            test_img = pil_img
+        else:
+            test_img = pil_img.rotate(rot, expand=True, fillcolor=255)
+        
+        txt, conf = paddleocr_recognize(test_img, cls_name, whitelist)
+        
+        if conf > best_conf:
+            best_txt, best_conf = txt, conf
+    
+    return best_txt, best_conf
+
+
+# ============================================================================
+# PADDLEOCR INTEGRATION
+# ============================================================================
+
+try:
+    from paddleocr import PaddleOCR
+    PADDLEOCR_AVAILABLE = True
+except ImportError:
+    PADDLEOCR_AVAILABLE = False
+    print("⚠️ PaddleOCR not available. Install: pip install paddleocr paddlepaddle")
+
+_PADDLE_OCR_INSTANCE = None
+
+_PADDLE_OCR_LOCK = threading.RLock()  # RLock allows nested calls
+
+def paddle_ocr_locked(func):
+    """Thread-safe decorator for OCR functions."""
+    def wrapper(*args, **kwargs):
+        with _PADDLE_OCR_LOCK:
+            return func(*args, **kwargs)
+    return wrapper
+
+
+def get_paddleocr_instance():
+    """PaddleOCR optimized for speed."""
+    global _PADDLE_OCR_INSTANCE
+    
+    if not PADDLEOCR_AVAILABLE:
+        return None
+    
+    if _PADDLE_OCR_INSTANCE is None:
+        with _PADDLE_OCR_LOCK:
+            if _PADDLE_OCR_INSTANCE is None:
+                try:
+                    from paddleocr import PaddleOCR
+                    
+                    logging.getLogger('ppocr').setLevel(logging.ERROR)
+
+                    _PADDLE_OCR_INSTANCE = PaddleOCR(
+                    use_angle_cls=False,
+                    lang='en',
+                    use_gpu=False,
+                    show_log=False,
+                    det=True,
+                    rec=True,
+                    cls=False,
+                    rec_batch_num=1,
+                    det_db_thresh=0.3,
+                    det_db_box_thresh=0.5,
+                    use_mp=False,
+                    total_process_num=1,
+                    cpu_threads=max(2, min(12, os.cpu_count() or 4)),  # ← DYNAMIC
+                )
+                    
+                    print(f"✅ PaddleOCR initialized: threads=4, mkldnn=True")
+                    
+                except Exception as e:
+                    print(f"❌ Failed to initialize PaddleOCR: {e}")
+                    _PADDLE_OCR_INSTANCE = None
+    
+    return _PADDLE_OCR_INSTANCE
+# ===================== =======================================================
+# COORDINATE OCR (UNIFIED: Routes based on angle)
+# ============================================================================
+
+@paddle_ocr_locked
+def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
+    """
+    Angular coordinate OCR - handles both simple and bracketed coordinates.
+    Uses 3-step cleaning: overlap removal → bracket fixing → scoring
+    OPTIMIZED: Smart candidate generation with early exit for complete coordinates.
+    """
+    # Get BOTH angles
+    ang_normalized = float(det.get("angle", 0.0))
+    ang_raw = float(det.get("angle_raw", ang_normalized))
+    
+    # Get box dimensions
+    w = float(det.get("obb_w", det["x2"] - det["x1"]))
+    h = float(det.get("obb_h", det["y2"] - det["y1"]))
+    box_min_side = min(w, h)
+    
+    # Adaptive padding - slightly increased for edge cases
+    if box_min_side < 66:
+        pad = 5   # ↑ +1 for edge cases
+    elif box_min_side < 76:
+        pad = 9   # ↑ +1 for edge cases
+    else:
+        pad = 9   # ↑ +1 for edge cases
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"\n📦 COORD ANGULAR: {w:.0f}×{h:.0f}px | raw={ang_raw:.1f}° norm={ang_normalized:.1f}° | pad={pad}")
+    
+    best_txt, best_sc = "", -1.0
+    
+    # ========================================================================
+    # STEP 1: Get crop (perspective warp)
+    # ========================================================================
+    try:
+        pil_crop = perspective_crop_from_det(det, bgr_color, pad=pad)
+    except Exception:
+        pil_crop = rotated_crop_from_det(det, bgr_color, pad=pad)
+    
+    if pil_crop.width < 5 or pil_crop.height < 5:
+        return ""
+    
+    # Upscale
+    pil_crop = _upscale_if_tiny(pil_crop, min_side=80, scale=3)
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   → Crop size: {pil_crop.width}×{pil_crop.height}px")
+    
+    # ========================================================================
+    # STEP 2: Line removal for angular text (GENTLER for brackets)
+    # ========================================================================
+    if not _is_cardinal(ang_normalized):
+        # ✅ GENTLER line removal - slightly more conservative for edge cases
+        pil_pass1 = _remove_long_lines_oriented(pil_crop, ang_raw, frac_len=0.32, thickness=2)   # ↑ 0.30→0.32
+        pil_pass2 = _remove_long_lines_oriented(pil_pass1, ang_raw, frac_len=0.27, thickness=6)  # ↑ 0.25→0.27
+        pil_final = _remove_long_lines_oriented(pil_pass2, ang_raw, frac_len=0.22, thickness=10) # ↑ 0.20→0.22
+
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   → Applied 3-pass line removal (gentler)")
+    else:
+        pil_final = pil_crop
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   → No line removal (near-cardinal)")
+    
+    # ========================================================================
+    # STEP 3: Preprocessing variants
+    # ========================================================================
+    g0 = _pil_to_gray_np(pil_final)
+    g1 = _enhance_contrast(g0)
+    g2 = _binarize_for_text(g1)
+    
+    # Angular gets inverted variant too
+    if _is_cardinal(ang_normalized):
+        variants = [g2, g1, g0]
+    else:
+        variants = [g2, _invert(g2), g1, g0]
+    
+    bases = [Image.fromarray(v) for v in variants]
+    rotations = [0, 90, 180, 270]
+    
+    # ========================================================================
+    # STEP 4: PaddleOCR with 3-step cleaning + OPTIMIZED MERGING
+    # ========================================================================
+    paddle = get_paddleocr_instance()
+    
+    if paddle is None:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   ❌ PaddleOCR not available")
+        return ""
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   → Running PaddleOCR...")
+    
+    try:
+        for base_idx, base in enumerate(bases):
+            for rot in rotations:
+                test_img = base.rotate(rot, expand=True, fillcolor=255) if rot != 0 else base
+                test_arr = np.array(test_img)
+                
+                if len(test_arr.shape) == 2:
+                    test_arr = cv2.cvtColor(test_arr, cv2.COLOR_GRAY2BGR)
+                
+                # Run PaddleOCR
+                results = paddle.ocr(test_arr, cls=False)
+                
+                if not results or not results[0]:
+                    continue
+                
+                # ✅ Collect ALL detections with their positions
+                all_detections = []
+                for line in results[0]:
+                    if line is None:
+                        continue
+                    bbox, (text, conf) = line
+                    
+                    if not text:
+                        continue
+                    
+                    # Calculate X-position (left edge of bbox)
+                    x_pos = min(pt[0] for pt in bbox)
+                    
+                    all_detections.append({
+                        'text': text,
+                        'conf': conf,
+                        'x_pos': x_pos,
+                        'bbox': bbox
+                    })
+                
+                if not all_detections:
+                    continue
+                
+                # ✅ Sort detections by X-position (left to right)
+                all_detections.sort(key=lambda d: d['x_pos'])
+                
+                # ✅ Quick quality check - skip if all detections are low confidence
+                if all(d['conf'] < 0.40 for d in all_detections):
+                    if DEBUG_ANGLE_ROUTING:
+                        print(f"      [var={base_idx} rot={rot:3d}°] → SKIP: All detections low confidence")
+                    continue
+                
+                # ✅ OPTIMIZED: Smart candidate generation with pre-filtering
+                candidates = []
+                
+                # Quick check: Do we have a number and a bracket?
+                has_number = any(any(c.isdigit() for c in d['text']) for d in all_detections)
+                has_bracket = any('(' in d['text'] or ')' in d['text'] for d in all_detections)
+                
+                # CASE 1: Single detection (most common - ~60% of cases)
+                if len(all_detections) == 1:
+                    candidates.append({
+                        'text': all_detections[0]['text'],
+                        'conf': all_detections[0]['conf'],
+                        'is_merged': False
+                    })
+                
+                # CASE 2: Two detections - likely number + bracket
+                elif len(all_detections) == 2:
+                    det1, det2 = all_detections[0], all_detections[1]
+                    avg_conf = (det1['conf'] + det2['conf']) / 2
+                    
+                    # Try both individual (in case one is complete)
+                    candidates.append({'text': det1['text'], 'conf': det1['conf'], 'is_merged': False})
+                    candidates.append({'text': det2['text'], 'conf': det2['conf'], 'is_merged': False})
+                    
+                    # Only merge if it looks like number + bracket
+                    if has_number and has_bracket:
+                        candidates.append({
+                            'text': det1['text'] + det2['text'],  # No space
+                            'conf': avg_conf,
+                            'is_merged': True
+                        })
+                        # Only try with space if bracket is in second detection
+                        if '(' in det2['text']:
+                            candidates.append({
+                                'text': det1['text'] + ' ' + det2['text'],  # With space
+                                'conf': avg_conf,
+                                'is_merged': True
+                            })
+                
+                # CASE 3: Three or more detections - rare, but handle it
+                else:
+                    # Add individual detections
+                    for det in all_detections:
+                        candidates.append({'text': det['text'], 'conf': det['conf'], 'is_merged': False})
+                    
+                    # Only try merging if we have number + bracket pattern
+                    if has_number and has_bracket:
+                        all_texts = [d['text'] for d in all_detections]
+                        avg_conf = sum(d['conf'] for d in all_detections) / len(all_detections)
+                        
+                        # Try without spaces
+                        candidates.append({
+                            'text': ''.join(all_texts),
+                            'conf': avg_conf,
+                            'is_merged': True
+                        })
+                        
+                        # Try with spaces
+                        if len(all_detections) == 2:
+                            candidates.append({
+                                'text': ' '.join(all_texts),
+                                'conf': avg_conf,
+                                'is_merged': True
+                            })
+                
+                # ✅ Process all candidates
+                for cand in candidates:
+                    text = cand['text']
+                    conf = cand['conf']
+                    is_merged = cand.get('is_merged', False)
+                    
+                    if DEBUG_ANGLE_ROUTING:
+                        marker = "[MERGED]" if is_merged else "[SINGLE]"
+                        print(f"      [var={base_idx} rot={rot:3d}°] {marker} RAW: '{text}' (conf={conf:.2f})")
+                    
+                    # STEP 1: Remove overlap garbage (SKIP for merged candidates)
+                    if is_merged:
+                        txt_clean = text
+                    else:
+                        txt_clean = _clean_coordinate_overlap(text)
+                        
+                        if not txt_clean:
+                            if DEBUG_ANGLE_ROUTING:
+                                print(f"         → SKIPPED: No valid coordinate pattern")
+                            continue
+                    
+                    # STEP 2: Fix bracket mistakes
+                    txt_fixed = _fix_coordinate_brackets(txt_clean)
+                    
+                    if DEBUG_ANGLE_ROUTING:
+                        if txt_fixed != text:
+                            print(f"         → CLEANED: '{text}' → '{txt_fixed}'")
+                    
+                    # STEP 3: Score
+                    sc = _score_coord_text(txt_fixed)
+                    
+                    if DEBUG_ANGLE_ROUTING and sc > 0:
+                        print(f"         → SCORE: {sc:.2f}")
+                    
+                    if sc > best_sc:
+                        best_txt, best_sc = txt_fixed, sc
+                        if DEBUG_ANGLE_ROUTING:
+                            print(f"         → NEW BEST!")
+                        
+                        # ✅ Smart early exit - only for complete coordinates
+                        has_brackets = '(' in txt_fixed and ')' in txt_fixed
+                        
+                        if has_brackets and sc >= 2.0 and conf >= 0.50:
+                            if DEBUG_ANGLE_ROUTING:
+                                print(f"      ✅ EARLY EXIT (complete): '{best_txt}'")
+                            # ✅ FINAL CLEANING before return
+                            best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
+                            best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
+                            return best_txt.strip()
+                        elif not has_brackets and sc >= 2.5 and conf >= 0.80:
+                            if DEBUG_ANGLE_ROUTING:
+                                print(f"      ✅ EARLY EXIT (high conf simple): '{best_txt}'")
+                            # ✅ FINAL CLEANING before return
+                            best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
+                            best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
+                            return best_txt.strip()
+            
+            # Check if we have a good result after each base variant
+            if best_txt and best_sc >= 1.0:
+                if DEBUG_ANGLE_ROUTING:
+                    print(f"   ✅ RESULT: '{best_txt}' (score:{best_sc:.2f})")
+                # ✅ FINAL CLEANING before return
+                best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
+                best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
+                return best_txt.strip()
+                        
+    except Exception as e:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      [PaddleOCR] → EXCEPTION: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    if DEBUG_ANGLE_ROUTING:
+        if best_txt:
+            print(f"   ⚠️ FINAL: '{best_txt}' (score:{best_sc:.2f})")
+        else:
+            print(f"   ❌ FAILED")
+    
+    # ✅ FINAL CLEANING before return
+    if best_txt:
+        best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
+        best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
+    
+    return best_txt.strip()
+
+def _clean_coordinate_overlap(text: str) -> str:
+    """
+    Clean coordinate text that has overlap artifacts from nearby text.
+    """
+    if not text:
+        return ""
+    
+    import re
+    
+    original_text = text
+    
+    # ✅ ONLY print if DEBUG_ANGLE_ROUTING
+    if DEBUG_ANGLE_ROUTING:
+        print(f"      [clean_overlap] Input: '{text}'")
+    
+    # ✅ MOVED: Pre-clean AFTER pattern matching (not before!)
+    # This preserves brackets during pattern detection
+    
+    # Pattern 1a: Complete bracketed coordinate
+    bracket_complete_pattern = r'-?\d+[.,]\d+$[A-Za-z0-9.,]+$'
+    bracket_complete_match = re.search(bracket_complete_pattern, text)
+    
+    if bracket_complete_match:
+        result = bracket_complete_match.group(0).replace(',', '.')
+        
+        # ✅ NOW clean trailing alphabet AFTER extraction
+        result = re.sub(r'\s*[a-zA-Z]\s*$', '', result)
+        result = re.sub(r'\s*[|/\\]\s*$', '', result)
+        
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      [clean_overlap] ✅ Pattern 1a (complete bracket): '{original_text}' → '{result}'")
+        
+        return result
+    
+    # Pattern 1b: Incomplete bracketed coordinate
+    bracket_incomplete_pattern = r'-?\d+[.,]\d+\([A-Za-z0-9.,]+'
+    bracket_incomplete_match = re.search(bracket_incomplete_pattern, text)
+    
+    if bracket_incomplete_match:
+        result = bracket_incomplete_match.group(0).replace(',', '.')
+        
+        # Add closing bracket if missing
+        if ')' not in result:
+            result += ')'
+        
+        # ✅ NOW clean trailing alphabet AFTER extraction
+        result = re.sub(r'\s*[a-zA-Z]\s*$', '', result)
+        result = re.sub(r'\s*[|/\\]\s*$', '', result)
+        
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      [clean_overlap] ✅ Pattern 1b (incomplete bracket, added closing): '{original_text}' → '{result}'")
+        
+        return result
+    
+    # Pattern 2: Simple number (no brackets)
+    simple_pattern = r'-?\d+[.,]\d+(?=\s|$|[^0-9.,])'
+    simple_match = re.search(simple_pattern, text)
+    
+    if simple_match:
+        result = simple_match.group(0).replace(',', '.')
+        
+        # ✅ Clean trailing alphabet for simple coordinates too
+        result = re.sub(r'\s*[a-zA-Z]\s*$', '', result)
+        result = re.sub(r'\s*[|/\\]\s*$', '', result)
+        
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      [clean_overlap] ✅ Pattern 2 (simple number): '{original_text}' → '{result}'")
+        
+        return result
+    
+    # No valid coordinate pattern found
+    if DEBUG_ANGLE_ROUTING:
+        print(f"      [clean_overlap] ❌ NO VALID PATTERN in: '{text}'")
+    
+    return ""
+
+def _score_coord_text(txt: str) -> float:
+    """
+    Score coordinate text - handles both simple and bracketed coordinates.
+    Examples: 
+        "0.0061" → 1.3
+        "0.0734(Gl.112)" → 2.5
+    """
+    if not txt:
+        return -1.0
+    
+    txt = txt.strip()
+    
+    # Quick validation
+    if not _looks_like_coordinate(txt):
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      [score] ❌ Not a coordinate: '{txt}'")
+        return 0.0
+    
+    # ✅ HANDLE BRACKETED COORDINATES like "0.0734(Gl.112)"
+    if '(' in txt and ')' in txt:
+        try:
+            main_part = txt.split('(')[0].strip()
+            bracket_part = txt.split('(')[1].split(')')[0].strip()
+        except:
+            if DEBUG_ANGLE_ROUTING:
+                print(f"      [score] ⚠️ Malformed bracket: '{txt}'")
+            return 0.5  # Malformed
+        
+        # Score main coordinate part (e.g., "0.0734")
+        main_digits = sum(c.isdigit() for c in main_part)
+        main_has_dot = '.' in main_part
+        
+        main_score = 0.0
+        if main_digits >= 1 and main_has_dot:
+            main_score = 1.0 + (main_digits * 0.1)
+        
+        # Score bracket part (e.g., "Gl.112")
+        bracket_score = 0.0
+        if 'Gl.' in bracket_part or 'gl.' in bracket_part:
+            bracket_score = 0.5
+        bracket_digits = sum(c.isdigit() for c in bracket_part)
+        bracket_score += bracket_digits * 0.05
+        
+        total_score = main_score + bracket_score
+        
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      [score] Bracketed: '{txt}' → main={main_score:.2f}, bracket={bracket_score:.2f}, total={total_score:.2f}")
+        
+        return total_score
+    
+    # ✅ SIMPLE COORDINATE (no brackets) - ORIGINAL LOGIC
+    digit_count = sum(c.isdigit() for c in txt)
+    has_dot = '.' in txt
+    has_comma = ',' in txt
+    
+    if digit_count < 1:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      [score] ❌ No digits: '{txt}'")
+        return 0.0
+    
+    score = 1.0
+    score += digit_count * 0.1
+    
+    if has_dot or has_comma:
+        score += 0.3
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"      [score] Simple: '{txt}' → {score:.2f}")
+    
+    return max(0.0, score)
+
+
+def _fix_coordinate_brackets(text: str) -> str:
+    """
+    Fix common OCR mistakes in coordinates with brackets.
+    Example: "0.0734(GI.112)" → "0.0734(Gl.112)"
+    """
+    if not text:
+        return ""
+    
+    import re
+    
+    original_text = text  # ✅ Save for debug
+    
+    # 1. Replace comma with dot (German decimal separator)
+    text = text.replace(',', '.')
+    
+    # 2. Fix Gl. pattern - all variations: GI, G1, Gi, gi, g1, gI → Gl.
+    text = re.sub(r'[Gg][Ii1l]\.?', 'Gl.', text)
+    
+    # 3. Remove extra spaces inside brackets
+    text = re.sub(r'\(\s+', '(', text)
+    text = re.sub(r'\s+\)', ')', text)
+    
+    result = text.strip()
+    
+    if DEBUG_ANGLE_ROUTING and result != original_text:
+        print(f"      [fix_brackets] '{original_text}' → '{result}'")
+    
+    return result
+
+
+def _looks_like_coordinate(text: str) -> bool:
+    """
+    Quick check if text looks like a valid coordinate.
+    Examples: "0.0734", "0.0734(Gl.112)", "10.5"
+    """
+    if not text:
+        return False
+    
+    # Must start with a digit or minus sign
+    if not (text[0].isdigit() or text[0] == '-'):
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      [looks_like] ❌ Doesn't start with digit/minus: '{text}'")
+        return False
+    
+    # Must contain at least one digit and one dot
+    has_digit = any(c.isdigit() for c in text)
+    has_dot = '.' in text
+    
+    if not (has_digit and has_dot):
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      [looks_like] ❌ Missing digit or dot: '{text}' (has_digit={has_digit}, has_dot={has_dot})")
+        return False
+    
+    # If it has brackets, they must be paired
+    if '(' in text or ')' in text:
+        if not ('(' in text and ')' in text):
+            if DEBUG_ANGLE_ROUTING:
+                print(f"      [looks_like] ❌ Unpaired brackets: '{text}'")
+            return False
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"      [looks_like] ✅ Valid: '{text}'")
+    
+    return True
+
+@paddle_ocr_locked
+def ocr_weichen_block(anchor: dict, bgr_color: np.ndarray) -> str:
+    """
+    OCR for weichen blocks - starts output from first line beginning with "W".
+    Simplified version without strict validation.
+    """
+    cls_name = anchor.get("name", "weichen_block")
+    
+    # Get box dimensions
+    w = float(anchor.get("obb_w", anchor["x2"] - anchor["x1"]))
+    h = float(anchor.get("obb_h", anchor["y2"] - anchor["y1"]))
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"\n📦 WEICHEN BLOCK: {w:.0f}×{h:.0f}px")
+    
+    # Minimal padding
+    pad = 0   
+    x1 = max(0, int(anchor["x1"] - pad))
+    y1 = max(0, int(anchor["y1"] - pad))
+    x2 = min(bgr_color.shape[1], int(anchor["x2"] + pad))
+    y2 = min(bgr_color.shape[0], int(anchor["y2"] + pad))
+    
+    crop_bgr = bgr_color[y1:y2, x1:x2]
+    pil_crop = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
+    
+    if pil_crop.width < 10 or pil_crop.height < 10:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   ❌ Crop too small: {pil_crop.width}×{pil_crop.height}")
+        return ""
+    
+    # Store original height
+    crop_height_original = pil_crop.height
+    
+    # Gentle upscaling
+    min_side = min(pil_crop.width, pil_crop.height)
+    scale = 1
+    
+    if min_side < 80:
+        scale = 2
+        pil_crop = pil_crop.resize(
+            (pil_crop.width * scale, pil_crop.height * scale), 
+            Image.LANCZOS
+        )
+    
+    crop_height_scaled = pil_crop.height
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   → Crop: {pil_crop.width}×{pil_crop.height}px (pad={pad}px, scale={scale}x)")
+    
+    # Preprocessing
+    g = _pil_to_gray_np(pil_crop)
+    g_enhanced = _enhance_contrast(g)
+    
+    variants = [
+        ("enhanced", g_enhanced),
+        ("grayscale", g),
+    ]
+    
+    paddle = get_paddleocr_instance()
+    
+    if paddle is None:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   ❌ PaddleOCR not available")
+        return ""
+    
+    best_lines = []
+    best_score = 0.0
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   → Running PaddleOCR...")
+    
+    try:
+        for var_name, img_arr in variants:
+            # Convert to BGR
+            if len(img_arr.shape) == 2:
+                img_arr = cv2.cvtColor(img_arr, cv2.COLOR_GRAY2BGR)
+            
+            # Run PaddleOCR
+            results = paddle.ocr(img_arr, cls=False)
+            
+            if not results or not results[0]:
+                if DEBUG_ANGLE_ROUTING:
+                    print(f"      [{var_name}] No text detected")
+                continue
+            
+            if DEBUG_ANGLE_ROUTING:
+                print(f"      [{var_name}] Detected {len(results[0])} text lines")
+            
+            # Collect ALL text lines with positions
+            all_text_lines = []
+            
+            for line in results[0]:
+                if line is None:
+                    continue
+                bbox, (text, conf) = line
+                
+                if not text:
+                    continue
+                
+                # Get Y position (vertical center of bbox)
+                y_pos = sum(pt[1] for pt in bbox) / len(bbox)
+                
+                # Clean text (fix missing W)
+                text_clean = text.strip()
+                
+                all_text_lines.append({
+                    'text': text_clean,
+                    'y_pos': y_pos,
+                    'conf': conf
+                })
+                
+                if DEBUG_ANGLE_ROUTING:
+                    print(f"         Line y={y_pos:.1f}: '{text_clean}' (conf={conf:.2f})")
+            
+            if not all_text_lines:
+                if DEBUG_ANGLE_ROUTING:
+                    print(f"      [{var_name}] No valid text lines after cleaning")
+                continue
+            
+            # Sort by Y-position (top to bottom)
+            all_text_lines.sort(key=lambda x: x['y_pos'])
+            
+            # Find first line starting with "W"
+            first_w_index = None
+            for idx, line_info in enumerate(all_text_lines):
+                if line_info['text'].upper().startswith('W'):
+                    first_w_index = idx
+                    if DEBUG_ANGLE_ROUTING:
+                        print(f"      → First 'W' line found at index {idx}: '{line_info['text']}'")
+                    break
+            
+            # ✅ SIMPLIFIED: Keep lines from first "W" onwards WITHOUT validation
+            if first_w_index is not None:
+                valid_lines = all_text_lines[first_w_index:]
+                
+                if DEBUG_ANGLE_ROUTING:
+                    print(f"      → Keeping {len(valid_lines)} lines from first 'W' onwards")
+                    if first_w_index > 0:
+                        print(f"      → Discarded {first_w_index} lines before first 'W'")
+                
+                # Calculate score (no validation filtering)
+                total_conf = sum(l['conf'] for l in valid_lines)
+                avg_conf = total_conf / len(valid_lines)
+                score = len(valid_lines) * avg_conf
+                
+                filtered_lines = valid_lines  # ✅ Use all lines without validation
+                
+            else:
+                # No line starting with "W" found
+                if DEBUG_ANGLE_ROUTING:
+                    print(f"      → No line starting with 'W' found, using all lines")
+                
+                # ✅ FALLBACK: If no "W" line found, use all lines anyway
+                filtered_lines = all_text_lines
+                total_conf = sum(l['conf'] for l in filtered_lines)
+                avg_conf = total_conf / len(filtered_lines)
+                score = len(filtered_lines) * avg_conf
+            
+            if DEBUG_ANGLE_ROUTING:
+                print(f"      → Score: {score:.2f} (lines={len(filtered_lines)})")
+            
+            if score > best_score:
+                best_score = score
+                best_lines = filtered_lines
+                if DEBUG_ANGLE_ROUTING:
+                    print(f"      → NEW BEST!")
+                    
+    except Exception as e:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      [PaddleOCR] → EXCEPTION: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # Return result
+    if best_lines:
+        result = '\n'.join(line['text'] for line in best_lines)
+        
+        if DEBUG_ANGLE_ROUTING:
+            print(f"\n   ✅ RESULT ({len(best_lines)} lines):")
+            for i, line in enumerate(best_lines):
+                print(f"      Line {i+1}: {line['text']}")
+        
+        return result
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   ❌ FAILED: No text detected by PaddleOCR")
+    
+    return ""
+
+
+@paddle_ocr_locked
+def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> str:
+    """
+    Cardinal coordinate OCR - handles both simple and bracketed coordinates.
+    OPTIMIZED: Smart candidate generation with early exit for complete coordinates.
+    """
+    ang_normalized = float(det.get("angle", 0.0))
+    
+    w = float(det.get("obb_w", det["x2"] - det["x1"]))
+    h = float(det.get("obb_h", det["y2"] - det["y1"]))
+    box_min_side = min(w, h)
+    
+    coord_pad = max(8, min(15, int(box_min_side * 0.13)))
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"\n📍 COORD CARDINAL: {w:.0f}×{h:.0f}px → pad={coord_pad}")
+    
+    try:
+        pil_crop = rotated_crop_from_det(det, bgr_color, pad=coord_pad)
+    except Exception:
+        pil_crop = crop_pil(bgr_color, det["x1"], det["y1"], det["x2"], det["y2"], pad=coord_pad)
+    
+    if pil_crop.width < 5 or pil_crop.height < 5:
+        return ""
+    
+    pil_crop = _upscale_if_tiny(pil_crop, min_side=90, scale=3)
+    
+    if pil_crop.width < 10 or pil_crop.height < 10:
+        return ""
+    
+    g0 = _pil_to_gray_np(pil_crop)
+    g1 = _enhance_contrast(g0)
+    g2 = _binarize_for_text(g1)
+    
+    bases = [Image.fromarray(g1), Image.fromarray(g2), Image.fromarray(g0)]
+    
+    best_txt, best_sc = "", -1.0
+    rotations = [0, 90, 180, 270]
+    
+    paddle = get_paddleocr_instance()
+    
+    if paddle is None:
+        return ""
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   → Running PaddleOCR...")
+    
+    try:
+        for base_idx, base in enumerate(bases):
+            for rot in rotations:
+                test_img = base.rotate(rot, expand=True, fillcolor=255) if rot != 0 else base
+                test_arr = np.array(test_img)
+                
+                if len(test_arr.shape) == 2:
+                    test_arr = cv2.cvtColor(test_arr, cv2.COLOR_GRAY2BGR)
+                
+                # Run PaddleOCR
+                results = paddle.ocr(test_arr, cls=False)
+                
+                if not results or not results[0]:
+                    continue
+                
+                # ✅ Collect ALL detections with their positions
+                all_detections = []
+                for line in results[0]:
+                    if line is None:
+                        continue
+                    bbox, (text, conf) = line
+                    
+                    if not text:
+                        continue
+                    
+                    # Calculate X-position (left edge of bbox)
+                    x_pos = min(pt[0] for pt in bbox)
+                    
+                    all_detections.append({
+                        'text': text,
+                        'conf': conf,
+                        'x_pos': x_pos,
+                        'bbox': bbox
+                    })
+                
+                if not all_detections:
+                    continue
+                
+                # ✅ Sort detections by X-position (left to right)
+                all_detections.sort(key=lambda d: d['x_pos'])
+                
+                # ✅ Quick quality check
+                if all(d['conf'] < 0.40 for d in all_detections):
+                    if DEBUG_ANGLE_ROUTING:
+                        print(f"      [var={base_idx} rot={rot:3d}°] → SKIP: All detections low confidence")
+                    continue
+                
+                # ✅ OPTIMIZED: Smart candidate generation
+                candidates = []
+                
+                has_number = any(any(c.isdigit() for c in d['text']) for d in all_detections)
+                has_bracket = any('(' in d['text'] or ')' in d['text'] for d in all_detections)
+                
+                # CASE 1: Single detection
+                if len(all_detections) == 1:
+                    candidates.append({
+                        'text': all_detections[0]['text'],
+                        'conf': all_detections[0]['conf'],
+                        'is_merged': False
+                    })
+                
+                # CASE 2: Two detections
+                elif len(all_detections) == 2:
+                    det1, det2 = all_detections[0], all_detections[1]
+                    avg_conf = (det1['conf'] + det2['conf']) / 2
+                    
+                    candidates.append({'text': det1['text'], 'conf': det1['conf'], 'is_merged': False})
+                    candidates.append({'text': det2['text'], 'conf': det2['conf'], 'is_merged': False})
+                    
+                    if has_number and has_bracket:
+                        candidates.append({
+                            'text': det1['text'] + det2['text'],
+                            'conf': avg_conf,
+                            'is_merged': True
+                        })
+                        if '(' in det2['text']:
+                            candidates.append({
+                                'text': det1['text'] + ' ' + det2['text'],
+                                'conf': avg_conf,
+                                'is_merged': True
+                            })
+                
+                # CASE 3: Three or more
+                else:
+                    for det in all_detections:
+                        candidates.append({'text': det['text'], 'conf': det['conf'], 'is_merged': False})
+                    
+                    if has_number and has_bracket:
+                        all_texts = [d['text'] for d in all_detections]
+                        avg_conf = sum(d['conf'] for d in all_detections) / len(all_detections)
+                        
+                        candidates.append({
+                            'text': ''.join(all_texts),
+                            'conf': avg_conf,
+                            'is_merged': True
+                        })
+                        
+                        if len(all_detections) == 2:
+                            candidates.append({
+                                'text': ' '.join(all_texts),
+                                'conf': avg_conf,
+                                'is_merged': True
+                            })
+                
+                # ✅ Process all candidates
+                for cand in candidates:
+                    text = cand['text']
+                    conf = cand['conf']
+                    is_merged = cand.get('is_merged', False)
+                    
+                    if DEBUG_ANGLE_ROUTING:
+                        marker = "[MERGED]" if is_merged else "[SINGLE]"
+                        print(f"      [var={base_idx} rot={rot:3d}°] {marker} RAW: '{text}' (conf={conf:.2f})")
+                    
+                    # STEP 1: Remove overlap garbage
+                    if is_merged:
+                        txt_clean = text
+                    else:
+                        txt_clean = _clean_coordinate_overlap(text)
+                        
+                        if not txt_clean:
+                            if DEBUG_ANGLE_ROUTING:
+                                print(f"         → SKIPPED: No valid pattern")
+                            continue
+                    
+                    # STEP 2: Fix bracket mistakes
+                    txt_fixed = _fix_coordinate_brackets(txt_clean)
+                    
+                    if DEBUG_ANGLE_ROUTING:
+                        if txt_fixed != text:
+                            print(f"         → CLEANED: '{text}' → '{txt_fixed}'")
+                    
+                    # STEP 3: Score
+                    sc = _score_coord_text(txt_fixed)
+                    
+                    if DEBUG_ANGLE_ROUTING and sc > 0:
+                        print(f"         → SCORE: {sc:.2f}")
+                    
+                    if sc > best_sc:
+                        best_txt, best_sc = txt_fixed, sc
+                        if DEBUG_ANGLE_ROUTING:
+                            print(f"         → NEW BEST!")
+                        
+                        # ✅ Smart early exit
+                        has_brackets = '(' in txt_fixed and ')' in txt_fixed
+                        
+                        if has_brackets and sc >= 2.0 and conf >= 0.50:
+                            if DEBUG_ANGLE_ROUTING:
+                                print(f"      ✅ EARLY EXIT (complete): '{best_txt}'")
+                            # ✅ FINAL CLEANING
+                            best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
+                            best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
+                            return best_txt.strip()
+                        elif not has_brackets and sc >= 2.5 and conf >= 0.80:
+                            if DEBUG_ANGLE_ROUTING:
+                                print(f"      ✅ EARLY EXIT (high conf simple): '{best_txt}'")
+                            # ✅ FINAL CLEANING
+                            best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
+                            best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
+                            return best_txt.strip()
+            
+            # Check after each base variant
+            if best_txt and best_sc >= 1.0:
+                if DEBUG_ANGLE_ROUTING:
+                    print(f"   ✅ RESULT: '{best_txt}' (score:{best_sc:.2f})")
+                # ✅ FINAL CLEANING
+                best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
+                best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
+                return best_txt.strip()
+                
+    except Exception as e:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      [PaddleOCR] → EXCEPTION: {e}")
+    
+    if DEBUG_ANGLE_ROUTING:
+        if best_txt:
+            print(f"   ⚠️ FINAL: '{best_txt}' (score:{best_sc:.2f})")
+        else:
+            print(f"   ❌ FAILED")
+    
+    if best_txt:
+        # ✅ FINAL CLEANING PASS
+        best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
+        best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
+        best_txt = best_txt.strip()
+        
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   ✅ FINAL (after cleaning): '{best_txt}' (score:{best_sc:.2f})")
+    
+    return best_txt.strip()
+
+def ocr_coordinate_angular(det: dict, bgr_color: np.ndarray, engine: str) -> str:
+    """
+    Angular coordinate OCR: Uses strong path with PaddleOCR primary.
+    PaddleOCR's angle classification handles tilted text well.
+    """
+    # ocr_coordinate_strong now has PaddleOCR as primary
+    return ocr_coordinate_strong(det, bgr_color, "paddleocr")
+
+def ocr_coordinate_unified(det: dict, bgr_color: np.ndarray, engine: str) -> str:
+    """
+    UNIFIED COORDINATE OCR: Routes based on NORMALIZED angle (visual orientation).
+    
+    - Cardinal (near 0°, 90°, 180°, 270°): Use simple rotation with 4-direction sweep
+    - Angular (tilted): Use perspective warp + rotation testing
+    """
+    # USE NORMALIZED ANGLE for routing decision
+    ang_normalized = float(det.get("angle", 0.0))
+    ang_raw = float(det.get("angle_raw", ang_normalized))
+    
+    if _is_cardinal(ang_normalized):  # Check normalized angle
+        # Cardinal path (visually aligned to axes)
+        _debug_angle("OCR_COORD", det, "CARDINAL", "→ horizontal OCR (4-dir sweep)")
+        return ocr_coordinate_horizontal(det, bgr_color, engine)
+    else:
+        # Angular path (truly tilted, e.g., 30°, 45°, 60°)
+        _debug_angle("OCR_COORD", det, "ANGULAR", "→ strong OCR (perspective+rotations)")
+        return ocr_coordinate_angular(det, bgr_color, engine)  # ✅ Fixed: was ocr_coordinate_angular
+
+# ============================================================================
+# SIGNAL OCR (with angle branching)
+# ============================================================================
+
+SIG_STRICT_RE = re.compile(r'^[A-ZÄÖÜ]{1,4}\s*\d{1,4}$')
+
+def _only_az09(s: str) -> str:
+    t = ''.join(ch for ch in s.upper() if ch.isalnum() or ch in 'ÄÖÜ ')
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+def _is_strict_signal_id(s: str) -> bool:
+    ss = _only_az09(s)
+    return bool(SIG_STRICT_RE.match(ss))
+
+def _normalize_signal_digits(s: str) -> str:
+    ss = _only_az09(s)
+    m = re.match(r'^([A-ZÄÖÜ]{1,4})\s*([A-Z0-9]{1,4})$', ss)
+    if not m:
+        return ss
+    head, tail = m.groups()
+    trans = str.maketrans({'O': '0', 'I': '1', 'L': '1', 'S': '5', 'B': '8', 'Z': '2', 'G': '6', 'Q': '0', 'D': '0'})
+    return head + tail.translate(trans)
+
+# Add this next to your other helpers
+_FINAL_ZERO_TAIL2_RE = re.compile(r'^([A-ZÄÖÜ]{1,4})\s*(\d{2})$')
+
+def _post_fix_missing_zero_middle(s: str) -> str:
+    """
+    Final-pass only: if we ended with HEAD + exactly 2 digits, insert a middle '0'.
+    Example: 'AHR21' -> 'AHR201'. Otherwise, return unchanged.
+    """
+    ss = _only_az09(s)
+    m = _FINAL_ZERO_TAIL2_RE.match(ss)
+    if not m:
+        return ss
+    head, tail2 = m.groups()
+    return f"{head}{tail2[0]}0{tail2[1]}"
+
+
+def _merge_adjacent_tokens_easyocr(detail_items, anchor):
+    if not detail_items:
+        return None, -1.0
+
+    items = []
+    for it in detail_items:
+        if len(it) < 3:
+            continue
+        bbox, txt, conf = it[0], (it[1] or "").strip(), float(it[2] or 0.0)
+        if not txt:
+            continue
+        x = sum(p[0] for p in bbox) / 4.0
+        y = sum(p[1] for p in bbox) / 4.0
+        items.append((x, y, txt, conf))
+    items.sort(key=lambda z: z[0])
+
+    best_text, best_score = None, -1.0
+    n = len(items)
+    anchor_cx, anchor_cy = anchor["cx"], anchor["cy"]
+    for i in range(n):
+        for j in range(i, min(n, i + 4)):
+            toks = [items[k][2] for k in range(i, j + 1)]
+            confs = [items[k][3] for k in range(i, j + 1)]
+            cand = _only_az09(' '.join(toks))
+            if _is_strict_signal_id(cand):
+                avg_x = sum(items[k][0] for k in range(i, j + 1)) / (j - i + 1)
+                avg_y = sum(items[k][1] for k in range(i, j + 1)) / (j - i + 1)
+                dist = ((avg_x - anchor_cx) ** 2 + (avg_y - anchor_cy) ** 2) ** 0.5
+                score = sum(confs) + 0.2 * (4 - (j - i)) - 0.1 * dist / anchor["w"]
+                if score > best_score:
+                    best_text, best_score = cand.replace(' ', ''), score
+    return best_text, best_score
+
+def _tighten_to_text(pil_img, pad=3):
+    g = np.array(pil_img.convert('L'))
+    bw = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    inv = 255 - bw
+    cnts, _ = cv2.findContours(inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return pil_img
+    x, y, w, h = cv2.boundingRect(np.vstack(cnts))
+    x = max(0, x - pad)
+    y = max(0, y - pad)
+    return pil_img.crop((x, y, x + w + 2 * pad, y + h + 2 * pad))
+
+def _extract_textline_roi(pil_img, h_hint: Optional[int] = None):
+    g = np.array(pil_img.convert('L'))
+    bw = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    inv = 255 - bw
+    cnts, _ = cv2.findContours(inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return pil_img
+
+    img_w, img_h = pil_img.size
+    aspect_ratio = img_w / max(1, img_h)
+    
+    if aspect_ratio > 4.0:
+        return _tighten_to_text(pil_img, pad=8)
+    
+    hs = np.array([cv2.boundingRect(c)[3] for c in cnts], dtype=np.int32)
+    if h_hint is None:
+        hs_clip = hs[(hs >= 8) & (hs <= 120)]
+        if len(hs_clip) == 0:
+            return _tighten_to_text(pil_img, pad=6)
+        h0 = int(np.median(hs_clip))
+        lo, hi = int(0.6 * h0), int(1.6 * h0)
+    else:
+        lo, hi = int(0.7 * h_hint), int(1.3 * h_hint)
+
+    keep = []
+    for c in cnts:
+        x, y, w, h = cv2.boundingRect(c)
+        if lo <= h <= hi and w >= 6:
+            keep.append((x, y, w, h))
+    
+    if not keep:
+        return _tighten_to_text(pil_img, pad=6)
+
+    xs = [x for x, _, w, _ in keep]
+    ys = [y for _, y, _, _ in keep]
+    x2 = [x + w for x, _, w, _ in keep]
+    y2 = [y + h for _, y, _, h in keep]
+    x1, y1, X2, Y2 = min(xs), min(ys), max(x2), max(y2)
+    
+    pad = 8
+    x1 = max(0, x1 - pad)
+    y1 = max(0, y1 - pad)
+    
+    return pil_img.crop((x1, y1, X2 + pad, Y2 + pad))
+
+@paddle_ocr_locked
+def ocr_signal_name(anchor: dict, bgr_color: np.ndarray, engine: str, overlay: Optional[np.ndarray] = None) -> Optional[str]:
+    """
+    Signal OCR with Tesseract PRIMARY, EasyOCR fallback.
+    Uses angle-aware preprocessing (cardinal vs angular).
+    NOW WITH ADAPTIVE PADDING based on box size!
+    """
+    ang_normalized = float(anchor.get("angle", 0.0))
+    ang_raw = float(anchor.get("angle_raw", ang_normalized))
+
+    # ✅ ADAPTIVE PADDING - Calculate based on box size
+    w = float(anchor.get("obb_w", anchor["x2"] - anchor["x1"]))
+    h = float(anchor.get("obb_h", anchor["y2"] - anchor["y1"]))
+    box_min_side = min(w, h)
+    
+    # Target ~15% padding for all signal sizes
+    sig_pad = max(10, min(16, int(box_min_side * 0.15)))
+    
+    # Optional diagnostic output
+    if DEBUG_ANGLE_ROUTING:
+        padding_ratio = (sig_pad / box_min_side) * 100
+        print(f"🔷 {w:.0f}×{h:.0f}px (min:{box_min_side:.0f}) → pad={sig_pad} ({padding_ratio:.0f}%)", end="")
+    # ✅ END ADAPTIVE PADDING
+
+    # ========================================================================
+    # STEP 1: Get crop based on orientation
+    # ========================================================================
+    if _is_cardinal(ang_normalized):
+        # Cardinal path (axis-aligned)
+        try:
+            pil_crop = rotated_crop_from_det(anchor, bgr_color, pad=sig_pad)  # ← Use adaptive pad
+        except Exception:
+            pil_crop = crop_pil(bgr_color, anchor["x1"], anchor["y1"], anchor["x2"], anchor["y2"], pad=sig_pad)  # ← Use adaptive pad
+        
+        pil_crop = _upscale_if_tiny(pil_crop, min_side=80, scale=3)
+        pil_final = pil_crop  # No line removal for cardinal
+        rotation_order = [0, 90, 180, 270]
+    else:
+        # Angular path (tilted)
+        try:
+            pil_crop = perspective_crop_from_det(anchor, bgr_color, pad=sig_pad)  # ← Use adaptive pad
+        except Exception:
+            pil_crop = rotated_crop_from_det(anchor, bgr_color, pad=sig_pad)  # ← Use adaptive pad
+        
+        pil_crop = _upscale_if_tiny(pil_crop, min_side=80, scale=3)
+        pil_nolines = _remove_long_lines_oriented(pil_crop, ang_raw, frac_len=0.25, thickness=SIG_LINE_THICK)
+        pil_final = pil_nolines if not SIG_USE_TIGHTEN else _extract_textline_roi(_tighten_to_text(pil_nolines), h_hint=SIGNAL_TEXT_HEIGHT_HINT)
+        rotation_order = [0, 90, 180, 270]
+
+    # ========================================================================
+    # STEP 2: Prepare preprocessing variants
+    # ========================================================================
+    g0 = _pil_to_gray_np(pil_final)
+    g1 = _enhance_contrast(g0)
+    g2 = _binarize_for_text(g1)
+    
+    # Angular gets inverted variant too
+    if _is_cardinal(ang_normalized):
+        variants = [g2, g1, g0]  # Binary first (usually best for Tesseract)
+    else:
+        variants = [g2, _invert(g2), g1, g0]
+
+    best_txt, best_sc = None, -1.0
+
+    # ========================================================================
+    # STEP 3: PRIMARY METHOD - PaddleOCR (if available)
+    # ========================================================================
+    paddle = get_paddleocr_instance()
+    
+    if paddle is not None:
+        for var_arr in variants:
+            pil_var = Image.fromarray(var_arr)
+            
+            for rot in rotation_order:
+                test_img = pil_var.rotate(rot, expand=True, fillcolor=255) if rot != 0 else pil_var
+                
+                # Run PaddleOCR
+                txt, conf = paddleocr_recognize(
+                    test_img,
+                    cls_name="signal",
+                    whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789 "
+                )
+                
+                # Process candidates
+                candidates = [
+                    txt,
+                    _only_az09(txt),
+                    re.sub(r'\s+', '', txt),
+                    _normalize_signal_digits(txt),
+                ]
+                # Dedupe
+                _seen = set()
+                candidates = [c for c in candidates if c and not (c in _seen or _seen.add(c))]
+                
+                for cand in candidates:
+                    if cand and _is_strict_signal_id(cand):
+                        # PaddleOCR confidence is 0-1, adjust scoring
+                        sc = score_name_token(cand, conf=conf, allow_numeric=False, cls_name="signal")
+                        if sc > best_sc:
+                            best_txt, best_sc = cand.replace(' ', ''), sc
+                            
+                            # Early exit on high confidence
+                            if sc >= SIG_SCORE_MIN + 0.3:
+                                if DEBUG_ANGLE_ROUTING:
+                                    print(f" → '{best_txt}' ✅ (PaddleOCR)")
+                                return _post_fix_missing_zero_middle(best_txt)
+        
+        # If PaddleOCR found something good, return it
+        if best_txt and best_sc >= SIG_SCORE_MIN - 0.2 and len(best_txt) >= 3:
+            if DEBUG_ANGLE_ROUTING:
+                print(f" → '{best_txt}' ✅ (PaddleOCR)")
+            return _post_fix_missing_zero_middle(best_txt)
+
+    # ========================================================================
+    # STEP 4: SECONDARY METHOD - Tesseract (if PaddleOCR failed)
+    # ========================================================================
+    try:
+        import pytesseract
+        
+        for var_arr in variants:
+            pil_var = Image.fromarray(var_arr)
+            
+            for rot in rotation_order:
+                test_img = pil_var.rotate(rot, expand=True, fillcolor=255) if rot != 0 else pil_var
+                
+                # Try multiple PSM modes
+                for psm in [7, 8, 13]:  # 7=line, 8=word, 13=raw line
+                    cfg = f"--psm {psm} -l eng+deu -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789 --oem 1"
+                    raw = pytesseract.image_to_string(test_img, config=cfg).strip()
+
+                    candidates = [
+                        raw,
+                        _only_az09(raw),
+                        re.sub(r'\s+', '', raw),
+                        _normalize_signal_digits(raw),
+                    ]
+                    _seen = set()
+                    candidates = [c for c in candidates if c and not (c in _seen or _seen.add(c))]
+
+                    for cand in candidates:
+                        if cand and _is_strict_signal_id(cand):
+                            sc = score_name_token(cand, conf=0.85, allow_numeric=False, cls_name="signal")
+                            if sc > best_sc:
+                                best_txt, best_sc = cand.replace(' ', ''), sc
+                                
+                                # Early exit on high confidence
+                                if sc >= SIG_SCORE_MIN + 0.5:
+                                    if DEBUG_ANGLE_ROUTING:
+                                        print(f" → '{best_txt}' ✅ (Tesseract)")
+                                    return _post_fix_missing_zero_middle(best_txt)
+        
+        # If Tesseract found something good, return it
+        if best_txt and best_sc >= SIG_SCORE_MIN and len(best_txt) >= 3:
+            if DEBUG_ANGLE_ROUTING:
+                print(f" → '{best_txt}' ✅ (Tesseract)")
+            return _post_fix_missing_zero_middle(best_txt)
+    
+    except Exception:
+        pass
+
+    # ========================================================================
+    # STEP 5: FALLBACK - EasyOCR (if both PaddleOCR and Tesseract failed)
+    # ========================================================================
+    if engine == "easyocr" and (best_txt is None or best_sc < SIG_SCORE_MIN):
+        try:
+            reader = get_easyocr_reader()
+            all_items = []
+            
+            for var_arr in variants:
+                items = easyocr_readtext(var_arr, detail=1, paragraph=False, 
+                                        rotation_info=rotation_order,
+                                        allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789') or []
+                all_items.extend(items)
+
+            # Try individual tokens
+            for it in all_items:
+                if len(it) < 3:
+                    continue
+                txt = _normalize_signal_digits(it[1] or "")
+                conf = float(it[2] or 0.0)
+                if _is_strict_signal_id(txt):
+                    sc = score_name_token(txt, conf=conf, allow_numeric=False, cls_name="signal")
+                    if sc > best_sc:
+                        best_txt, best_sc = txt.replace(' ', ''), sc
+
+            # Try merged tokens
+            if best_txt is None and all_items:
+                joined, jscore = _merge_adjacent_tokens_easyocr(all_items, anchor)
+                if joined:
+                    joined = _normalize_signal_digits(joined)
+                    if _is_strict_signal_id(joined):
+                        if jscore > best_sc:
+                            best_txt, best_sc = joined, jscore
+        
+        except Exception:
+            pass
+
+    # ========================================================================
+    # STEP 6: Return best result
+    # ========================================================================
+    if best_txt and best_sc >= SIG_SCORE_MIN and len(best_txt) >= 3:
+        if DEBUG_ANGLE_ROUTING:
+            print(f" → '{best_txt}' ✅")
+        return _post_fix_missing_zero_middle(best_txt)
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f" → FAILED ❌")
+    
+    return None
+
+# ============================================================================
+# GENERIC NAME OCR + OTHER HELPERS
+# ============================================================================
+def _kill_frame_and_thicken_digits(bw: np.ndarray) -> np.ndarray:
+    """
+    Aggressively remove DOUBLE rectangular frames from GKS plates.
+    """
+    # Invert: morphology operations work on white foreground
+    inv = 255 - bw
+    
+    # Remove vertical lines (frame left/right edges)
+    k_vert = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 20))
+    no_vert = cv2.morphologyEx(inv, cv2.MORPH_OPEN, k_vert)
+    
+    # Remove horizontal lines (frame top/bottom edges)
+    k_horiz = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
+    no_horiz = cv2.morphologyEx(no_vert, cv2.MORPH_OPEN, k_horiz)
+    
+    # Remove noise and frame corners
+    k_noise = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    cleaned = cv2.morphologyEx(no_horiz, cv2.MORPH_OPEN, k_noise, iterations=2)
+    
+    # Thicken digits to avoid broken strokes
+    k_thick = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    thickened = cv2.dilate(cleaned, k_thick, iterations=1)
+    
+    # Invert back: white background, black text
+    return 255 - thickened
+
+_easy_reader = None
+def get_easyocr_reader():
+    global _easy_reader
+    if _easy_reader is None:
+        import easyocr
+        _easy_reader = easyocr.Reader(['de', 'en'], gpu=False)
+    return _easy_reader
+
+import threading
+_EASYOCR_LOCK = threading.Lock()
+
+def easyocr_readtext(arr, *, detail=1, paragraph=False, rotation_info=None, allowlist=None, **kwargs):
+    reader = get_easyocr_reader()
+    default_params = {
+        'text_threshold': 0.5,
+        'low_text': 0.3,
+        'link_threshold': 0.3,
+        'canvas_size': 2560,
+        'mag_ratio': 1.5,
+        'slope_ths': 0.3,
+        'ycenter_ths': 0.6,
+        'height_ths': 0.6,
+        'width_ths': 0.6,
+        'add_margin': 0.15
+    }
+    params = {**default_params, **kwargs}
+    with _EASYOCR_LOCK:
+        return reader.readtext(arr, detail=detail, paragraph=paragraph,
+                               rotation_info=rotation_info, allowlist=allowlist, **params) or []
+
+def ocr_text(pil_img: Image.Image, engine: str) -> str:
+    if engine == "easyocr":
+        reader = get_easyocr_reader()
+        arr = np.array(pil_img.convert("L"))
+        result = easyocr_readtext(arr, detail=0, paragraph=False)
+        if not result:
+            return ""
+        return sorted(result, key=lambda s: len(s), reverse=True)[0].strip()
+    else:
+        import pytesseract
+        cfg = "--psm 7 -l deu+eng"
+        return pytesseract.image_to_string(pil_img, config=cfg).strip()
+
+def ocr_name_candidates(pil_img: Image.Image, engine: str) -> List[Tuple[str, float]]:
+    win0 = _upscale_if_tiny(pil_img)
+    win1 = _deskew_small(win0)
+    g0 = _pil_to_gray_np(win1)
+    g1 = _enhance_contrast(g0)
+    g2 = _binarize_for_text(g1)
+    variants = [Image.fromarray(g0), Image.fromarray(g1), Image.fromarray(g2)]
+
+    cands: List[Tuple[str, float]] = []
+    if engine == "easyocr":
+        reader = get_easyocr_reader()
+        for v in variants:
+            arr = np.array(v)
+            res = easyocr_readtext(arr, detail=1, paragraph=False) or []
+            for item in res:
+                if len(item) >= 2:
+                    txt = (item[1] or "").strip()
+                    conf = float(item[2]) if len(item) >= 3 and isinstance(item[2], (int, float)) else 0.5
+                    if txt:
+                        cands.append((txt, conf))
+    else:
+        import pytesseract
+        cfg = "--psm 6 -l eng+deu -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789./-_"
+        for v in variants:
+            txt = pytesseract.image_to_string(v, config=cfg)
+            for tok in (t.strip() for t in txt.split() if t.strip()):
+                cands.append((tok, 0.50))
+
+    if not cands:
+        try:
+            import pytesseract
+            cfg = "--psm 6 -l eng+deu -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789./-_"
+            for v in variants:
+                txt = pytesseract.image_to_string(v, config=cfg)
+                for tok in (t.strip() for t in txt.split() if t.strip()):
+                    cands.append((tok, 0.50))
+        except Exception:
+            pass
+    return cands
+
+def score_name_token(tok: str, conf: float = 0.5, allow_numeric: bool = False, cls_name: Optional[str] = None) -> float:
+    s = tok.strip()
+    if not s or len(s) > 18:
+        return -1
+    if COORD_RE.match(s.replace(" ", "")):
+        return -1
+    if not allow_numeric and s.isdigit():
+        return -1
+    if all(ch in "-_/()." for ch in s):
+        return -1
+
+    has_alpha = any(c.isalpha() for c in s)
+    has_digit = any(c.isdigit() for c in s)
+    upper_ratio = (sum(c.isupper() for c in s) / max(1, sum(c.isalpha() for c in s)))
+
+    score = 0.0
+    if has_alpha:
+        score += 1.0
+    if has_digit:
+        score += 0.7
+    score += 0.4 * upper_ratio
+    score += max(0, 6 - abs(len(s) - 5)) * 0.1
+    score += 0.6 * conf
+
+    if cls_name and cls_name in CLASS_ID_PATTERNS:
+        import re as _re
+        if _re.match(CLASS_ID_PATTERNS[cls_name], s, flags=_re.IGNORECASE):
+            score += 1.2
+    return score
+
+def best_name_from_window(pil_img: Image.Image, engine: str, allow_numeric: bool = False,
+                          cls_name: Optional[str] = None) -> Tuple[Optional[str], float]:
+    cands = ocr_name_candidates(pil_img, engine)
+    if not cands:
+        return None, -1.0
+    scored = [(score_name_token(t, c, allow_numeric, cls_name), t) for (t, c) in cands]
+    scored.sort(reverse=True)
+    best_score, best_tok = scored[0]
+    return (best_tok if best_score > 0 else None), best_score
+
+def ocr_best_angle(pil_img: Image.Image, engine: str, angles=(-20, -15, -10, -5, 0, 5, 10, 15, 20)) -> str:
+    best = ""
+    best_score = -1
+    for ang in angles:
+        rot = pil_img.rotate(ang, expand=True, fillcolor="white")
+        txt = ocr_text(rot, engine)
+        m = COORD_RE.match(txt.replace(" ", ""))
+        score = 2 if (m and m.group(2)) else (1 if m else 0)
+        if score > best_score or (score == best_score and len(txt) > len(best)):
+            best, best_score = txt, score
+    return best
+
+def ocr_generic_name(anchor: dict, bgr_color: np.ndarray, engine: str, allow_numeric: bool,
+                    cls_name: Optional[str]) -> Optional[str]:
+    # USE NORMALIZED ANGLE for routing
+    ang_normalized = float(anchor.get("angle", 0.0))
+    ang_raw = float(anchor.get("angle_raw", ang_normalized))
+
+    if _is_cardinal(ang_normalized):  # Check normalized angle
+        # Cardinal path - simple rotation
+        try:
+            pil_crop = rotated_crop_from_det(anchor, bgr_color, pad=8)
+        except Exception:
+            pil_crop = crop_pil(bgr_color, anchor["x1"], anchor["y1"], anchor["x2"], anchor["y2"], pad=8)
+    else:
+        # Angular path - perspective warp
+        try:
+            pil_crop = perspective_crop_from_det(anchor, bgr_color, pad=8)
+        except Exception:
+            pil_crop = rotated_crop_from_det(anchor, bgr_color, pad=8)
+
+    pil_crop = _upscale_if_tiny(pil_crop, min_side=80, scale=3)
+
+    if _is_cardinal(ang_normalized):
+        pil_final = pil_crop
+        rotations = [0, 90, 180, 270]  # Simple order - text already aligned after crop fix
+    else:
+        pil_final = _remove_long_lines_oriented(pil_crop, ang_raw, frac_len=0.25, thickness=3)
+        rotations = [0, 90, 180, 270]
+
+    g0 = _pil_to_gray_np(pil_final)
+    g1 = _enhance_contrast(g0)
+    g2 = _binarize_for_text(g1)
+
+    variants_np = [g0, g1, g2]
+    if not _is_cardinal(ang_normalized):
+        variants_np.append(_invert(g2))
+
+    best_name, best_score = None, -1.0
+
+    if engine == "easyocr":
+        reader = get_easyocr_reader()
+        if allow_numeric:
+            allowlist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789./-_'
+        else:
+            allowlist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ./-_'
+
+        all_items = []
+        for v in variants_np:
+            items = easyocr_readtext(
+                v, detail=1, paragraph=False, 
+                rotation_info=rotations,  # ← Use smart ordering
+                allowlist=allowlist
+            ) or []
+            all_items.extend(items)
+
+        for it in all_items:
+            if len(it) < 3:
+                continue
+            tok = (it[1] or "").strip()
+            conf = float(it[2] or 0.0)
+            sc = score_name_token(tok, conf=conf, allow_numeric=allow_numeric, cls_name=cls_name)
+            if sc > best_score:
+                best_name, best_score = tok, sc
+
+    else:
+        import pytesseract
+        wl = 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789./-_' if allow_numeric else 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ./-_'
+        cfg = f"--psm 6 -l eng+deu -c tessedit_char_whitelist={wl}"
+        
+        # ✓ FIX: Test rotations in smart order for Tesseract too
+        for v in variants_np:
+            for rot_deg in rotations:  # Use smart-ordered rotations
+                test_img = Image.fromarray(v).rotate(rot_deg, expand=True, fillcolor=255) if rot_deg != 0 else Image.fromarray(v)
+                txt = pytesseract.image_to_string(test_img, config=cfg)
+                for tok in (t.strip() for t in txt.split() if t.strip()):
+                    sc = score_name_token(tok, conf=0.5, allow_numeric=allow_numeric, cls_name=cls_name)
+                    if sc > best_score:
+                        best_name, best_score = tok, sc
+
+    return best_name if (best_name and best_score > 0) else None
+
+@paddle_ocr_locked
+def ocr_numeric_cardinal_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]:
+    """
+    Robust numeric OCR for axis-aligned GKS plates.
+    PaddleOCR with LIGHTER preprocessing - grayscale+CLAHE works best!
+    """
+    cls_name = anchor.get("name", "gks_festkodiert")
+    
+    # Get class-specific parameters
+    pad_dict = CARDINAL_PARAMS["detection_padding"]
+    pad = pad_dict.get(cls_name, 8)
+    
+    if DEBUG_ANGLE_ROUTING:
+        w = float(anchor.get("obb_w", anchor["x2"] - anchor["x1"]))
+        h = float(anchor.get("obb_h", anchor["y2"] - anchor["y1"]))
+        ang_raw = float(anchor.get("angle_raw", 0.0))
+        ang_norm = float(anchor.get("angle", 0.0))
+        print(f"\n📦 GKS CARDINAL BOX: {w:.0f}×{h:.0f}px | angles: raw={ang_raw:.1f}° norm={ang_norm:.1f}°")
+        print(f"   → Class params: pad={pad}")
+    
+    # 1) Crop
+    try:
+        base = rotated_crop_from_det(anchor, bgr_color, pad=pad)
+    except Exception:
+        base = crop_pil(bgr_color, anchor["x1"], anchor["y1"], anchor["x2"], anchor["y2"], pad=pad)
+
+    # 2) Upscale
+    min_side = min(base.width, base.height)
+    scale = 8 if min_side < 60 else (6 if min_side < 80 else 4)
+    base = base.resize((base.width * scale, base.height * scale), Image.LANCZOS)
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   → Upscaled to: {base.width}×{base.height}px (scale={scale}x)")
+
+    best, best_sc = None, -1.0
+
+    paddle = get_paddleocr_instance()
+    
+    if paddle is None:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   ❌ PaddleOCR not available")
+        return None
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   → Running PaddleOCR...")
+    
+    try:
+        # LIGHT preprocessing - grayscale+CLAHE only (works best!)
+        g = _pil_to_gray_np(base)
+        g_enhanced = _enhance_contrast(g)
+        img = Image.fromarray(g_enhanced)
+        
+        for rot in (0, 180):
+            test_img = img.rotate(rot, expand=True, fillcolor=255) if rot else img
+            test_arr = np.array(test_img)
+            
+            # Convert to BGR
+            if len(test_arr.shape) == 2:
+                test_arr = cv2.cvtColor(test_arr, cv2.COLOR_GRAY2BGR)
+            
+            # ✅ CRITICAL: Use thread lock for PaddleOCR
+            with _PADDLE_OCR_LOCK:
+                results = paddle.ocr(test_arr, cls=False)
+            
+            if DEBUG_ANGLE_ROUTING:
+                n_det = len(results[0]) if results and results[0] else 0
+                print(f"      [grayscale+CLAHE rot={rot:3d}°] {n_det} detections")
+            
+            if results and results[0]:
+                for line in results[0]:
+                    if line is None:
+                        continue
+                    bbox, (text, conf) = line
+                    
+                    # Clean: digits only
+                    t = ''.join(c for c in text if c.isdigit())
+                    
+                    if DEBUG_ANGLE_ROUTING and text:
+                        print(f"         raw='{text}' → clean='{t}' (conf={conf:.2f})")
+                    
+                    if t and len(t) >= 3:
+                        sc = score_name_token(t, conf=conf, allow_numeric=True, cls_name=cls_name)
+                        if DEBUG_ANGLE_ROUTING:
+                            print(f"         score={sc:.2f}")
+                        
+                        if sc > best_sc:
+                            best_sc, best = sc, t
+                            if sc > 1.6 and conf > 0.60:
+                                if DEBUG_ANGLE_ROUTING:
+                                    print(f"      ✅ EARLY EXIT: '{best}'")
+                                return best
+                                    
+    except Exception as e:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      ❌ EXCEPTION: {e}")
+            import traceback
+            traceback.print_exc()
+
+    if DEBUG_ANGLE_ROUTING:
+        if best:
+            print(f"   ✅ RESULT: '{best}' (score:{best_sc:.2f})")
+        else:
+            print(f"   ❌ FAILED")
+    
+    return best
+
+
+@paddle_ocr_locked
+def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]:
+    """
+    Robust numeric OCR for tilted GKS plates.
+    Tests ALL rotations, picks best 4-digit result.
+    """
+    ang_norm = float(anchor.get("angle", 0.0))
+    ang_raw = float(anchor.get("angle_raw", ang_norm))
+    cls_name = anchor.get("name", "gks_festkodiert")
+    
+    # Get box size
+    w = float(anchor.get("obb_w", anchor["x2"] - anchor["x1"]))
+    h = float(anchor.get("obb_h", anchor["y2"] - anchor["y1"]))
+    box_min_side = min(w, h)
+    
+    # ✅ GENEROUS PADDING for angular boxes (to capture all digits)
+    if box_min_side < 70:
+        pad = 18  # Very generous
+    elif box_min_side < 100:
+        pad = 16
+    else:
+        pad = 14
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"\n📦 GKS ANGULAR BOX: {w:.0f}×{h:.0f}px | angles: raw={ang_raw:.1f}° norm={ang_norm:.1f}°")
+        print(f"   → Using pad={pad}px ({pad/box_min_side*100:.0f}% of min side)")
+
+    # 1) Crop with generous padding
+    try:
+        base = perspective_crop_from_det(anchor, bgr_color, pad=pad)
+    except Exception:
+        base = rotated_crop_from_det(anchor, bgr_color, pad=pad)
+
+    # 2) Aggressive upscaling
+    min_side = min(base.width, base.height)
+    scale = 7 if min_side < 60 else (5 if min_side < 90 else 4)
+    base = base.resize((base.width * scale, base.height * scale), Image.LANCZOS)
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   → Upscaled to: {base.width}×{base.height}px (scale={scale}x)")
+
+    best_txt = None
+    best_sc = -1.0
+    best_conf = 0.0
+    best_rot = 0
+    
+    # ✅ Track ALL 4-digit results
+    four_digit_results = []
+    
+    test_rotations = [0, 90, 180, 270]
+
+    paddle = get_paddleocr_instance()
+    
+    if paddle is None:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   ❌ PaddleOCR not available")
+        return None
+    
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   → Running PaddleOCR (testing ALL rotations)...")
+    
+    try:
+        # LIGHT preprocessing
+        g = _pil_to_gray_np(base)
+        g_enhanced = _enhance_contrast(g)
+        img = Image.fromarray(g_enhanced)
+        
+        # ✅ TEST ALL ROTATIONS - NO EARLY EXIT
+        for rot_deg in test_rotations:
+            test_img = img.rotate(rot_deg, expand=True, fillcolor=255) if rot_deg != 0 else img
+            test_arr = np.array(test_img)
+            
+            # Convert to BGR
+            if len(test_arr.shape) == 2:
+                test_arr = cv2.cvtColor(test_arr, cv2.COLOR_GRAY2BGR)
+            
+            # Run PaddleOCR
+            results = paddle.ocr(test_arr, cls=False)
+            
+            if DEBUG_ANGLE_ROUTING:
+                n_det = len(results[0]) if results and results[0] else 0
+                print(f"      [rot={rot_deg:3d}°] {n_det} detections")
+            
+            if results and results[0]:
+                for line in results[0]:
+                    if line is None:
+                        continue
+                    bbox, (text, conf) = line
+                    
+                    # Clean: digits only
+                    t = ''.join(c for c in text if c.isdigit())
+                    
+                    if DEBUG_ANGLE_ROUTING and text:
+                        print(f"         raw='{text}' → clean='{t}' (conf={conf:.2f})")
+                    
+                    if t and len(t) >= 3:
+                        sc = score_name_token(t, conf=conf, allow_numeric=True, cls_name=cls_name)
+                        
+                        if DEBUG_ANGLE_ROUTING:
+                            print(f"         score={sc:.2f}, len={len(t)}")
+                        
+                        # ✅ TRACK BEST OVERALL
+                        if sc > best_sc:
+                            best_sc = sc
+                            best_txt = t
+                            best_conf = conf
+                            best_rot = rot_deg
+                        
+                        # ✅ SEPARATELY TRACK 4-DIGIT RESULTS
+                        if len(t) == 4:
+                            four_digit_results.append({
+                                'text': t,
+                                'score': sc,
+                                'conf': conf,
+                                'rot': rot_deg
+                            })
+                            if DEBUG_ANGLE_ROUTING:
+                                print(f"         ✓ 4-digit candidate: '{t}'")
+                                    
+    except Exception as e:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"      ❌ EXCEPTION: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # ✅ PREFER 4-DIGIT RESULTS (sort by score)
+    if four_digit_results:
+        # Sort by score descending
+        four_digit_results.sort(key=lambda x: x['score'], reverse=True)
+        best_4d = four_digit_results[0]
+        
+        if DEBUG_ANGLE_ROUTING:
+            print(f"\n   📊 Found {len(four_digit_results)} 4-digit results:")
+            for i, res in enumerate(four_digit_results):
+                marker = "👑" if i == 0 else "  "
+                print(f"      {marker} '{res['text']}' score={res['score']:.2f} conf={res['conf']:.2f} rot={res['rot']}°")
+            print(f"   ✅ BEST 4-DIGIT: '{best_4d['text']}' (score:{best_4d['score']:.2f}, rot:{best_4d['rot']}°)")
+        
+        return best_4d['text']
+    
+    # ✅ FALLBACK: Accept 3-digit if no 4-digit found and score is good
+    if best_txt and len(best_txt) == 3 and best_sc > 1.5:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   ⚠️ ACCEPTING 3-DIGIT: '{best_txt}' (score:{best_sc:.2f}, conf:{best_conf:.2f}, rot:{best_rot}°)")
+        return best_txt
+    
+    if DEBUG_ANGLE_ROUTING:
+        if best_txt:
+            print(f"   ❌ REJECTED: '{best_txt}' (len={len(best_txt)}, score:{best_sc:.2f}) - expected 4 digits")
+        else:
+            print(f"   ❌ FAILED: No valid result")
+    
+    return None
+
+
+
+def ocr_anchor_name(anchor: dict, bgr_color: np.ndarray, engine: str) -> Optional[str]:
+    """
+    OCR for anchor boxes with correct dual-angle routing.
+    """
+    cls = anchor["name"]
+    
+    if cls == "signal":
+        return ocr_signal_name(anchor, bgr_color, engine)
+    
+    if cls == "weichen_block":
+        return ocr_weichen_block(anchor, bgr_color)
+
+
+    # ========================================================================
+    # GKS NUMERIC PLATES: Use specialized functions with normalized angle routing
+    # ========================================================================
+    if cls in {"gks_gesteuert", "gks_festkodiert"}:
+        ang_norm = float(anchor.get("angle", 0.0))  # ✓ Use NORMALIZED angle
+        ang_raw = float(anchor.get("angle_raw", ang_norm))
+        
+        if DEBUG_ANGLE_ROUTING:
+            print(f"\n{'='*70}")
+            print(f"🔍 GKS OCR: {cls}")
+            print(f"   Angles: raw={ang_raw:.1f}° norm={ang_norm:.1f}°")
+            print(f"   Box: {anchor['x2']-anchor['x1']}×{anchor['y2']-anchor['y1']}px")
+        
+        # Route based on NORMALIZED angle
+        if _is_cardinal(ang_norm):  # ✓ Check normalized angle
+            if DEBUG_ANGLE_ROUTING:
+                print(f"   → CARDINAL path (|norm|≤15°)")
+            
+            val = ocr_numeric_cardinal_box(anchor, bgr_color)  # ✓ Call cardinal function
+            
+            if val:
+                if DEBUG_ANGLE_ROUTING:
+                    print(f"   ✅ SUCCESS: '{val}'")
+                return val
+            else:
+                if DEBUG_ANGLE_ROUTING:
+                    print(f"   ❌ CARDINAL FAILED")
+        else:
+            if DEBUG_ANGLE_ROUTING:
+                print(f"   → ANGULAR path (|norm|={abs(ang_norm):.1f}° > 15°)")
+            
+            val = ocr_numeric_tilted_box(anchor, bgr_color)  # ✓ Call angular function
+            
+            if val:
+                if DEBUG_ANGLE_ROUTING:
+                    print(f"   ✅ SUCCESS: '{val}'")
+                return val
+            else:
+                if DEBUG_ANGLE_ROUTING:
+                    print(f"   ❌ ANGULAR FAILED")
+        
+        if DEBUG_ANGLE_ROUTING:
+            print(f"{'='*70}\n")
+        
+
+    # ========================================================================
+    # FALLBACK: Generic OCR for all other classes
+    # ========================================================================
+    allow_numeric = cls in NUMERIC_OK
+
+    try:
+        inner_crop = rotated_crop_from_det(anchor, bgr_color, pad=6)
+        name_in = ocr_text(inner_crop, engine).strip()
+        if name_in:
+            sc = score_name_token(name_in, 0.6, allow_numeric=allow_numeric, cls_name=cls)
+            if sc > 0.9:
+                return name_in
+    except Exception:
+        pass
+
+    name = ocr_generic_name(anchor, bgr_color, engine, allow_numeric=allow_numeric, cls_name=cls)
+    if name:
+        return name
+
+    rule = LINK_RULES.get(cls, {}).get("mode", "either")
+    windows = name_windows_for(anchor, bgr_color.shape, rule)
+    for (x1, y1, x2, y2) in windows:
+        crop = Image.fromarray(cv2.cvtColor(bgr_color[y1:y2, x1:x2], cv2.COLOR_BGR2RGB))
+        best_name, best_score = None, -1.0
+        for ang in (-10, 0, 10):
+            rot = crop.rotate(ang, expand=True, fillcolor="white")
+            name2, score = best_name_from_window(rot, engine, allow_numeric=allow_numeric, cls_name=cls)
+            if score > best_score:
+                best_name, best_score = name2, score
+        if best_name:
+            return best_name
+
+    return None
+
+
+def manual_angular_ocr(crop_bgr: np.ndarray, cls_name: str) -> tuple:
+    """
+    Process angular/tilted text for manual OCR.
+    User has already aligned the rectangle, so NO rotation needed.
+    Uses the same preprocessing pipeline as automated angular OCR.
+    
+    Args:
+        crop_bgr: BGR image crop (numpy array) - already extracted with padding
+        cls_name: Class name for context
+    
+    Returns:
+        (text, confidence)
+    """
+    # Convert to PIL
+    crop_pil = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
+    
+    # 1. Upscale if tiny (same as automated OCR)
+    min_side = min(crop_pil.width, crop_pil.height)
+    if min_side < 80:
+        scale = 3
+        crop_pil = crop_pil.resize(
+            (crop_pil.width * scale, crop_pil.height * scale), 
+            Image.LANCZOS
+        )
+    
+    # 2. Apply preprocessing variants (same as automated OCR)
+    g0 = _pil_to_gray_np(crop_pil)
+    g1 = _enhance_contrast(g0)
+    g2 = _binarize_for_text(g1)
+    
+    # Angular gets inverted variant too
+    variants = [g2, _invert(g2), g1, g0]
+    
+    best_txt = None
+    best_conf = 0.0
+    
+    # 3. Try PaddleOCR on each variant (NO ROTATION - already aligned)
+    paddle = get_paddleocr_instance()
+    
+    if paddle is not None:
+        for var_arr in variants:
+            var_pil = Image.fromarray(var_arr)
+            
+            # Run OCR without whitelist - let PaddleOCR recognize freely
+            txt, conf = paddleocr_recognize(
+                var_pil,
+                cls_name=cls_name,
+                whitelist=None  # No restrictions
+            )
+            
+            if conf > best_conf and txt:
+                best_txt = txt
+                best_conf = conf
+                
+                # Early exit on high confidence
+                if conf > 0.9:
+                    break
+        
+        if best_txt:
+            # Apply class-specific post-processing
+            if cls_name == "signal":
+                best_txt = _normalize_signal_digits(best_txt)
+                best_txt = best_txt.replace(' ', '')
+            elif cls_name in ["gks_gesteuert", "gks_festkodiert"]:
+                # For numeric classes, extract only digits
+                best_txt = ''.join(c for c in best_txt if c.isdigit())
+            
+            return best_txt, best_conf
+    
+    # 4. Fallback: Try Tesseract if PaddleOCR failed
+    try:
+        import pytesseract
+        
+        for var_arr in variants:
+            var_pil = Image.fromarray(var_arr)
+            
+            # Even Tesseract can work without whitelist, but we'll keep it for numeric classes
+            if cls_name in ["gks_gesteuert", "gks_festkodiert"]:
+                cfg = "--psm 7 -c tessedit_char_whitelist=0123456789 --oem 1"
+            else:
+                cfg = "--psm 7 -l eng+deu --oem 1"  # No whitelist
+            
+            raw = pytesseract.image_to_string(var_pil, config=cfg).strip()
+            
+            if raw and len(raw) > len(best_txt or ""):
+                best_txt = raw
+                best_conf = 0.85  # Tesseract doesn't provide confidence
+                
+                # Apply class-specific cleaning
+                if cls_name == "signal":
+                    best_txt = _normalize_signal_digits(best_txt)
+                    best_txt = best_txt.replace(' ', '')
+                elif cls_name in ["gks_gesteuert", "gks_festkodiert"]:
+                    best_txt = ''.join(c for c in best_txt if c.isdigit())
+    
+    except Exception:
+        pass
+    
+    return best_txt or "", best_conf
+
+
+# ============================================================================
+# CUSTOM SYMBOL OCR - For user-defined symbols with text
+# ============================================================================
+
+@paddle_ocr_locked
+def ocr_custom_symbol_text(
+    anchor: dict,
+    bgr_color: np.ndarray,
+    text_position,  # str or List[str] - supports multiple positions
+    engine: str,
+    text_region_offset: dict = None,
+    search_distance: int = 300,  # Generous distance to avoid cutting off long text
+    search_width: int = 80,
+):
+    """
+    OCR text near a custom symbol based on configured text position.
+
+    The user specifies where text appears relative to the symbol:
+    - "left": Search to the left of the symbol
+    - "right": Search to the right of the symbol
+    - "above": Search above the symbol
+    - "below": Search below the symbol
+    - "inside": Search inside the symbol bounding box (for speed signs, etc.)
+
+    Supports a list of positions - will try each until text is found.
+
+    Or provides a precise text_region_offset with dx, dy, width, height.
+
+    Args:
+        anchor: Detection dict with x1,y1,x2,y2 and optionally angle
+        bgr_color: Full BGR image
+        text_position: Direction to search ("left", "right", "above", "below")
+        engine: OCR engine ("paddleocr" or "tesseract")
+        text_region_offset: Precise offset {"dx", "dy", "width", "height"} from symbol center
+        search_distance: How far to search in the specified direction (pixels)
+        search_width: Width of the search region perpendicular to direction
+
+    Returns:
+        tuple: (text, bbox, position_used, confidence) where:
+            - text: Recognized text or empty string
+            - bbox: tuple (x1, y1, x2, y2) of OCR region, or None if no text found
+            - position_used: Which position was successful, or None if no text found
+            - confidence: OCR confidence score (0.0 to 1.0)
+    """
+    import math
+
+    # Handle list of positions - try each until text is found
+    positions_to_try = text_position if isinstance(text_position, list) else [text_position]
+
+    # Get symbol bounding box
+    x1, y1 = int(anchor.get("x1", 0)), int(anchor.get("y1", 0))
+    x2, y2 = int(anchor.get("x2", 0)), int(anchor.get("y2", 0))
+
+    # Symbol center and dimensions
+    sym_cx = (x1 + x2) / 2
+    sym_cy = (y1 + y2) / 2
+    sym_w = x2 - x1
+    sym_h = y2 - y1
+
+    # Get symbol rotation angle (if any)
+    sym_angle = float(anchor.get("angle", 0.0))
+
+    # Image dimensions
+    img_h, img_w = bgr_color.shape[:2]
+
+    if DEBUG_ANGLE_ROUTING:
+        print(f"\n📝 CUSTOM SYMBOL OCR: text_position='{text_position}', angle={sym_angle:.1f}°")
+        print(f"   Symbol bbox: ({x1},{y1})-({x2},{y2}) size={sym_w}x{sym_h}")
+        if text_region_offset:
+            print(f"   Using precise text_region_offset: {text_region_offset}")
+
+    # Try each position until we find text
+    for current_position in positions_to_try:
+        result = _ocr_custom_symbol_single_position(
+            anchor, bgr_color, current_position, engine,
+            text_region_offset, search_distance, search_width,
+            x1, y1, x2, y2, sym_cx, sym_cy, sym_w, sym_h, sym_angle, img_h, img_w
+        )
+        # result is now (text, bbox, position, confidence)
+        text, bbox, position, conf = result
+        if text:
+            return text, bbox, position, conf
+
+    return "", None, None, 0.0
+
+
+def _ocr_custom_symbol_single_position(
+    anchor: dict,
+    bgr_color: np.ndarray,
+    text_position: str,
+    engine: str,
+    text_region_offset: dict,
+    search_distance: int,
+    search_width: int,
+    x1: int, y1: int, x2: int, y2: int,
+    sym_cx: float, sym_cy: float, sym_w: int, sym_h: int,
+    sym_angle: float, img_h: int, img_w: int
+):
+    """
+    OCR for a single text position. Called by ocr_custom_symbol_text.
+
+    Returns:
+        tuple: (text, bbox, position, confidence) where:
+            - text: Recognized text or empty string
+            - bbox: tuple (x1, y1, x2, y2) of OCR region, or None if no text found
+            - position: The text_position parameter (for tracking which position worked)
+            - confidence: OCR confidence score (0.0 to 1.0)
+    """
+    import math
+
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   Trying position: '{text_position}'")
+
+    # PRIORITY: Use precise text_region_offset if provided
+    if text_region_offset and isinstance(text_region_offset, dict):
+        dx = text_region_offset.get("dx", 0)
+        dy = text_region_offset.get("dy", 0)
+        tw = text_region_offset.get("width", 100)
+        th = text_region_offset.get("height", 50)
+
+        # VALIDATION: Check for invalid dimensions
+        if tw <= 0 or th <= 0:
+            print(f"   ⚠️ Invalid text_region_offset: width={tw}, height={th}. Falling back to position-based search.")
+            text_region_offset = None  # Force fallback to position-based search
+        else:
+            # IMPORTANT: Rotate the offset based on symbol rotation
+            # The offset was defined relative to the 0° template, so we need to
+            # transform it for rotated symbols
+            from utils.rotation_utils import transform_offset_forward
+
+            dx_rot, dy_rot, tw_rot, th_rot = transform_offset_forward(
+                dx, dy, tw, th, sym_angle
+            )
+
+            if DEBUG_ANGLE_ROUTING:
+                print(f"   Manual offset rotation: ({dx},{dy}) @ {sym_angle:.1f}° → ({dx_rot},{dy_rot})")
+
+            # Calculate text region center from symbol center + rotated offset
+            txt_cx = sym_cx + dx_rot
+            txt_cy = sym_cy + dy_rot
+
+            # Calculate crop bounds
+            crop_x1 = max(0, int(txt_cx - tw_rot / 2))
+            crop_y1 = max(0, int(txt_cy - th_rot / 2))
+            crop_x2 = min(img_w, int(txt_cx + tw_rot / 2))
+            crop_y2 = min(img_h, int(txt_cy + th_rot / 2))
+
+            if DEBUG_ANGLE_ROUTING:
+                print(f"   Precise region: ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
+
+    # FALLBACK: Use direction-based search with LARGER area for auto-detection
+    # PaddleOCR will find text boxes automatically, we just need to give it enough area
+    if not text_region_offset or text_region_offset is None:
+        # IMPORTANT: Adjust text_position based on symbol rotation
+        # When symbol is rotated, "left" relative to symbol changes in image coordinates
+        # Rotation mapping (counterclockwise):
+        #   0°:   left=left, right=right, above=above, below=below
+        #   90°:  left=below, right=above, above=left, below=right
+        #   180°: left=right, right=left, above=below, below=above
+        #   270°: left=above, right=below, above=right, below=left
+
+        effective_position = text_position
+
+        # Normalize angle to 0-360
+        norm_angle = sym_angle % 360
+
+        # Map direction based on rotation (use ranges to handle slight variations)
+        if 45 <= norm_angle < 135:  # ~90° rotation
+            direction_map = {"left": "below", "right": "above", "above": "left", "below": "right"}
+            effective_position = direction_map.get(text_position, text_position)
+        elif 135 <= norm_angle < 225:  # ~180° rotation
+            direction_map = {"left": "right", "right": "left", "above": "below", "below": "above"}
+            effective_position = direction_map.get(text_position, text_position)
+        elif 225 <= norm_angle < 315:  # ~270° rotation
+            direction_map = {"left": "above", "right": "below", "above": "right", "below": "left"}
+            effective_position = direction_map.get(text_position, text_position)
+        # else: 0° or 315-360° - no change needed
+
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   Rotation adjustment: {text_position} @ {sym_angle:.1f}° → {effective_position}")
+
+        # Now use effective_position for search direction
+        if effective_position == "left":
+            # Search region to the LEFT of symbol (generous area)
+            crop_x2 = x1 + 20  # Extend slightly INTO symbol to catch adjacent text
+            crop_x1 = max(0, x1 - search_distance)  # Start further left
+            # Height: TIGHT vertical range to avoid catching text above/below
+            crop_y1 = max(0, int(sym_cy - max(sym_h * 0.7, 30)))
+            crop_y2 = min(img_h, int(sym_cy + max(sym_h * 0.7, 30)))
+
+        elif effective_position == "right":
+            # Search region to the RIGHT of symbol
+            crop_x1 = x2 - 20  # Extend slightly INTO symbol
+            crop_x2 = min(img_w, x2 + search_distance)
+            # Height: TIGHT vertical range to avoid catching text above/below
+            crop_y1 = max(0, int(sym_cy - max(sym_h * 0.7, 30)))
+            crop_y2 = min(img_h, int(sym_cy + max(sym_h * 0.7, 30)))
+
+        elif effective_position == "above":
+            # Search region ABOVE symbol
+            # Text is aligned HORIZONTALLY (parallel to symbol), so use 300px horizontal range
+            crop_y2 = y1 + 20  # Extend slightly INTO symbol
+            crop_y1 = max(0, y1 - search_distance)
+            # 300px horizontal: 150px on each side of symbol center
+            crop_x1 = max(0, int(sym_cx - search_distance / 2))
+            crop_x2 = min(img_w, int(sym_cx + search_distance / 2))
+
+        elif effective_position == "below":
+            # Search region BELOW symbol
+            # Text is aligned HORIZONTALLY (parallel to symbol), so use 300px horizontal range
+            crop_y1 = y2 - 20  # Extend slightly INTO symbol
+            crop_y2 = min(img_h, y2 + search_distance)
+            # 300px horizontal: 150px on each side of symbol center
+            crop_x1 = max(0, int(sym_cx - search_distance / 2))
+            crop_x2 = min(img_w, int(sym_cx + search_distance / 2))
+
+        elif effective_position == "inside":
+            # Search INSIDE the symbol bounding box (for speed signs with numbers inside)
+            # Use tight crop - just the symbol's interior with small padding
+            padding = 5
+            crop_x1 = max(0, x1 + padding)
+            crop_y1 = max(0, y1 + padding)
+            crop_x2 = min(img_w, x2 - padding)
+            crop_y2 = min(img_h, y2 - padding)
+
+            if DEBUG_ANGLE_ROUTING:
+                print(f"   INSIDE mode: tight crop ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
+
+        else:
+            # Default to left with tight vertical area
+            crop_x2 = x1 + 20
+            crop_x1 = max(0, x1 - search_distance)
+            crop_y1 = max(0, int(sym_cy - max(sym_h * 0.7, 30)))
+            crop_y2 = min(img_h, int(sym_cy + max(sym_h * 0.7, 30)))
+
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   Search region: ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
+
+    # Validate crop
+    if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   ❌ Invalid search region")
+        return "", None, text_position, 0.0
+
+    crop_w = crop_x2 - crop_x1
+    crop_h = crop_y2 - crop_y1
+
+    if crop_w < 10 or crop_h < 10:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   ❌ Crop too small: {crop_w}x{crop_h}")
+        return "", None, text_position, 0.0
+
+    # Extract crop
+    crop_bgr = bgr_color[crop_y1:crop_y2, crop_x1:crop_x2]
+    pil_crop = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
+
+    # Upscale if small
+    pil_crop = _upscale_if_tiny(pil_crop, min_side=80, scale=2)
+
+    if DEBUG_ANGLE_ROUTING:
+        print(f"   Crop size: {pil_crop.width}x{pil_crop.height}")
+
+    # Preprocessing
+    g0 = _pil_to_gray_np(pil_crop)
+    g1 = _enhance_contrast(g0)
+
+    # Try PaddleOCR with AUTO text detection
+    paddle = get_paddleocr_instance()
+
+    if paddle is None:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   ❌ PaddleOCR not available")
+        return "", None, text_position, 0.0
+
+    best_txt = ""
+    best_conf = 0.0
+    best_distance = float('inf')
+
+    # Symbol center relative to crop
+    sym_cx_rel = sym_cx - crop_x1
+    sym_cy_rel = sym_cy - crop_y1
+
+    try:
+        # Run PaddleOCR - it will DETECT text boxes automatically
+        test_arr = cv2.cvtColor(g1, cv2.COLOR_GRAY2BGR)
+        results = paddle.ocr(test_arr, cls=False)
+
+        if results and results[0]:
+            if DEBUG_ANGLE_ROUTING:
+                print(f"   Found {len(results[0])} text boxes")
+
+            for line in results[0]:
+                if line is None:
+                    continue
+                bbox, (text, conf) = line
+
+                if not text or conf < 0.4:
+                    continue
+
+                text = text.strip()
+                if len(text) < 2:
+                    continue
+
+                # Get text box center (relative to crop)
+                txt_cx = sum(pt[0] for pt in bbox) / 4
+                txt_cy = sum(pt[1] for pt in bbox) / 4
+
+                # Calculate distance from symbol to text
+                dx = txt_cx - sym_cx_rel
+                dy = txt_cy - sym_cy_rel
+                distance = (dx**2 + dy**2) ** 0.5
+
+                # Check if text is in the correct direction
+                is_correct_direction = True
+                if text_position == "left" and dx > 0:
+                    is_correct_direction = False
+                elif text_position == "right" and dx < 0:
+                    is_correct_direction = False
+                elif text_position == "above" and dy > 0:
+                    is_correct_direction = False
+                elif text_position == "below" and dy < 0:
+                    is_correct_direction = False
+
+                if DEBUG_ANGLE_ROUTING:
+                    dir_ok = "✓" if is_correct_direction else "✗"
+                    print(f"   [{dir_ok}] '{text}' conf={conf:.2f} dist={distance:.0f}px dx={dx:.0f} dy={dy:.0f}")
+
+                # Pick the CLOSEST text in the correct direction
+                if is_correct_direction and distance < best_distance:
+                    best_txt = text
+                    best_conf = conf
+                    best_distance = distance
+
+        # If no text found in correct direction, try without direction filter
+        if not best_txt and results and results[0]:
+            if DEBUG_ANGLE_ROUTING:
+                print(f"   ⚠️ No text in '{text_position}' direction, taking closest...")
+            for line in results[0]:
+                if line is None:
+                    continue
+                bbox, (text, conf) = line
+                if not text or conf < 0.4 or len(text.strip()) < 2:
+                    continue
+                text = text.strip()
+                txt_cx = sum(pt[0] for pt in bbox) / 4
+                txt_cy = sum(pt[1] for pt in bbox) / 4
+                distance = ((txt_cx - sym_cx_rel)**2 + (txt_cy - sym_cy_rel)**2) ** 0.5
+                if distance < best_distance:
+                    best_txt = text
+                    best_conf = conf
+                    best_distance = distance
+
+    except Exception as e:
+        if DEBUG_ANGLE_ROUTING:
+            print(f"   ⚠️ OCR error: {e}")
+
+    if DEBUG_ANGLE_ROUTING:
+        if best_txt:
+            print(f"   ✅ RESULT: '{best_txt}' in region ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
+        else:
+            print(f"   ❌ NO TEXT FOUND")
+
+    # Return text, bbox coordinates, position used, and confidence
+    if best_txt:
+        ocr_bbox = (crop_x1, crop_y1, crop_x2, crop_y2)
+        return best_txt.strip(), ocr_bbox, text_position, best_conf
+    else:
+        return "", None, text_position, 0.0

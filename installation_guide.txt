@@ -1,0 +1,322 @@
+================================================================================
+
+&nbsp; GLEISPLAN EXTRACTOR v3 - INSTALLATION GUIDE
+
+================================================================================
+
+
+
+📋 SYSTEM REQUIREMENTS
+
+--------------------------------------------------------------------------------
+
+\- Windows 10/11 (64-bit)
+
+\- Python 3.11.x (recommended: 3.11.9)
+
+\- Minimum 8GB RAM (16GB recommended)
+
+\- 5GB free disk space
+
+
+
+================================================================================
+
+&nbsp; STEP-BY-STEP INSTALLATION
+
+================================================================================
+
+
+
+STEP 1: VERIFY PYTHON INSTALLATION
+
+--------------------------------------------------------------------------------
+
+Open PowerShell and run:
+
+
+
+&nbsp;   py --version
+
+
+
+Expected output: Python 3.11.x
+
+
+
+If Python is not installed:
+
+→ Download from: https://www.python.org/downloads/
+
+→ During installation, CHECK "Add Python to PATH"
+
+
+
+STEP 2: NAVIGATE TO PROJECT FOLDER
+
+--------------------------------------------------------------------------------
+
+&nbsp;   cd C:\\Users\\YOUR\_USERNAME\\Documents\\Masterarbeit\\Gleisplanextraktorv3
+
+
+
+(Replace YOUR\_USERNAME with your actual Windows username)
+
+
+
+STEP 3: CREATE VIRTUAL ENVIRONMENT
+
+--------------------------------------------------------------------------------
+
+&nbsp;   py -m venv venv
+
+
+
+This creates an isolated Python environment for the project.
+
+
+
+STEP 4: ACTIVATE VIRTUAL ENVIRONMENT
+
+--------------------------------------------------------------------------------
+
+&nbsp;   .\\venv\\Scripts\\activate
+
+
+
+You should see (venv) appear at the start of your command line.
+
+
+
+STEP 5: UPGRADE PIP
+
+--------------------------------------------------------------------------------
+
+&nbsp;   py -m pip install --upgrade pip
+
+
+
+STEP 6: INSTALL PYTORCH (CPU VERSION)
+
+--------------------------------------------------------------------------------
+
+⚠️ IMPORTANT: Install PyTorch FIRST before other packages!
+
+
+
+&nbsp;   py -m pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cpu
+
+
+
+Why version 2.1.2?
+
+→ PyTorch 2.10.0+ has DLL loading issues on Windows
+
+→ Version 2.1.2 is stable and fully compatible
+
+
+
+STEP 7: INSTALL ALL OTHER PACKAGES
+
+--------------------------------------------------------------------------------
+
+&nbsp;   py -m pip install -r requirements.txt
+
+
+
+This will install all remaining dependencies.
+
+⏱️ This may take 5-10 minutes depending on your internet speed.
+
+
+
+STEP 8: VERIFY INSTALLATION
+
+--------------------------------------------------------------------------------
+
+Run this command to check if all core packages work:
+
+
+
+&nbsp;   py -c "import paddleocr, fitz, cv2, ultralytics, polars, torch; print('✅ All packages verified!')"
+
+
+
+Expected output: ✅ All packages verified!
+
+
+
+If you see this message, installation is successful! 🎉
+
+
+
+STEP 9: RUN THE APPLICATION
+
+--------------------------------------------------------------------------------
+
+&nbsp;   py main.py
+
+
+
+================================================================================
+
+&nbsp; TROUBLESHOOTING
+
+================================================================================
+
+
+
+❌ ERROR: "torch DLL load failed"
+
+--------------------------------------------------------------------------------
+
+Solution:
+
+&nbsp;   py -m pip uninstall torch torchvision torchaudio -y
+
+&nbsp;   py -m pip cache purge
+
+&nbsp;   py -m pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cpu
+
+
+
+❌ ERROR: "No module named 'cv2'"
+
+--------------------------------------------------------------------------------
+
+Solution:
+
+&nbsp;   py -m pip install opencv-python==4.6.0.66
+
+
+
+❌ ERROR: "Microsoft Visual C++ 14.0 is required"
+
+--------------------------------------------------------------------------------
+
+Download and install:
+
+→ https://visualstudio.microsoft.com/visual-cpp-build-tools/
+
+→ Select "Desktop development with C++" during installation
+
+
+
+❌ PACKAGES INSTALL SLOWLY
+
+--------------------------------------------------------------------------------
+
+Try using a faster mirror:
+
+&nbsp;   py -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+
+
+================================================================================
+
+&nbsp; DEACTIVATING THE ENVIRONMENT
+
+================================================================================
+
+
+
+When you're done working:
+
+
+
+&nbsp;   deactivate
+
+
+
+This exits the virtual environment.
+
+
+
+================================================================================
+
+&nbsp; UPDATING PACKAGES
+
+================================================================================
+
+
+
+To update all packages to their latest compatible versions:
+
+
+
+&nbsp;   py -m pip install --upgrade -r requirements.txt
+
+
+
+================================================================================
+
+&nbsp; UNINSTALLATION
+
+================================================================================
+
+
+
+To completely remove the environment:
+
+
+
+1\. Deactivate if active:
+
+&nbsp;   deactivate
+
+
+
+2\. Delete the venv folder:
+
+&nbsp;   Remove-Item -Recurse -Force venv
+
+
+
+================================================================================
+
+&nbsp; SUPPORT \& CONTACT
+
+================================================================================
+
+
+
+For issues or questions:
+
+→ Check the README.md file
+
+→ Review error messages carefully
+
+→ Ensure Python 3.11.x is installed
+
+→ Verify virtual environment is activated (you should see "(venv)")
+
+
+
+================================================================================
+
+&nbsp; QUICK REFERENCE
+
+================================================================================
+
+
+
+Activate environment:     .\\venv\\Scripts\\activate
+
+Deactivate environment:   deactivate
+
+Run application:          py main.py
+
+Install packages:         py -m pip install -r requirements.txt
+
+Verify installation:      py -c "import torch, ultralytics, paddleocr; print('OK')"
+
+
+
+================================================================================
+
+Last Updated: January 2026
+
+Version: 3.0
+
+================================================================================
+

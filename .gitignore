@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific
+*.log
+*.tmp
+temp/
+cache/
+
+# Database files (if you don't want to track them)
+*.db
+*.sqlite
+*.sqlite3
+
+# Excel temporary files
+~$*.xlsx
+~$*.xls
+
+# Model files (if large)
+*.pt
+*.pth
+best.pt
+yolov8n.pt
+
+# Archive folder with old versions
+archive_old_versions/
+
+# Old virtual environments
+.venv3/
+venv_new/
+
+# UI Editor folder (if not needed)
+UI Editor/
+
+# Other project folders (if not needed)
+gleisplanextraktor/
+
+# Debug files
+debug.txt
+
+# Docker (if not using)
+docker-compose.yml
+
+config/
+custom_symbol_templates/
+custom_symbols.json/
