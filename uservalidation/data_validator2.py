@@ -482,12 +482,25 @@ class EnhancedDataValidator:
         for _, row in signals.iterrows():
             fahrt = row.get('fahrtrichtung')
             anchor_text = row.get('anchor_text', '') or ''
+            anchor_text_upper = anchor_text.upper().strip()
 
-            # ✅ NEW: Check for MISSING Fahrtrichtung on non-V-signals
-            # V-signals (Vorsignale) don't require Fahrtrichtung
-            is_v_signal = anchor_text.upper().startswith('V')
+            # ✅ Signals that DON'T require Fahrtrichtung:
+            # 1. V-signals (Vorsignale) - e.g., V1, V2, VA1
+            # 2. Single letter + 3+ digits - e.g., A123, U456, B789
+            #    (Fahrtrichtung detection parameters don't work for these)
+            is_v_signal = anchor_text_upper.startswith('V')
 
-            if not is_v_signal and (pd.isna(fahrt) or fahrt == '' or fahrt is None):
+            # Check for pattern: single letter followed by 3+ digits (e.g., A123, U456)
+            is_letter_3digit_signal = (
+                len(anchor_text_upper) >= 4 and
+                anchor_text_upper[0].isalpha() and
+                anchor_text_upper[1:].isdigit() and
+                len(anchor_text_upper[1:]) >= 3
+            )
+
+            skip_fahrtrichtung_check = is_v_signal or is_letter_3digit_signal
+
+            if not skip_fahrtrichtung_check and (pd.isna(fahrt) or fahrt == '' or fahrt is None):
                 issues.append(ValidationIssue(
                     row_id=row['row_id'],
                     severity='warning',

@@ -159,12 +159,15 @@ class ResizableBBoxItem(QtWidgets.QGraphicsRectItem):
             handle.setVisible(False)
 
     def itemChange(self, change, value):
-        """Handle selection changes"""
+        """Handle selection and scene changes"""
         if change == QtWidgets.QGraphicsItem.ItemSelectedChange:
             if value:  # Selected
                 self._show_handles()
             else:  # Deselected
                 self._hide_handles()
+        elif change == QtWidgets.QGraphicsItem.ItemSceneChange:
+            if value is None:  # Being removed from scene
+                self.handles.clear()
         return super().itemChange(change, value)
 
     def handle_moved(self, handle_type: str, new_pos: QtCore.QPointF):
@@ -394,12 +397,15 @@ class ResizableOCRBBoxItem(QtWidgets.QGraphicsRectItem):
             handle.setVisible(False)
 
     def itemChange(self, change, value):
-        """Handle selection changes"""
+        """Handle selection and scene changes"""
         if change == QtWidgets.QGraphicsItem.ItemSelectedChange:
             if value:  # Selected
                 self._show_handles()
             else:  # Deselected
                 self._hide_handles()
+        elif change == QtWidgets.QGraphicsItem.ItemSceneChange:
+            if value is None:  # Being removed from scene
+                self.handles.clear()
         return super().itemChange(change, value)
 
     def handle_moved(self, handle_type: str, new_pos: QtCore.QPointF):
@@ -407,6 +413,7 @@ class ResizableOCRBBoxItem(QtWidgets.QGraphicsRectItem):
         if not self.is_resizing:
             self.is_resizing = True
             self.original_rect = self.rect()
+            self.workspace.cancel_pending_ocr_resize()
 
         rect = self.rect()
         x1, y1 = rect.x(), rect.y()
@@ -445,7 +452,7 @@ class ResizableOCRBBoxItem(QtWidgets.QGraphicsRectItem):
         self._update_handle_positions()
 
     def on_handle_released(self):
-        """Called when a handle is released - trigger OCR re-run if bbox changed"""
+        """Called when a handle is released - queue OCR re-run with delay"""
         if self.is_resizing:
             self.is_resizing = False
             new_rect = self.rect()
@@ -456,14 +463,17 @@ class ResizableOCRBBoxItem(QtWidgets.QGraphicsRectItem):
                 print(f"   Old: {self.original_rect}")
                 print(f"   New: {new_rect}")
 
-                # Trigger OCR re-run in workspace
-                self.workspace.on_ocr_bbox_resized(
+                # Queue OCR re-run with delay (allows adjusting multiple edges)
+                self.workspace.queue_ocr_bbox_resize(
                     self.row_id,
                     new_rect.x(),
                     new_rect.y(),
                     new_rect.width(),
                     new_rect.height()
                 )
+
+                # Update original rect so subsequent adjustments are tracked correctly
+                self.original_rect = new_rect
             else:
                 print(f"   ℹ️ OCR region unchanged, skipping OCR re-run")
 
@@ -537,12 +547,15 @@ class ResizablePolygonBBoxItem(QtWidgets.QGraphicsPolygonItem):
             handle.setVisible(False)
 
     def itemChange(self, change, value):
-        """Handle selection"""
+        """Handle selection and scene changes"""
         if change == QtWidgets.QGraphicsItem.ItemSelectedChange:
             if value:
                 self._show_handles()
             else:
                 self._hide_handles()
+        elif change == QtWidgets.QGraphicsItem.ItemSceneChange:
+            if value is None:  # Being removed from scene
+                self.handles.clear()
         return super().itemChange(change, value)
 
     def handle_moved(self, handle_type: str, new_pos: QtCore.QPointF):

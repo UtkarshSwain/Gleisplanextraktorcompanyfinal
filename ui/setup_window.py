@@ -6,6 +6,7 @@
 # ============================================================================
 from PyQt5 import QtCore, QtGui, QtWidgets
 from ui.graphics_view import InteractiveGraphicsView
+from ui.database_dialogs import SavedWorkspacesDialog, DatabaseManagerDialog
 from typing import List, Dict, Tuple, Optional, Any
 import numpy as np
 import pandas as pd
@@ -15,15 +16,10 @@ from core.pipelineworker import PipelineWorker
 import time
 import cv2
 from core.image_processing import qpolygonf_from_pts
-
-# ============================================================================
-# IMPORT POPPLER PATH FROM CONFIG
-# ============================================================================
-from config import POPPLER_PATH, TESSERACT_PATH
-
 # -------- Setup & Run (connects to REAL PipelineWorker signals) --------
 class SetupAndRunWindow(QtWidgets.QMainWindow):
-    processing_done = QtCore.pyqtSignal(pd.DataFrame, object, object, object, object, object)  # df_all, page_base_pix, page_dfs, page_bgr_arrays, exception    started_processing = QtCore.pyqtSignal()
+    processing_done = QtCore.pyqtSignal(pd.DataFrame, object, object, object, object, object, bool)  # df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, exception, from_database
+    started_processing = QtCore.pyqtSignal()
     started_processing = QtCore.pyqtSignal()
     def __init__(self, main_app_ref: 'MainWindow'):
         from main import MainWindow
@@ -51,7 +47,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.recent_pdfs: List[str] = []
         self.recent_models: List[str] = []
         self.max_recent = 5
-        
+        self._pending_workspace_data: Optional[Dict] = None  # For loading saved workspace after PDF load
+
         self._load_recent_files()
 
     def _apply_theme(self):
@@ -867,10 +864,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 padding: 2px 0px;
             """)
             self.lbl_resolution_hint.show()
-    
-    # ============================================================================
-    # REAL WORKER WIRING - WITH POPPLER PATH FIX
-    # ============================================================================
+    # REAL worker wiring (page_ready + done(df_all, overlays))
     def on_run(self):
         if not self.pdf_path:
             QtWidgets.QMessageBox.warning(self, "Fehler: Kein Gleisplan", "Bitte einen Gleisplan auswählen (PDF oder Bild).")
@@ -879,13 +873,13 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Fehler: Kein YOLO Model", "Bitte ein YOLO .pt Model auswählen.")
             return
         
-        layout_name = self.pdf_path  # Use full path as layout name
+        layout_name = os.path.basename(self.pdf_path)  # Use just filename as layout name
         force_rerun = self.check_force_rerun.isChecked()
         
         # Check if saved data exists
         saved_result = None
         try:
-            from database3 import get_workspace_data
+            from database_sqlite import get_workspace_data
             saved_result = get_workspace_data(layout_name)
         except Exception as e:
             self.on_status(f"DB-Fehler beim Laden: {e}")
@@ -924,16 +918,9 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                         pil_img = pil_img.convert('RGB')
                     pages = [pil_img]
                 else:
-                    # ✅ FIXED: Load PDF with Poppler path
+                    # Load PDF pages
                     from pdf2image import convert_from_path
-                    
-                    self.on_status(f"Verwende Poppler: {POPPLER_PATH}")
-                    
-                    pages = convert_from_path(
-                        self.pdf_path,
-                        dpi=dpi,
-                        poppler_path=POPPLER_PATH  # ← Pass Poppler path explicitly
-                    )
+                    pages = convert_from_path(self.pdf_path, dpi=dpi)
                 
                 self._page_base_pix.clear()
                 self._page_dfs.clear()
@@ -1032,12 +1019,13 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
                 # Emit to main window (with saved track skeleton)
                 self.processing_done.emit(
-                    df_all, 
-                    self._page_base_pix, 
-                    self._page_dfs, 
-                    self._page_bgr_arrays, 
+                    df_all,
+                    self._page_base_pix,
+                    self._page_dfs,
+                    self._page_bgr_arrays,
                     saved_track_skeleton,  # Use saved track skeleton
-                    None  # No exception
+                    None,  # No exception
+                    True  # from_database=True
                 )
                 
                 self.statusBar().showMessage("✅ Aus Datenbank geladen - Keine Analyse nötig!", 8000)
@@ -1067,9 +1055,16 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             # ✅ RUN FULL ANALYSIS (SLOW PATH)
             if force_rerun:
                 self.on_status("🔄 Neu-Analyse erzwungen")
+                # Delete existing saved data to avoid confusion in workspace_widget
+                try:
+                    from database_sqlite import delete_workspace_data
+                    delete_workspace_data(layout_name)
+                    self.on_status("Alte gespeicherte Daten gelöscht")
+                except Exception as e:
+                    print(f"Could not delete old workspace data: {e}")
             else:
                 self.on_status("Keine gespeicherten Daten gefunden")
-            
+
             self._run_full_analysis()
 
     def _run_full_analysis(self):
@@ -1271,7 +1266,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             self.menu_act_stop.setEnabled(False)
 
             # Pass all dictionaries, track_skeleton, and the exception to the next window
-            self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception)
+            self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception, False)  # from_database=False
 
     def closeEvent(self, e: QtGui.QCloseEvent):
         if hasattr(self, "worker") and self.worker.isRunning():
@@ -1391,6 +1386,13 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
         file_menu.addSeparator()
 
+        act_load_saved = file_menu.addAction("Gespeicherte Arbeit laden...")
+        act_load_saved.setShortcut("Ctrl+Shift+O")
+        act_load_saved.setToolTip("Einen gespeicherten Arbeitsbereich aus der Datenbank laden")
+        act_load_saved.triggered.connect(self._show_saved_workspaces)
+
+        file_menu.addSeparator()
+
         act_exit = file_menu.addAction("Beenden")
         act_exit.setShortcut("Ctrl+Q")
         act_exit.triggered.connect(self.close)
@@ -1452,6 +1454,13 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         act_symbol_manager = tools_menu.addAction("Symbol-Manager...")
         act_symbol_manager.setToolTip("Symbole und Vorlagen verwalten")
         act_symbol_manager.triggered.connect(self._show_symbol_manager)
+
+        tools_menu.addSeparator()
+
+        # Database Manager
+        act_db_manager = tools_menu.addAction("Datenbank-Manager...")
+        act_db_manager.setToolTip("Gespeicherte Daten und Arbeitsbereiche verwalten")
+        act_db_manager.triggered.connect(self._show_database_manager)
 
         # View Menu
         view_menu = mb.addMenu("Ansicht")
@@ -1540,6 +1549,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         if dialog.exec_() == QtWidgets.QDialog.Accepted:
             # Apply settings
             self.ocr_engine = ocr_combo.currentText()
+            self.combo_ocr.setCurrentText(self.ocr_engine)
             
             # Store other settings (you can add instance variables for these)
             self.yolo_conf_threshold = conf_spin.value()
@@ -1903,6 +1913,96 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 f"Fehler beim Öffnen des Symbol-Managers:\n{str(e)}"
             )
 
+    def _show_saved_workspaces(self):
+        """Show dialog to load a saved workspace from database."""
+        try:
+            dialog = SavedWorkspacesDialog(self)
+            dialog.workspace_selected.connect(self._on_load_saved_workspace)
+            dialog.exec_()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Fehler",
+                f"Fehler beim Öffnen der gespeicherten Arbeitsbereiche:\n{str(e)}"
+            )
+
+    def _show_database_manager(self):
+        """Show full database manager dialog."""
+        try:
+            dialog = DatabaseManagerDialog(self)
+            dialog.workspace_selected.connect(self._on_load_saved_workspace)
+            dialog.exec_()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Fehler",
+                f"Fehler beim Öffnen des Datenbank-Managers:\n{str(e)}"
+            )
+
+    def _on_load_saved_workspace(self, layout_name: str):
+        """Handle loading a saved workspace from database."""
+        try:
+            from database_sqlite import get_workspace_data
+
+            self.on_status(f"Lade gespeicherten Arbeitsbereich: {layout_name}")
+
+            result = get_workspace_data(layout_name)
+            if result is None:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Nicht gefunden",
+                    f"Arbeitsbereich '{layout_name}' nicht in der Datenbank gefunden."
+                )
+                return
+
+            workspace_data, track_skeleton, image_dimensions = result
+
+            # Emit signal to open in AuditingWindow with saved data
+            self.on_status(f"Öffne Arbeitsbereich mit {len(workspace_data)} Erkennungen...")
+
+            # Convert to DataFrame
+            import pandas as pd
+            df_all = pd.DataFrame(workspace_data)
+
+            # We need page images - check if we have them
+            if not self._page_base_pix:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "PDF erforderlich",
+                    f"Bitte laden Sie zuerst die zugehörige PDF-Datei:\n\n{layout_name}\n\n"
+                    "Die gespeicherten Daten werden dann automatisch geladen."
+                )
+                # Store for later use when PDF is loaded
+                self._pending_workspace_data = {
+                    'layout_name': layout_name,
+                    'data': workspace_data,
+                    'track_skeleton': track_skeleton,
+                    'image_dimensions': image_dimensions
+                }
+                return
+
+            # Emit the processing_done signal to transition to AuditingWindow
+            self.processing_done.emit(
+                df_all,
+                self._page_base_pix,
+                self._page_dfs if hasattr(self, '_page_dfs') else {},
+                self._page_bgr_arrays if hasattr(self, '_page_bgr_arrays') else {},
+                track_skeleton,
+                None,  # No exception
+                True  # from_database=True
+            )
+
+            self.on_status(f"Arbeitsbereich '{layout_name}' erfolgreich geladen!")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Fehler",
+                f"Fehler beim Laden des Arbeitsbereichs:\n{str(e)}"
+            )
+
     def on_add_new_symbol(self):
         """Open the New Symbol Dialog to define a new symbol without retraining YOLO."""
         import cv2
@@ -1944,19 +2044,19 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             if file_path.lower().endswith('.pdf'):
                 # For PDF, load the first page
                 try:
-                    from pdf2image import convert_from_path
-                    
-                    pages = convert_from_path(
-                        file_path,
-                        dpi=500,
-                        poppler_path=POPPLER_PATH  # ← Use Poppler path
-                    )
-                    
-                    if pages:
-                        pil_img = pages[0]
-                        current_page_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                    import fitz
+                    doc = fitz.open(file_path)
+                    page = doc[0]
+                    pix = page.get_pixmap(dpi=500)  # Match main pipeline DPI
+                    import numpy as np
+                    img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                    if pix.n == 4:  # RGBA
+                        current_page_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+                    else:  # RGB
+                        current_page_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+                    doc.close()
                 except Exception as e:
-                    QtWidgets.QMessageBox.warning(self, "Fehler", f"PDF konnte nicht geladen werden:\n{e}")
+                    QtWidgets.QMessageBox.warning(self, "Fehler", f"Datei konnte nicht geladen werden:\n{e}")
                     return
             else:
                 current_page_bgr = cv2.imread(file_path)

@@ -17,31 +17,7 @@ import os
 # SYSTEM SETTINGS
 # ============================================================================
 
-# Path configurations - set these via environment variables or edit directly
-# For company laptops where tools are not in system PATH
-
-# Poppler path for PDF processing (pdf2image)
-# Examples:
-#   Windows: "C:/Program Files/poppler-24.02.0/Library/bin"
-#   Linux:   "/usr/bin" or "/opt/poppler/bin"
-#   macOS:   "/opt/homebrew/bin" (if installed via Homebrew)
-POPPLER_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\poppler-25.12.0\Library\bin"
-
-# Tesseract path for OCR (if using Tesseract engine)
-# Examples:
-#   Windows: "C:/Program Files/Tesseract-OCR/tesseract.exe"
-#   Linux:   "/usr/bin/tesseract"
-#   macOS:   "/opt/homebrew/bin/tesseract"
-TESSERACT_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\tesseract\tesseract.exe"
-
-# Set Tesseract command if path is provided
-if TESSERACT_PATH:
-    try:
-        import pytesseract
-        pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
-    except ImportError:
-        pass  # pytesseract not installed, ignore
-
+POPPLER_PATH = None
 DEBUG_SIGNALS = False
 DEBUG_ANGLE_ROUTING = False
 

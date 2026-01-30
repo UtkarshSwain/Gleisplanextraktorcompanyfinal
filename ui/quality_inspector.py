@@ -38,6 +38,9 @@ class QualityInspectorDialog(QtWidgets.QDialog):
             ]
         self.df_all = df_filtered
 
+        # ✅ Load custom symbol configurations for proper risk assessment
+        self.custom_symbol_config = self._load_custom_symbol_config()
+
         self.setWindowTitle(f"Erkennungsqualität prüfen - {workspace.layout_name}")
         self.resize(1400, 900)
 
@@ -54,6 +57,22 @@ class QualityInspectorDialog(QtWidgets.QDialog):
         self._build_ui()
         self._populate_data()
         self._apply_theme()
+
+    def _load_custom_symbol_config(self) -> Dict:
+        """Load custom symbol configurations to check has_text and links_to_coordinate."""
+        config = {}
+        try:
+            from core.symbol_detector import NewSymbolDetector
+            detector = NewSymbolDetector()
+            for name, symbol in detector.symbols.items():
+                config[name] = {
+                    'has_text': symbol.has_text,
+                    'links_to_coordinate': symbol.links_to_coordinate,
+                    'text_position': symbol.text_position
+                }
+        except Exception as e:
+            print(f"⚠️ Could not load custom symbol config: {e}")
+        return config
 
     def _calculate_risk_scores(self):
         """
@@ -78,16 +97,31 @@ class QualityInspectorDialog(QtWidgets.QDialog):
 
             # Factor 2: Missing Required Data (30% weight)
             cls = row.get('cls', '')
+            is_custom = row.get('is_custom_symbol', False) == True
 
-            # Check for missing coordinate link (weichen_block excluded per user request)
-            if cls in ['signal', 'gks_gesteuert', 'gks_festkodiert',
-                       'prellblock', 'haltepunkt', 'sverbinder']:
+            # Determine if this symbol should have coordinate/text based on type
+            needs_coordinate = False
+            needs_text = False
+
+            if is_custom and cls in self.custom_symbol_config:
+                # Custom symbol - check configuration
+                sym_config = self.custom_symbol_config[cls]
+                needs_coordinate = sym_config.get('links_to_coordinate', False)
+                needs_text = sym_config.get('has_text', False)
+            else:
+                # YOLO symbol - use hardcoded lists
+                needs_coordinate = cls in ['signal', 'gks_gesteuert', 'gks_festkodiert',
+                                           'prellblock', 'haltepunkt', 'sverbinder']
+                needs_text = cls in ['signal', 'gks_gesteuert', 'gks_festkodiert']
+
+            # Check for missing coordinate link
+            if needs_coordinate:
                 if pd.isna(row.get('coord_text')) or not str(row.get('coord_text', '')).strip():
                     risk += 0.3
                     factors.append('Koordinate fehlt')
 
-            # Check for missing text (weichen_block excluded per user request)
-            if cls in ['signal', 'gks_gesteuert', 'gks_festkodiert']:
+            # Check for missing text
+            if needs_text:
                 if pd.isna(row.get('anchor_text')) or not str(row.get('anchor_text', '')).strip():
                     risk += 0.15
                     factors.append('Bezeichnung fehlt')
@@ -158,6 +192,13 @@ class QualityInspectorDialog(QtWidgets.QDialog):
                 palette.setColor(QtGui.QPalette.Base, bg_color)
                 palette.setColor(QtGui.QPalette.Text, text_color)
                 palette.setColor(QtGui.QPalette.AlternateBase, bg_color)
+
+                # ✅ FIX: Set inactive selection colors to match active ones
+                # This prevents the green color when clicking outside the dialog
+                palette.setColor(QtGui.QPalette.Inactive, QtGui.QPalette.Highlight,
+                                palette.color(QtGui.QPalette.Active, QtGui.QPalette.Highlight))
+                palette.setColor(QtGui.QPalette.Inactive, QtGui.QPalette.HighlightedText,
+                                palette.color(QtGui.QPalette.Active, QtGui.QPalette.HighlightedText))
 
                 self.setPalette(palette)
                 self.table.setPalette(palette)
@@ -443,8 +484,16 @@ class QualityInspectorDialog(QtWidgets.QDialog):
             row_id_item.setData(QtCore.Qt.UserRole, int(row['row_id']))
             self.table.setItem(row_idx, 0, row_id_item)
 
-            # Class
-            cls_item = QtWidgets.QTableWidgetItem(str(row.get('cls', '')))
+            # Class (with indicator for custom symbols)
+            cls_name = str(row.get('cls', ''))
+            is_custom = row.get('is_custom_symbol', False) == True
+            if is_custom:
+                cls_display = f"📦 {cls_name}"
+            else:
+                cls_display = cls_name
+            cls_item = QtWidgets.QTableWidgetItem(cls_display)
+            if is_custom:
+                cls_item.setForeground(QtGui.QColor('#ff00ff'))  # Magenta for custom
             self.table.setItem(row_idx, 1, cls_item)
 
             # Text/Label

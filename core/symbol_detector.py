@@ -33,7 +33,7 @@ def _check_db_available():
     global _DB_AVAILABLE
     if _DB_AVAILABLE is None:
         try:
-            from database3 import is_db_available
+            from database_sqlite import is_db_available
             _DB_AVAILABLE = is_db_available()
         except Exception:
             _DB_AVAILABLE = False
@@ -302,7 +302,7 @@ class NewSymbolDetector:
         # Try PostgreSQL first
         if _check_db_available():
             try:
-                from database3 import get_all_custom_symbols
+                from database_sqlite import get_all_custom_symbols
                 db_symbols = get_all_custom_symbols()
 
                 for sym_data in db_symbols:
@@ -391,7 +391,7 @@ class NewSymbolDetector:
     def _save_config_to_db(self):
         """Save symbol definitions to PostgreSQL database."""
         try:
-            from database3 import save_custom_symbol
+            from database_sqlite import save_custom_symbol
 
             for name, symbol in self.symbols.items():
                 # Serialize numpy arrays to bytes

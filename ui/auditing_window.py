@@ -13,6 +13,8 @@ from ui.themes import DARK_QSS,LIGHT_QSS
 import pandas as pd
 import numpy as np
 from ui.draggable_tab_bar import DraggableTabWidget
+from ui.database_dialogs import SavedWorkspacesDialog, DatabaseManagerDialog
+from utils.uuid_utils import generate_deterministic_uuid, extract_base_layout_name
 class AuditingWindow(QtWidgets.QMainWindow):
 
     """Main window that holds multiple workspace tabs - NO VERSIONING"""
@@ -64,9 +66,14 @@ class AuditingWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("✅ Analyse abgeschlossen - Sie können nun die Daten überprüfen und bearbeiten")
     
     def add_workspace(self, layout_name: str, df_all: pd.DataFrame,
-                    page_base_pix: Dict, page_dfs: Dict, page_bgr_arrays: Dict, 
-                    track_skeleton: Optional[np.ndarray] = None):
-        """Add a new PDF workspace as a tab"""
+                    page_base_pix: Dict, page_dfs: Dict, page_bgr_arrays: Dict,
+                    track_skeleton: Optional[np.ndarray] = None,
+                    from_database: bool = False):
+        """Add a new PDF workspace as a tab
+
+        Args:
+            from_database: If True, data was loaded from database (skip DB check in workspace)
+        """
         from ui.workspace_widget import WorkspaceWidget
 
         # Check if already open
@@ -75,10 +82,10 @@ class AuditingWindow(QtWidgets.QMainWindow):
                 self.tab_widget.setCurrentIndex(idx)
                 self.statusBar().showMessage(f"{layout_name} bereits geöffnet")
                 return
-        
+
         # Create workspace widget
         workspace = WorkspaceWidget(self, layout_name)
-        workspace.load_data(df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton)
+        workspace.load_data(df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, from_database)
         
         # Add as tab (use filename without extension for cleaner look)
         tab_label = os.path.basename(layout_name)
@@ -223,6 +230,12 @@ class AuditingWindow(QtWidgets.QMainWindow):
         act_stats = data_menu.addAction("📈 Statistik")
         act_stats.setToolTip("Zeigt Statistiken über die Daten")
         act_stats.triggered.connect(self.on_statistics)
+
+        data_menu.addSeparator()
+
+        act_db_manager = data_menu.addAction("🗄️ Datenbank-Manager...")
+        act_db_manager.setToolTip("Gespeicherte Daten und Arbeitsbereiche verwalten")
+        act_db_manager.triggered.connect(self._show_database_manager)
 
         # Compare Menu - Gleisplan comparison (IMPORTANT FEATURE!)
         compare_menu = mb.addMenu("Vergleichen")
@@ -1416,6 +1429,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
             # This ensures anchor_text and coord_text are included in the UUID hash
             # ========================================================================
             print(f"\n🔑 Generating detection_ids for comparison support...", flush=True)
+            base_layout_name = extract_base_layout_name(workspace.layout_name)
             detection_id_count = 0
             for idx, row in new_df.iterrows():
                 element_for_uuid = {
@@ -1570,6 +1584,18 @@ class AuditingWindow(QtWidgets.QMainWindow):
             self.on_save_all()
         
         e.accept()
+
+    def _show_database_manager(self):
+        """Show full database manager dialog."""
+        try:
+            dialog = DatabaseManagerDialog(self)
+            dialog.exec_()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Fehler",
+                f"Fehler beim Öffnen des Datenbank-Managers:\n{str(e)}"
+            )
 
     def _show_help_guide(self):
         from pdfcomparison.dialogs import HelpDialog

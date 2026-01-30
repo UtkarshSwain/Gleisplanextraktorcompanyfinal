@@ -15,7 +15,11 @@ from core.linking import parse_coord
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from core.ocr_engine import ocr_anchor_name, ocr_best_angle, ocr_text, ocr_custom_symbol_text
 from core.image_processing import parse_weichen_block
-from core.linking import detect_fahrtrichtung, detect_haltepunkt_signal_group, link_haltetafel_to_gks, link_anchor_to_coord, merge_duplicate_signals, link_isolierstoss_fallback
+from core.linking import (
+    detect_fahrtrichtung, detect_haltepunkt_signal_group, link_haltetafel_to_gks,
+    link_anchor_to_coord, merge_duplicate_signals, link_isolierstoss_fallback,
+    detect_fahrtrichtung_gks_relaxed, detect_fahrtrichtung_gks_nearest
+)
 import numpy as np
 import gc
 from config import set_classes_from_model, canon_name
@@ -86,6 +90,8 @@ class PipelineWorker(QtCore.QThread):
             page_bgr_arrays = {}
             page_dfs = {}
             track_skeleton = None  # ✅ Define at top level
+            gks_dets = []  # ✅ Define at top level to avoid undefined variable
+            all_gks_dets = []  # ✅ Accumulate GKS from all pages for Tier 3/4 fallbacks
 
             # 1. ALWAYS get page count
             if self._is_image_file:
@@ -309,7 +315,7 @@ class PipelineWorker(QtCore.QThread):
 
                     # Try loading from database first
                     try:
-                        from database3 import is_db_available, get_all_custom_symbols
+                        from database_sqlite import is_db_available, get_all_custom_symbols
                         if is_db_available():
                             db_symbols = get_all_custom_symbols()
                             for sym_data in db_symbols:
@@ -469,7 +475,13 @@ class PipelineWorker(QtCore.QThread):
                     
                     print(f"   Signals to process: {len(signal_dets)}")
                     print(f"   GKS boxes available: {len(gks_dets)}")
-                    
+
+                    # ✅ Accumulate GKS with page info for Tier 3/4 fallbacks
+                    for gks_det in gks_dets:
+                        gks_copy = gks_det.copy()
+                        gks_copy['page'] = pidx
+                        all_gks_dets.append(gks_copy)
+
                     # ✅ GKS-based detection ONLY (no track fallback yet)
                     for signal_det in signal_dets:
                         signal_text = None
@@ -1026,6 +1038,11 @@ class PipelineWorker(QtCore.QThread):
                                 obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
                                 obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
                                 poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
+                                ocr_x1=ocr_bbox[0] if ocr_bbox else None,
+                                ocr_y1=ocr_bbox[1] if ocr_bbox else None,
+                                ocr_x2=ocr_bbox[2] if ocr_bbox else None,
+                                ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                                ocr_region_source=ocr_position,
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=fahrtrichtung,
                                 _fahrtrichtung_source=fahrtrichtung_source
@@ -1077,7 +1094,12 @@ class PipelineWorker(QtCore.QThread):
                             obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
                             obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
                             poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
-                            notes="", weichen_coordinates=[], 
+                            ocr_x1=ocr_bbox[0] if ocr_bbox else None,
+                            ocr_y1=ocr_bbox[1] if ocr_bbox else None,
+                            ocr_x2=ocr_bbox[2] if ocr_bbox else None,
+                            ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                            ocr_region_source=ocr_position,
+                            notes="", weichen_coordinates=[],
                             fahrtrichtung=fahrtrichtung,
                             _fahrtrichtung_source=fahrtrichtung_source  # ✅ CHANGE 3
                         ))
@@ -1147,7 +1169,7 @@ class PipelineWorker(QtCore.QThread):
                 all_rows = merge_duplicate_signals(
                     all_rows,
                     track_skeleton=None,  # ✅ Don't pass track skeleton to merge
-                    gks_dets=gks_dets if 'gks_dets' in locals() else []
+                    gks_dets=gks_dets
                 )
                 df_all = pd.DataFrame(all_rows)
 
@@ -1180,11 +1202,21 @@ class PipelineWorker(QtCore.QThread):
                     
                     for row in signals_needing_fallback:
                         signal_text = row.get('anchor_text', '?')
-                        
-                        # Skip V-signals
-                        if signal_text and signal_text.startswith('V'):
+                        signal_text_upper = (signal_text or '').upper().strip()
+
+                        # Skip signals that don't need Fahrtrichtung:
+                        # 1. V-signals (Vorsignale)
+                        # 2. Single letter + 3+ digits (e.g., A123, U456)
+                        if signal_text_upper.startswith('V'):
                             continue
-                        
+
+                        # Check single letter + 3+ digits pattern
+                        if (len(signal_text_upper) >= 4 and
+                            signal_text_upper[0].isalpha() and
+                            signal_text_upper[1:].isdigit() and
+                            len(signal_text_upper[1:]) >= 3):
+                            continue
+
                         print(f"\n   🛤️  Trying track fallback for '{signal_text}'")
                         
                         # ========================================
@@ -1306,9 +1338,64 @@ class PipelineWorker(QtCore.QThread):
                             fallback_success += 1
                             print(f"      ✅ SUCCESS: Fahrtrichtung '{fahrtrichtung_from_track}' (track)")
                         else:
-                            row['_fahrtrichtung_source'] = 'none'
-                            fallback_failed += 1
-                            print(f"      ❌ FAILED: No track found")
+                            # ========================================
+                            # TIER 3: GKS Relaxed Column Search (dy ≤ 600px)
+                            # ========================================
+                            signal_page = row.get('page', 1)
+                            page_gks_dets = [g for g in all_gks_dets if g.get('page') == signal_page]
+
+                            # Build signal_det for Tier 3/4
+                            signal_det_tier34 = {
+                                'x1': row['ax1'],
+                                'y1': row['ay1'],
+                                'x2': row['ax2'],
+                                'y2': row['ay2'],
+                                'cx': row.get('obb_cx'),
+                                'cy': row.get('obb_cy'),
+                                'text': signal_text,
+                                'angle': row.get('angle', 0.0),
+                                'angle_raw': row.get('angle_raw', row.get('angle', 0.0))
+                            }
+
+                            print(f"      🔍 Trying TIER 3 (GKS relaxed, dy≤600px)...")
+                            tier3_result, tier3_gks = detect_fahrtrichtung_gks_relaxed(
+                                signal_det_tier34,
+                                page_gks_dets,
+                                used_gks_ids=None,  # Not tracking used GKS for now
+                                dx_tolerance=200,
+                                dy_min=30,
+                                dy_max=600,
+                                angle_tolerance=25
+                            )
+
+                            if tier3_result:
+                                row['fahrtrichtung'] = tier3_result
+                                row['_fahrtrichtung_source'] = 'gks_relaxed'
+                                fallback_success += 1
+                                print(f"      ✅ SUCCESS: Fahrtrichtung '{tier3_result}' (gks_relaxed)")
+                            else:
+                                # ========================================
+                                # TIER 4: Euclidean Nearest GKS (dist ≤ 800px)
+                                # ========================================
+                                print(f"      🔍 Trying TIER 4 (Euclidean nearest, dist≤800px)...")
+                                tier4_result, tier4_gks = detect_fahrtrichtung_gks_nearest(
+                                    signal_det_tier34,
+                                    page_gks_dets,
+                                    used_gks_ids=None,
+                                    max_distance=800,
+                                    dy_min=30,
+                                    angle_tolerance=30
+                                )
+
+                                if tier4_result:
+                                    row['fahrtrichtung'] = tier4_result
+                                    row['_fahrtrichtung_source'] = 'gks_nearest'
+                                    fallback_success += 1
+                                    print(f"      ✅ SUCCESS: Fahrtrichtung '{tier4_result}' (gks_nearest)")
+                                else:
+                                    row['_fahrtrichtung_source'] = 'none'
+                                    fallback_failed += 1
+                                    print(f"      ❌ FAILED: All 4 tiers failed")
                     
                     print(f"\n{'='*70}")
                     print(f"   Track fallback results:")
@@ -1340,7 +1427,9 @@ class PipelineWorker(QtCore.QThread):
             # ✅ ADD link_coord_row_id TRACKING
             # After all processing is complete, map anchors to their linked coordinates
             # Use the dataframe itself - find anchors that have coord_text matching a coordinate
-            if self.run_analysis and not df_all.empty and 'cls' in df_all.columns:
+            required_cols = ['cls', 'coord_text', 'cx1', 'cy1', 'row_id', 'page']
+            has_required_cols = all(col in df_all.columns for col in required_cols)
+            if self.run_analysis and not df_all.empty and has_required_cols:
                 print(f"\n{'='*70}")
                 print(f"🔗 ADDING link_coord_row_id TRACKING")
                 print(f"{'='*70}")

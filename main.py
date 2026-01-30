@@ -8,6 +8,7 @@
 # ============================================================================
 # PIL CONFIGURATION - MUST BE BEFORE OTHER IMPORTS
 # ============================================================================
+import os
 from PIL import Image, ImageFile
 
 # Disable decompression bomb check for large railway plans
@@ -20,7 +21,7 @@ from ui.auditing_window import AuditingWindow
 from utils.helpers import _is_deleted
 from ui.themes import DARK_QSS, LIGHT_QSS
 import sys
-from database3 import init_db, get_workspace_data, save_workspace_data
+from database_sqlite import init_db, get_workspace_data, save_workspace_data
 import logging 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -87,14 +88,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setup_window.show(); self.hide()
 
 
-    def _handle_processing_done(self, df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, exception):
+    def _handle_processing_done(self, df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, exception, from_database=False):
             """Handle processing completion"""
-            
+
             # Hide progress window
             if hasattr(self, 'progress_window') and self.progress_window:
                 self.progress_window.close()
                 self.progress_window = None
-            
+
             # Handle exceptions
             if exception:
                 QtWidgets.QMessageBox.critical(
@@ -103,7 +104,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"Fehler bei der Verarbeitung:\n{str(exception)}"
                 )
                 return
-            
+
             # Check if we got data
             if df_all is None or df_all.empty:
                 QtWidgets.QMessageBox.warning(
@@ -112,27 +113,28 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Keine Detektionen gefunden."
                 )
                 return
-            
-            # Get layout name from PDF path
-            layout_name = self.setup_window.pdf_path
-            
+
+            # Get layout name from PDF path (just filename, not full path)
+            layout_name = os.path.basename(self.setup_window.pdf_path)
+
             # Check if the auditing window is None or has been closed by the user
             if self.auditing_window is None or _is_deleted(self.auditing_window):
                 self.auditing_window = AuditingWindow(self)
-            
+
             # Always make sure the window is visible and brought to the front
             self.auditing_window.show()
             self.auditing_window.raise_()
             self.auditing_window.activateWindow()
-            
+
             # Add as new tab (NOT replacing!) - SINGLE CALL WITH TRACK SKELETON
             self.auditing_window.add_workspace(
-                layout_name, 
-                df_all, 
-                page_base_pix, 
-                page_dfs, 
+                layout_name,
+                df_all,
+                page_base_pix,
+                page_dfs,
                 page_bgr_arrays,
-                track_skeleton
+                track_skeleton,
+                from_database
             )
             
             # Keep setup window open for processing more PDFs

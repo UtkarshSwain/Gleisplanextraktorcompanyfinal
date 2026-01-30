@@ -2482,17 +2482,17 @@ def _ocr_custom_symbol_single_position(
             # Search region to the LEFT of symbol (generous area)
             crop_x2 = x1 + 20  # Extend slightly INTO symbol to catch adjacent text
             crop_x1 = max(0, x1 - search_distance)  # Start further left
-            # Height: TIGHT vertical range to avoid catching text above/below
-            crop_y1 = max(0, int(sym_cy - max(sym_h * 0.7, 30)))
-            crop_y2 = min(img_h, int(sym_cy + max(sym_h * 0.7, 30)))
+            # Height: Match symbol's exact vertical extent (no extension above/below)
+            crop_y1 = max(0, y1)
+            crop_y2 = min(img_h, y2)
 
         elif effective_position == "right":
             # Search region to the RIGHT of symbol
             crop_x1 = x2 - 20  # Extend slightly INTO symbol
             crop_x2 = min(img_w, x2 + search_distance)
-            # Height: TIGHT vertical range to avoid catching text above/below
-            crop_y1 = max(0, int(sym_cy - max(sym_h * 0.7, 30)))
-            crop_y2 = min(img_h, int(sym_cy + max(sym_h * 0.7, 30)))
+            # Height: Match symbol's exact vertical extent (no extension above/below)
+            crop_y1 = max(0, y1)
+            crop_y2 = min(img_h, y2)
 
         elif effective_position == "above":
             # Search region ABOVE symbol
@@ -2525,11 +2525,11 @@ def _ocr_custom_symbol_single_position(
                 print(f"   INSIDE mode: tight crop ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
 
         else:
-            # Default to left with tight vertical area
+            # Default to left with symbol's exact vertical extent
             crop_x2 = x1 + 20
             crop_x1 = max(0, x1 - search_distance)
-            crop_y1 = max(0, int(sym_cy - max(sym_h * 0.7, 30)))
-            crop_y2 = min(img_h, int(sym_cy + max(sym_h * 0.7, 30)))
+            crop_y1 = max(0, y1)
+            crop_y2 = min(img_h, y2)
 
     if DEBUG_ANGLE_ROUTING:
         print(f"   Search region: ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")

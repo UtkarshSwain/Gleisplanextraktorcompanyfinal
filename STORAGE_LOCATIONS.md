@@ -279,8 +279,8 @@ Loaded 5 custom symbol definitions from local files  ← Using Local
 ### **Check Database Status:**
 
 ```python
-from database3 import is_db_available
-print(f"PostgreSQL available: {is_db_available()}")
+from database_sqlite import is_db_available
+print(f"SQLite available: {is_db_available()}")
 ```
 
 ### **Manual Check:**

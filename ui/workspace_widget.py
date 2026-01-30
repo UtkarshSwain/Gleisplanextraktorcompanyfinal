@@ -108,16 +108,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self.is_manual_linking_mode = False
         self.link_source_row_id = None
         self.link_drag_line = None
-        
-        # Undo/Redo stacks
-        self.undo_stack: List[Dict] = []
-        self.redo_stack: List[Dict] = []
-        self.max_undo_steps = 50
-        self.graphics_window: Optional[GraphicsWindow] = None
-        self.is_manual_linking_mode = False
-        self.link_source_row_id = None
-        self.link_drag_line = None
-        
+
         # Undo/Redo stacks
         self.undo_stack: List[Dict] = []
         self.redo_stack: List[Dict] = []
@@ -126,7 +117,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self._is_loading_data = False
 
         # OCR adjustment tracking for auto-learning
-        self.ocr_adjustment_tracker = OCRAdjustmentTracker() 
+        self.ocr_adjustment_tracker = OCRAdjustmentTracker()
 
         self.graphics_window: Optional[GraphicsWindow] = None
         
@@ -143,6 +134,14 @@ class WorkspaceWidget(QtWidgets.QWidget):
         # ✅ NEW: Error rows storage
         self.error_rows = set()
         self.show_missing_detections = False  # Toggle state
+
+        # ✅ NEW: Delayed OCR adjustment dialog timer
+        # Waits 1.5s after last resize before showing dialog
+        self._ocr_resize_timer = QtCore.QTimer()
+        self._ocr_resize_timer.setSingleShot(True)
+        self._ocr_resize_timer.timeout.connect(self._on_ocr_resize_timer_fired)
+        self._pending_ocr_resize = None  # Stores (row_id, x, y, w, h) for pending resize
+
         self._build_ui()
 
 
@@ -155,6 +154,42 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 print(f"[STATUS] {message}")
         except Exception as e:
             print(f"[STATUS ERROR] {message} ({e})")
+
+    def _on_ocr_resize_timer_fired(self):
+        """
+        Called when the OCR resize timer fires after user stops resizing.
+        Processes the pending OCR region resize.
+        """
+        if self._pending_ocr_resize is not None:
+            row_id, x, y, w, h = self._pending_ocr_resize
+            self._pending_ocr_resize = None
+            self.on_ocr_bbox_resized(row_id, x, y, w, h)
+
+    def cancel_pending_ocr_resize(self):
+        """
+        Cancel any pending OCR resize timer.
+        Called when user starts a new resize operation.
+        """
+        if self._ocr_resize_timer.isActive():
+            self._ocr_resize_timer.stop()
+            self._pending_ocr_resize = None
+
+    def queue_ocr_bbox_resize(self, row_id: int, x: float, y: float, w: float, h: float):
+        """
+        Queue an OCR bbox resize with a delay to allow multiple edge adjustments.
+
+        Restarts the 1.5s timer each time, so the OCR only runs after the user
+        stops resizing for 1.5 seconds.
+
+        Args:
+            row_id: Row ID of the detection
+            x, y, w, h: New OCR region bounding box coordinates
+        """
+        if self._ocr_resize_timer.isActive():
+            self._ocr_resize_timer.stop()
+
+        self._pending_ocr_resize = (row_id, x, y, w, h)
+        self._ocr_resize_timer.start(1500)
 
     def _perform_auto_quality_check(self):
         """Perform quick quality check on loaded data and show warning if issues found"""
@@ -745,18 +780,24 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.tree.blockSignals(False)
             self.item_details_notes.clear()
 
-    def load_data(self, df_all: pd.DataFrame, page_base_pix: Dict, 
-                page_dfs: Dict, page_bgr_arrays: Dict, 
-                track_skeleton: Optional[np.ndarray] = None):
-        """Load data into workspace - with database check"""
-        
+    def load_data(self, df_all: pd.DataFrame, page_base_pix: Dict,
+                page_dfs: Dict, page_bgr_arrays: Dict,
+                track_skeleton: Optional[np.ndarray] = None,
+                from_database: bool = False):
+        """Load data into workspace - with database check
+
+        Args:
+            from_database: If True, skip database check (data already loaded from DB)
+        """
+
         # ✅ SET FLAG TO PREVENT STATE SAVING DURING LOAD
         self._is_loading_data = True
-        
+
         try:
             # ✅ VERIFY DATA ISOLATION
             print(f"📂 Loading data for workspace: {self.layout_name}")
             print(f"  Incoming df_all: {len(df_all)} rows")
+            print(f"  from_database: {from_database}")
             
             # Check for duplicate row_ids in incoming data
             if 'row_id' in df_all.columns:
@@ -766,19 +807,24 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     df_all = df_all.drop_duplicates(subset='row_id', keep='first')
                     print(f"  🧹 After deduplication: {len(df_all)} rows")
 
-            # Check if there's saved data in database
-            from database3 import get_workspace_data
-            saved_result = get_workspace_data(self.layout_name)
-            
-            if saved_result:
-                try:
-                    saved_data, saved_track_skeleton, saved_dimensions = saved_result
-                except ValueError as e:
-                    print(f"⚠️ Error unpacking saved result: {e}")
-                    print(f"   Result type: {type(saved_result)}")
-                    print(f"   Result length: {len(saved_result) if isinstance(saved_result, (list, tuple)) else 'N/A'}")
-                    saved_result = None
-            
+            # Skip database check if data already came from database
+            saved_result = None
+            if not from_database:
+                # Check if there's saved data in database
+                from database_sqlite import get_workspace_data
+                saved_result = get_workspace_data(self.layout_name)
+
+                if saved_result:
+                    try:
+                        saved_data, saved_track_skeleton, saved_dimensions = saved_result
+                    except ValueError as e:
+                        print(f"⚠️ Error unpacking saved result: {e}")
+                        print(f"   Result type: {type(saved_result)}")
+                        print(f"   Result length: {len(saved_result) if isinstance(saved_result, (list, tuple)) else 'N/A'}")
+                        saved_result = None
+            else:
+                print("  ℹ️ Skipping database check (data already from database)")
+
             if saved_result:
                 # ✅ Build current dimensions from incoming data (with safety checks)
                 current_dimensions = {}
@@ -1026,7 +1072,15 @@ class WorkspaceWidget(QtWidgets.QWidget):
             if track_skeleton is not None:
                 self.btn_toggle_tracks.setEnabled(True)
                 self._set_status(f"✓ Track detection verfügbar: {self.layout_name}")
-            
+
+            # ✅ FIX: Clear old overlay items before changing page
+            # This ensures old non-resizable items are replaced with new resizable ones
+            for items in self.current_row_items.values():
+                for item in items:
+                    if item and item.scene():
+                        self.scene.removeItem(item)
+            self.current_row_items.clear()
+
             self.on_page_changed(1)
             
             # ✅ UPDATE UNDO/REDO BUTTON STATES
@@ -1138,7 +1192,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     'height': int(pix.height())       # ✅ Ensure value is Python int
                 }
             
-            from database3 import save_workspace_data
+            from database_sqlite import save_workspace_data
             save_workspace_data(
                 self.layout_name, 
                 data_list, 
@@ -1190,7 +1244,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
         """Handle page change - optimized to preserve overlays"""
         if pidx not in self.page_base_pix:
             return
-        
+
+        # Cancel any pending OCR resize from previous page
+        self.cancel_pending_ocr_resize()
+
         # Check if we're actually changing pages
         is_same_page = (pidx == self.current_page)
         
@@ -2266,7 +2323,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                             else:
                                 # Use horizontal OCR (most common for template symbols)
                                 from core.ocr_engine import paddleocr_recognize
-                                new_text = paddleocr_recognize(text_crop)
+                                new_text, _ = paddleocr_recognize(text_crop)
 
                             print(f"   🎨 Template text OCR: '{new_text}'")
                         else:
@@ -3134,9 +3191,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
             anchor_row_id = self.link_source_row_id
             
             self._link_anchor_to_coordinate(anchor_row_id, coord_row_id)
-            
+
             self.link_source_row_id = None
-            self._refresh_page_graphics()
+            # Note: _link_anchor_to_coordinate() already updates the anchor overlay
+            # via _update_single_row_overlay(), so no need for full page refresh
             self.btn_manual_link.setChecked(False)
     
     def _link_anchor_to_coordinate(self, anchor_row_id: int, coord_row_id: int):
@@ -3218,33 +3276,114 @@ class WorkspaceWidget(QtWidgets.QWidget):
         anchor_tree_item = self.row_id_to_tree_item.get(anchor_row_id)
         if anchor_tree_item:
             anchor_tree_item.setText(1, coord_text)
-        
-        specs = self.all_page_row_specs.get(self.current_page, {})
-        if anchor_row_id in specs:
-            label = specs[anchor_row_id]['label']
-            if '|' in label:
-                parts = label.split('|')
-                parts[1] = f" {coord_text}"
-                label = '|'.join(parts)
-            else:
-                label += f" | {coord_text}"
-            specs[anchor_row_id]['label'] = label
-        
-        self.on_page_changed(self.current_page)
+
+        # ✅ OPTIMIZED: Only update the single affected row (not full page rebuild)
+        self._update_single_row_overlay(anchor_row_id)
     
     def _refresh_page_graphics(self):
         """Refresh graphics overlays"""
         if self.current_page not in self.page_base_pix:
             return
-        
+
         for items in self.current_row_items.values():
             for item in items:
                 if item.scene():
                     self.scene.removeItem(item)
-        
+
         self.current_row_items.clear()
         self._create_items_for_page(self.current_page)
-    
+
+    def _update_single_row_overlay(self, row_id: int):
+        """
+        Update overlay for a single row only (optimized - no full page rebuild).
+
+        Args:
+            row_id: The row ID to update
+        """
+        print(f"  🔄 Incremental update for row {row_id}")
+
+        # 1. Remove existing overlay items for this row
+        if row_id in self.current_row_items:
+            items = self.current_row_items.pop(row_id)
+            for item in items:
+                if item and item.scene():
+                    self.scene.removeItem(item)
+            print(f"     Removed {len(items)} old overlay items")
+
+        # 2. Rebuild spec for this single row
+        df_page = self.page_dfs.get(self.current_page)
+        if df_page is None:
+            return
+
+        row_data = df_page[df_page['row_id'] == row_id]
+        if row_data.empty:
+            print(f"     ⚠️ Row {row_id} not found in page_dfs")
+            return
+
+        row = row_data.iloc[0]
+
+        # Build label (same logic as _rebuild_row_specs_for_page)
+        label = f"{row['cls']} {row.get('conf', 0.0):.2f}"
+        if pd.notna(row.get('anchor_text')) and row['anchor_text']:
+            label += f" | {row['anchor_text']}"
+        if pd.notna(row.get('coord_text')) and row['coord_text']:
+            label += f" | {row['coord_text']}"
+        if 'angle' in df_page.columns and pd.notna(row.get('angle')):
+            try:
+                label += f" θ={float(row['angle']):.1f}°"
+            except Exception:
+                pass
+
+        spec = {"label": label, "is_poly": False}
+        poly = row.get("poly", None)
+
+        # Priority 1: Use pre-computed poly if available
+        if poly is not None and isinstance(poly, (list, tuple, np.ndarray)):
+            try:
+                pts = np.array(poly, dtype=np.float32).reshape(4, 2)
+                spec.update({"is_poly": True, "pts": pts})
+            except Exception:
+                pass
+
+        if not spec.get("is_poly", False):
+            # Get bbox coordinates
+            if row['cls'] == 'coordinate':
+                x1, y1, x2, y2 = row['cx1'], row['cy1'], row['cx2'], row['cy2']
+            else:
+                x1, y1, x2, y2 = row['ax1'], row['ay1'], row['ax2'], row['ay2']
+
+            if pd.isna(x1) or x1 is None:
+                return
+
+            # Priority 2: Check if rotated (has significant angle)
+            angle = row.get('angle', 0.0)
+            angle_raw = row.get('angle_raw', angle)
+            use_angle = angle if pd.notna(angle) and angle != 0.0 else angle_raw
+
+            if pd.notna(use_angle) and abs(float(use_angle)) > 5.0:
+                try:
+                    pts = bbox_to_rotated_poly(x1, y1, x2, y2, float(use_angle))
+                    spec.update({"is_poly": True, "pts": pts})
+                except Exception:
+                    pass
+
+            if not spec.get("is_poly", False):
+                # Priority 3: Fall back to axis-aligned rectangle
+                w = int(x2 - x1)
+                h = int(y2 - y1)
+                spec.update({"rect": (int(x1), int(y1), w, h)})
+
+        # 3. Update the spec in all_page_row_specs
+        if self.current_page not in self.all_page_row_specs:
+            self.all_page_row_specs[self.current_page] = {}
+        self.all_page_row_specs[self.current_page][row_id] = spec
+
+        # 4. Add the new overlay using existing method
+        specs = {row_id: spec}
+        self._add_overlays_for_rows(self.current_page, {row_id}, specs)
+
+        print(f"     ✅ Overlay updated with label: {label[:50]}...")
+
     def on_export_excel(self):
         """Export to Excel with advanced user configuration"""
         if self.df_all is None or self.df_all.empty:
@@ -3568,10 +3707,21 @@ class WorkspaceWidget(QtWidgets.QWidget):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Fehler", str(e))
 
+    def _save_edit_state(self, row_ids: List[int], action: str):
+        """
+        Alias for _save_state with different parameter order.
+        Called from context menus and external components.
+
+        Args:
+            row_ids: List of row IDs that were modified
+            action: Description of the action
+        """
+        self._save_state(action, row_ids)
+
     def _save_state(self, action_name: str, affected_row_ids: List[int]):
         """
         Save current state to undo stack
-        
+
         Args:
             action_name: Description of the action
             affected_row_ids: List of row IDs that were modified
@@ -3644,6 +3794,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             return
 
         self._is_undoing_or_redoing = True
+        self.cancel_pending_ocr_resize()
 
         try:
             state = self.undo_stack.pop()
@@ -3918,7 +4069,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
         
         # ✅ SET FLAG TO PREVENT STATE SAVING
         self._is_undoing_or_redoing = True
-        
+        self.cancel_pending_ocr_resize()
+
         try:
             # Pop from redo stack
             state = self.redo_stack.pop()
@@ -4156,10 +4308,16 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         print(f"     ✅ Full rebuild complete")
 
             self._set_status(f"↷ Wiederhergestellt: {state['action']}")
-            
+
             # Update button states
             self._update_undo_redo_buttons()
-            
+
+        except Exception as e:
+            print(f"❌ ERROR during redo: {e}")
+            import traceback
+            traceback.print_exc()
+            QtWidgets.QMessageBox.critical(self, "Redo Error", f"Error during redo: {str(e)}")
+
         finally:
             # ✅ ALWAYS CLEAR FLAG
             self._is_undoing_or_redoing = False
@@ -5282,10 +5440,21 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
             if spec.get("is_poly", False):
                 pts = spec["pts"]
-                poly_item = QtWidgets.QGraphicsPolygonItem(qpolygonf_from_pts(pts))
+                # Get angle from row data if available
+                angle = 0.0
+                if dfp is not None:
+                    m = dfp[dfp['row_id'] == row_id]
+                    if not m.empty:
+                        angle = m.iloc[0].get('angle', 0.0)
+
+                poly_item = ResizablePolygonBBoxItem(
+                    qpolygonf_from_pts(pts),
+                    int(row_id),
+                    self,
+                    angle
+                )
                 poly_item.setPen(pen)
                 poly_item.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
-                poly_item.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
                 poly_item.setData(0, int(row_id))
 
                 x_pos, y_pos = float(pts[:, 0].min()), float(pts[:, 1].min())
@@ -5301,10 +5470,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 items_list.extend([poly_item, ti])
             else:
                 x1, y1, w, h = spec["rect"]
-                rect = QtWidgets.QGraphicsRectItem(x1, y1, w, h)
+                rect = ResizableBBoxItem(x1, y1, w, h, int(row_id), self)
                 rect.setPen(pen)
                 rect.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
-                rect.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
                 rect.setData(0, int(row_id))
 
                 ti = QtWidgets.QGraphicsSimpleTextItem(label)
@@ -5435,11 +5603,15 @@ class WorkspaceWidget(QtWidgets.QWidget):
             print(f"      🔄 Creating ROTATED signal bbox with angle={use_angle:.1f}°")
             try:
                 pts = bbox_to_rotated_poly(ax1, ay1, ax2, ay2, float(use_angle))
-                poly_item = QtWidgets.QGraphicsPolygonItem(qpolygonf_from_pts(pts))
+                poly_item = ResizablePolygonBBoxItem(
+                    qpolygonf_from_pts(pts),
+                    int(row_id),
+                    self,
+                    float(use_angle)
+                )
                 signal_pen = QtGui.QPen(pen_color, pen_width)
                 poly_item.setPen(signal_pen)
                 poly_item.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
-                poly_item.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
                 poly_item.setData(0, int(row_id))
 
                 self.scene.addItem(poly_item)
@@ -5448,11 +5620,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 print(f"      ⚠️ Failed to create rotated signal bbox: {e}")
                 # Fall back to axis-aligned rectangle
                 w, h = ax2 - ax1, ay2 - ay1
-                rect = QtWidgets.QGraphicsRectItem(ax1, ay1, w, h)
+                rect = ResizableBBoxItem(ax1, ay1, w, h, int(row_id), self)
                 signal_pen = QtGui.QPen(pen_color, pen_width)
                 rect.setPen(signal_pen)
                 rect.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
-                rect.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
                 rect.setData(0, int(row_id))
 
                 self.scene.addItem(rect)
@@ -5461,10 +5632,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
             # Create axis-aligned rectangle for signal bbox
             signal_pen = QtGui.QPen(pen_color, pen_width)
             w, h = ax2 - ax1, ay2 - ay1
-            rect = QtWidgets.QGraphicsRectItem(ax1, ay1, w, h)
+            rect = ResizableBBoxItem(ax1, ay1, w, h, int(row_id), self)
             rect.setPen(signal_pen)
             rect.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
-            rect.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
             rect.setData(0, int(row_id))
 
             self.scene.addItem(rect)
@@ -5581,6 +5751,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
         import cv2
         from PIL import Image
         from core.ocr_engine import _upscale_if_tiny
+
+        # Track successfully updated rows for incremental overlay update
+        updated_row_ids = []
 
         for rid in row_ids:
             try:
@@ -5730,11 +5903,16 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                     print(f"      ✅ Updated row {rid}: '{new_text}' (conf={ocr_conf:.2f})")
 
+                    # Track this row for incremental overlay update
+                    updated_row_ids.append(rid)
+
             except Exception as e:
                 print(f"      ⚠️ Error updating row {rid}: {e}")
 
-        # Re-render current page to show updated OCR regions
-        self._refresh_page_graphics()
+        # ✅ OPTIMIZED: Only update overlays for affected rows (not full page rebuild)
+        print(f"   🔄 Updating overlays for {len(updated_row_ids)} rows...")
+        for rid in updated_row_ids:
+            self._update_single_row_overlay(rid)
 
     def _save_ocr_adjustment_to_template(self, symbol_class: str, dx: int, dy: int,
                                          width: int, height: int):

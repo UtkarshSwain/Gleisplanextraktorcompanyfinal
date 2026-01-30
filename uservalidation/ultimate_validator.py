@@ -1938,7 +1938,7 @@ def save_validation_to_db(layout_name: str, validation_result):
     Saves to validation_log table.
     """
     try:
-        from database3 import save_validation_results
+        from database_sqlite import save_validation_results
 
         # Convert ValidationResult to list of dicts
         validation_data = []
@@ -1972,7 +1972,7 @@ def save_quality_metrics_to_db(layout_name: str, metrics: Dict):
     Saves to quality_metrics table.
     """
     try:
-        from database3 import save_quality_metrics
+        from database_sqlite import save_quality_metrics
 
         save_quality_metrics(layout_name, metrics)
         print(f"✅ Saved {len(metrics)} quality metrics to database")

@@ -682,9 +682,21 @@ def detect_fahrtrichtung(signal_det, gks_dets,
     Returns:
         "A", "B", or None
     """
-    # Skip signals starting with "V"
-    signal_text = signal_det.get("text", "")
+    # Skip signals that don't need Fahrtrichtung detection:
+    # 1. V-signals (Vorsignale) - e.g., V1, V2, VA1
+    # 2. Single letter + 3+ digits - e.g., A123, U456, B789
+    #    (detection parameters don't work for these, coordinate linking is sufficient)
+    signal_text = signal_det.get("text", "").upper().strip()
+
+    # Check V-signal
     if signal_text.startswith("V"):
+        return None
+
+    # Check single letter + 3+ digits pattern (e.g., A123, U456)
+    if (len(signal_text) >= 4 and
+        signal_text[0].isalpha() and
+        signal_text[1:].isdigit() and
+        len(signal_text[1:]) >= 3):
         return None
     
     # Use OBB center
@@ -989,6 +1001,256 @@ def detect_fahrtrichtung(signal_det, gks_dets,
         else:
             print(f"   → Fahrtrichtung: Undetermined (no track found)")
             return None
+
+
+# ============================================================================
+# TIER 3: GKS COLUMN RELAXED FALLBACK
+# ============================================================================
+
+def detect_fahrtrichtung_gks_relaxed(signal_det, gks_dets, used_gks_ids=None,
+                                      dx_tolerance=200,
+                                      dy_min=30,
+                                      dy_max=600,
+                                      angle_tolerance=25):
+    """
+    TIER 3 FALLBACK: Relaxed GKS column search.
+
+    Used when:
+    - Tier 1 (strict GKS) failed
+    - Tier 2 (track skeleton) failed
+
+    Strategy:
+    - Search for GKS in same X-column (relaxed dx tolerance)
+    - Allow larger vertical distance (up to 600px)
+    - Only consider "orphan" GKS (not already matched)
+    - Pick closest GKS in the column
+
+    Parameters (all in PIXELS at DPI=500):
+        dx_tolerance: 200px (~10mm) - Horizontal column width
+        dy_min: 30px (~1.5mm) - Minimum vertical separation
+        dy_max: 600px (~30mm) - Maximum vertical separation
+        angle_tolerance: 25° - Max angle difference for angular signals
+
+    Returns:
+        ("A" or "B", gks_det) or (None, None)
+    """
+    if not gks_dets:
+        return None, None
+
+    used_gks_ids = used_gks_ids or set()
+
+    # Get signal center
+    signal_cx = signal_det.get("cx")
+    signal_cy = signal_det.get("cy")
+
+    if signal_cx is None or signal_cy is None:
+        signal_cx = (signal_det["x1"] + signal_det["x2"]) / 2
+        signal_cy = (signal_det["y1"] + signal_det["y2"]) / 2
+
+    signal_text = signal_det.get("text", "?")
+    signal_angle = float(signal_det.get("angle", 0.0))
+
+    print(f"\n   🔍 TIER 3 (GKS Relaxed): Signal '{signal_text}' at ({signal_cx:.0f}, {signal_cy:.0f})")
+    print(f"      Parameters: dx≤{dx_tolerance}px, dy=[{dy_min}, {dy_max}]px")
+
+    # Find candidates in column
+    candidates = []
+
+    for gks in gks_dets:
+        # Skip already-used GKS
+        if id(gks) in used_gks_ids:
+            continue
+
+        gks_cx = gks.get("cx")
+        gks_cy = gks.get("cy")
+
+        if gks_cx is None or gks_cy is None:
+            gks_cx = (gks["x1"] + gks["x2"]) / 2
+            gks_cy = (gks["y1"] + gks["y2"]) / 2
+
+        dx = abs(gks_cx - signal_cx)
+        dy = gks_cy - signal_cy  # Signed: positive = GKS below signal
+        dy_abs = abs(dy)
+
+        # Check column constraint (relaxed)
+        if dx > dx_tolerance:
+            continue
+
+        # Check vertical distance
+        if dy_abs < dy_min or dy_abs > dy_max:
+            continue
+
+        # Check angle alignment for angular signals
+        gks_angle = float(gks.get("angle", 0.0))
+        angle_diff = abs(signal_angle - gks_angle)
+        if angle_diff > 180:
+            angle_diff = 360 - angle_diff
+
+        if angle_diff > angle_tolerance:
+            continue
+
+        # Must be clearly above or below (not purely horizontal)
+        if dy_abs < dx:
+            continue
+
+        gks_text = gks.get("text", gks.get("anchor_text", "?"))
+        print(f"      → Candidate: GKS '{gks_text}' at ({gks_cx:.0f}, {gks_cy:.0f}), dx={dx:.0f}, dy={dy:.0f}")
+
+        candidates.append({
+            'gks': gks,
+            'dx': dx,
+            'dy': dy,
+            'dy_abs': dy_abs
+        })
+
+    if not candidates:
+        print(f"      ❌ No GKS candidates found in column")
+        return None, None
+
+    # Pick closest (smallest dy_abs)
+    best = min(candidates, key=lambda c: c['dy_abs'])
+    gks = best['gks']
+    dy = best['dy']
+
+    gks_text = gks.get("text", gks.get("anchor_text", "?"))
+
+    # Determine Fahrtrichtung: GKS above signal → A, GKS below → B
+    if dy < 0:
+        # GKS is ABOVE signal
+        fahrtrichtung = "A"
+        print(f"      ✅ MATCH: GKS '{gks_text}' is ABOVE → Fahrtrichtung A")
+    else:
+        # GKS is BELOW signal
+        fahrtrichtung = "B"
+        print(f"      ✅ MATCH: GKS '{gks_text}' is BELOW → Fahrtrichtung B")
+
+    return fahrtrichtung, gks
+
+
+# ============================================================================
+# TIER 4: EUCLIDEAN NEAREST GKS FALLBACK
+# ============================================================================
+
+def detect_fahrtrichtung_gks_nearest(signal_det, gks_dets, used_gks_ids=None,
+                                      max_distance=800,
+                                      dy_min=30,
+                                      angle_tolerance=30):
+    """
+    TIER 4 FALLBACK: Euclidean nearest GKS search.
+
+    Used when:
+    - Tier 1 (strict GKS) failed
+    - Tier 2 (track skeleton) failed
+    - Tier 3 (GKS column relaxed) failed
+
+    Strategy:
+    - Search for ANY nearby GKS (Euclidean distance)
+    - No column constraint
+    - Only consider "orphan" GKS (not already matched)
+    - Pick closest GKS by Euclidean distance
+    - Must still be clearly above/below (not purely horizontal)
+
+    Parameters (all in PIXELS at DPI=500):
+        max_distance: 800px (~40mm) - Maximum Euclidean distance
+        dy_min: 30px (~1.5mm) - Minimum vertical separation
+        angle_tolerance: 30° - Max angle difference for angular signals
+
+    Returns:
+        ("A" or "B", gks_det) or (None, None)
+    """
+    if not gks_dets:
+        return None, None
+
+    used_gks_ids = used_gks_ids or set()
+
+    # Get signal center
+    signal_cx = signal_det.get("cx")
+    signal_cy = signal_det.get("cy")
+
+    if signal_cx is None or signal_cy is None:
+        signal_cx = (signal_det["x1"] + signal_det["x2"]) / 2
+        signal_cy = (signal_det["y1"] + signal_det["y2"]) / 2
+
+    signal_text = signal_det.get("text", "?")
+    signal_angle = float(signal_det.get("angle", 0.0))
+
+    print(f"\n   🔍 TIER 4 (GKS Nearest): Signal '{signal_text}' at ({signal_cx:.0f}, {signal_cy:.0f})")
+    print(f"      Parameters: max_dist≤{max_distance}px, dy_min={dy_min}px")
+
+    # Find candidates
+    candidates = []
+
+    for gks in gks_dets:
+        # Skip already-used GKS
+        if id(gks) in used_gks_ids:
+            continue
+
+        gks_cx = gks.get("cx")
+        gks_cy = gks.get("cy")
+
+        if gks_cx is None or gks_cy is None:
+            gks_cx = (gks["x1"] + gks["x2"]) / 2
+            gks_cy = (gks["y1"] + gks["y2"]) / 2
+
+        dx = gks_cx - signal_cx
+        dy = gks_cy - signal_cy  # Signed: positive = GKS below signal
+
+        # Calculate Euclidean distance
+        euclidean_dist = math.sqrt(dx**2 + dy**2)
+
+        # Check max distance
+        if euclidean_dist > max_distance:
+            continue
+
+        # Check minimum vertical separation
+        if abs(dy) < dy_min:
+            continue
+
+        # Must be more vertical than horizontal (direction check)
+        if abs(dy) < abs(dx) * 0.5:  # Allow some horizontal offset
+            continue
+
+        # Check angle alignment for angular signals
+        gks_angle = float(gks.get("angle", 0.0))
+        angle_diff = abs(signal_angle - gks_angle)
+        if angle_diff > 180:
+            angle_diff = 360 - angle_diff
+
+        if angle_diff > angle_tolerance:
+            continue
+
+        gks_text = gks.get("text", gks.get("anchor_text", "?"))
+        print(f"      → Candidate: GKS '{gks_text}' at ({gks_cx:.0f}, {gks_cy:.0f}), dist={euclidean_dist:.0f}, dy={dy:.0f}")
+
+        candidates.append({
+            'gks': gks,
+            'dist': euclidean_dist,
+            'dy': dy
+        })
+
+    if not candidates:
+        print(f"      ❌ No GKS candidates found nearby")
+        return None, None
+
+    # Pick closest (smallest Euclidean distance)
+    best = min(candidates, key=lambda c: c['dist'])
+    gks = best['gks']
+    dy = best['dy']
+
+    gks_text = gks.get("text", gks.get("anchor_text", "?"))
+
+    # Determine Fahrtrichtung: GKS above signal → A, GKS below → B
+    if dy < 0:
+        # GKS is ABOVE signal
+        fahrtrichtung = "A"
+        print(f"      ✅ MATCH: GKS '{gks_text}' is ABOVE → Fahrtrichtung A")
+    else:
+        # GKS is BELOW signal
+        fahrtrichtung = "B"
+        print(f"      ✅ MATCH: GKS '{gks_text}' is BELOW → Fahrtrichtung B")
+
+    return fahrtrichtung, gks
+
 
 # ============================================================================
 # MERGE DUPLICATE SIGNALS (SIMPLIFIED - NO TRACK FALLBACK)
