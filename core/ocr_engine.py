@@ -1001,15 +1001,25 @@ def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> 
     h = float(det.get("obb_h", det["y2"] - det["y1"]))
     box_min_side = min(w, h)
     
-    coord_pad = max(8, min(15, int(box_min_side * 0.13)))
-    
+    # ASYMMETRIC PADDING: No left padding, minimal right padding (capture close brackets, reject distant noise)
+    pad_left = 0
+    pad_right = max(3, min(5, int(box_min_side * 0.05)))  # Reduced: 3-5px instead of 8-15px
+    pad_vertical = max(4, min(10, int(box_min_side * 0.08)))  # Small vertical padding
+
     if DEBUG_ANGLE_ROUTING:
-        print(f"\n📍 COORD CARDINAL: {w:.0f}×{h:.0f}px → pad={coord_pad}")
-    
+        print(f"\n📍 COORD CARDINAL: {w:.0f}×{h:.0f}px → pad_left={pad_left}, pad_right={pad_right}")
+
+    # Manual asymmetric crop (can't use crop_pil which does symmetric padding)
+    H, W = bgr_color.shape[:2]
+    x1 = max(0, int(det["x1"]) - pad_left)
+    y1 = max(0, int(det["y1"]) - pad_vertical)
+    x2 = min(W, int(det["x2"]) + pad_right)
+    y2 = min(H, int(det["y2"]) + pad_vertical)
+
     try:
-        pil_crop = rotated_crop_from_det(det, bgr_color, pad=coord_pad)
+        pil_crop = Image.fromarray(cv2.cvtColor(bgr_color[y1:y2, x1:x2], cv2.COLOR_BGR2RGB))
     except Exception:
-        pil_crop = crop_pil(bgr_color, det["x1"], det["y1"], det["x2"], det["y2"], pad=coord_pad)
+        pil_crop = crop_pil(bgr_color, det["x1"], det["y1"], det["x2"], det["y2"], pad=pad_right)
     
     if pil_crop.width < 5 or pil_crop.height < 5:
         return ""

@@ -110,6 +110,69 @@ class InteractiveGraphicsView(QtWidgets.QGraphicsView):
                     self.scene().removeItem(item)
             self.temp_line_items.clear()
 
+    def _distance_to_edge(self, point: QtCore.QPointF, rect: QtCore.QRectF) -> float:
+        """Calculate minimum distance from point to any edge of the rectangle."""
+        x, y = point.x(), point.y()
+        x1, y1, x2, y2 = rect.left(), rect.top(), rect.right(), rect.bottom()
+
+        # Distance to each edge
+        dist_left = abs(x - x1)
+        dist_right = abs(x - x2)
+        dist_top = abs(y - y1)
+        dist_bottom = abs(y - y2)
+
+        return min(dist_left, dist_right, dist_top, dist_bottom)
+
+    def _select_bbox_by_closest_edge(self, scene_pos: QtCore.QPointF) -> bool:
+        """
+        When multiple bboxes overlap at click point, select the one whose edge is closest.
+        Returns True if custom selection was applied, False otherwise.
+        """
+        from ui.resizable_bbox import ResizableBBoxItem, ResizableOCRBBoxItem, ResizablePolygonBBoxItem, ResizeHandle
+
+        # Get all items at click position
+        items_at_pos = self.scene().items(scene_pos)
+
+        # If a resize handle is being clicked, let Qt handle it normally
+        for item in items_at_pos:
+            if isinstance(item, ResizeHandle):
+                return False
+
+        # Filter for bbox items only
+        bbox_items = []
+        for item in items_at_pos:
+            if isinstance(item, (ResizableBBoxItem, ResizableOCRBBoxItem, ResizablePolygonBBoxItem)):
+                bbox_items.append(item)
+
+        # If 0 or 1 bbox, let Qt handle it normally
+        if len(bbox_items) <= 1:
+            return False
+
+        # Multiple overlapping bboxes - select by closest edge
+        closest_item = None
+        min_distance = float('inf')
+
+        for item in bbox_items:
+            if isinstance(item, ResizablePolygonBBoxItem):
+                # For polygons, use bounding rect
+                rect = item.boundingRect()
+                rect = item.mapRectToScene(rect)
+            else:
+                rect = item.sceneBoundingRect()
+
+            dist = self._distance_to_edge(scene_pos, rect)
+            if dist < min_distance:
+                min_distance = dist
+                closest_item = item
+
+        if closest_item:
+            # Clear current selection and select the closest-edge item
+            self.scene().clearSelection()
+            closest_item.setSelected(True)
+            return True
+
+        return False
+
     def mousePressEvent(self, event: QtGui.QMouseEvent):
         # ✅ CHECK: Manual linking mode
         if hasattr(self.parent_widget, 'is_manual_linking_mode') and self.parent_widget.is_manual_linking_mode:
@@ -117,7 +180,14 @@ class InteractiveGraphicsView(QtWidgets.QGraphicsView):
                 self.parent_widget.on_linking_click(self.mapToScene(event.pos()))
                 event.accept()
                 return
-        
+
+        # ✅ CHECK: Overlapping bbox selection (select by closest edge)
+        if event.button() == QtCore.Qt.LeftButton and not self.is_drawing_mode:
+            scene_pos = self.mapToScene(event.pos())
+            if self._select_bbox_by_closest_edge(scene_pos):
+                event.accept()
+                return
+
         # ✅ CHECK: Drawing mode (existing)
         if not self.is_drawing_mode:
             super().mousePressEvent(event)
