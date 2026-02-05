@@ -67,17 +67,17 @@ def filter_title_block_tracks(track_skeleton: np.ndarray,
     # Clear bottom-right corner
     filtered_skeleton[height - exclude_height:, width - exclude_width:] = 0
     
-    print(f"   🚫 Title block filter: Excluded bottom-right corner")
-    print(f"      Image size: {width}x{height}px")
-    print(f"      Exclusion zone: {exclude_width}x{exclude_height}px ({exclusion_margin_width_percent}% width, {exclusion_margin_height_percent}% height)")
-    print(f"      Cleared region: x=[{width - exclude_width}, {width}], y=[{height - exclude_height}, {height}]")
+    print(f" Title block filter: Excluded bottom-right corner")
+    print(f"Image size: {width}x{height}px")
+    print(f"Exclusion zone: {exclude_width}x{exclude_height}px ({exclusion_margin_width_percent}% width, {exclusion_margin_height_percent}% height)")
+    print(f"Cleared region: x=[{width - exclude_width}, {width}], y=[{height - exclude_height}, {height}]")
     
     # Count removed pixels
     removed_pixels = np.sum(track_skeleton[height - exclude_height:, width - exclude_width:] > 0)
     if removed_pixels > 0:
-        print(f"      ✅ Removed {removed_pixels} pixels from title block region")
+        print(f"Removed {removed_pixels} pixels from title block region")
     else:
-        print(f"      ℹ️  No track pixels found in title block region")
+        print(f"No track pixels found in title block region")
     
     return filtered_skeleton
 
@@ -194,7 +194,7 @@ def detect_main_tracks(
             if progress_callback and tile_count % 10 == 0:
                 progress_callback(f"[track] Processing: {tile_count}/{total_tiles} tiles")
     
-    # ✅ FILTER TITLE BLOCK BEFORE COMPONENT ANALYSIS (with asymmetric margins)
+    #  FILTER TITLE BLOCK BEFORE COMPONENT ANALYSIS (with asymmetric margins)
     if filter_title_block:
         if progress_callback:
             progress_callback(f"[track] Filtering title block region...")
@@ -217,7 +217,7 @@ def detect_main_tracks(
     
     if num_labels <= 1:
         if progress_callback:
-            progress_callback("[track] ⚠️ No thick components found")
+            progress_callback("[track]  No thick components found")
         if doc is not None:
             doc.close()
         return np.zeros((h_px, w_px), dtype=np.uint8), w_px, h_px
@@ -251,9 +251,9 @@ def detect_main_tracks(
     
     if progress_callback:
         if num_tracks_found > 0:
-            progress_callback(f"[track] ✓ Found {num_tracks_found} track section(s)")
+            progress_callback(f"[track]  Found {num_tracks_found} track section(s)")
         else:
-            progress_callback(f"[track] ⚠️ No tracks found (try adjusting parameters)")
+            progress_callback(f"[track]  No tracks found (try adjusting parameters)")
     
     del labels
     

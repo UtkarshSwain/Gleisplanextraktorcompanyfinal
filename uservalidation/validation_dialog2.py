@@ -1,6 +1,6 @@
 """
 Enhanced Validation Results Dialog
-✅ NEW: Auto-correction UI with confidence indicators and batch correction
+ NEW: Auto-correction UI with confidence indicators and batch correction
 """
 
 from PyQt5 import QtWidgets, QtCore, QtGui
@@ -11,7 +11,7 @@ import pandas as pd
 
 class EnhancedValidationResultsDialog(QtWidgets.QDialog):
     """
-    ✅ UPGRADED: Dialog with auto-correction support
+     UPGRADED: Dialog with auto-correction support
     
     NEW FEATURES:
     - Tabbed interface (All Issues, Auto-Corrections, Errors, Warnings)
@@ -21,20 +21,25 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
     - Export validation reports
     """
     
-    # ✅ NEW: Signal emitted when user accepts corrections
+    #  NEW: Signal emitted when user accepts corrections
     corrections_accepted = QtCore.pyqtSignal(list)  # List[ValidationIssue]
     jump_to_detection = QtCore.pyqtSignal(int, tuple)
 
-    # ✅ NEW: Signals to activate manual correction tools directly
+    #  NEW: Signals to activate manual correction tools directly
     activate_manual_ocr = QtCore.pyqtSignal(str)  # 'horizontal' or 'angular'
     activate_manual_link = QtCore.pyqtSignal()
     activate_bbox_resize = QtCore.pyqtSignal()
-    delete_row = QtCore.pyqtSignal(int)  # row_id to delete  
- 
-    def __init__(self, result: ValidationResult, parent=None):
+    delete_row = QtCore.pyqtSignal(int)  # row_id to delete
+
+    # Signal for confirmed uncertain detections
+    uncertain_confirmed = QtCore.pyqtSignal(list)  # List of confirmed uncertain detections
+    jump_to_position = QtCore.pyqtSignal(tuple)  # (x, y) position to jump to
+
+    def __init__(self, result: ValidationResult, uncertain_detections: List[dict] = None, parent=None):
         super().__init__(parent)
         self.result = result
         self.selected_corrections = []
+        self.uncertain_detections = uncertain_detections or []
         
         self.setWindowTitle("Datenprüfung - Ergebnisse")
         self.resize(1400, 900)
@@ -56,7 +61,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         # ========================================================================
         # SUMMARY SECTION (Enhanced)
         # ========================================================================
-        summary_group = QtWidgets.QGroupBox("📊 Gefundene Probleme - Übersicht")
+        summary_group = QtWidgets.QGroupBox(" Gefundene Probleme - Übersicht")
         summary_layout = QtWidgets.QGridLayout(summary_group)
 
         stats = self.result.get_summary()
@@ -69,21 +74,21 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         summary_layout.addWidget(total_label, 0, 1)
 
         # Row 1: Errors
-        summary_layout.addWidget(QtWidgets.QLabel("❌ Fehler (schwerwiegend):"), 1, 0)
+        summary_layout.addWidget(QtWidgets.QLabel(" Fehler (schwerwiegend):"), 1, 0)
         error_label = QtWidgets.QLabel(str(stats['errors']))
         error_label.setStyleSheet("color: #ff4444; font-weight: bold; font-size: 12pt;")
         error_label.setToolTip("Schwerwiegende Fehler - sollten korrigiert werden")
         summary_layout.addWidget(error_label, 1, 1)
 
         # Row 2: Warnings
-        summary_layout.addWidget(QtWidgets.QLabel("⚠️ Warnungen (prüfen):"), 2, 0)
+        summary_layout.addWidget(QtWidgets.QLabel(" Warnungen (prüfen):"), 2, 0)
         warning_label = QtWidgets.QLabel(str(stats['warnings']))
         warning_label.setStyleSheet("color: #ffaa00; font-weight: bold; font-size: 12pt;")
         warning_label.setToolTip("Mögliche Probleme - sollten geprüft werden")
         summary_layout.addWidget(warning_label, 2, 1)
 
         # Row 3: Info
-        summary_layout.addWidget(QtWidgets.QLabel("ℹ️ Hinweise:"), 3, 0)
+        summary_layout.addWidget(QtWidgets.QLabel(" Hinweise:"), 3, 0)
         info_label = QtWidgets.QLabel(str(stats['info']))
         info_label.setStyleSheet("color: #4444ff; font-size: 12pt;")
         info_label.setToolTip("Informationen zur Datenqualität")
@@ -92,14 +97,14 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         # Add spacer
         summary_layout.setColumnMinimumWidth(1, 80)
 
-        # ✅ Auto-correctable count
-        summary_layout.addWidget(QtWidgets.QLabel("✨ Automatisch behebbar:"), 0, 2)
+        #  Auto-correctable count
+        summary_layout.addWidget(QtWidgets.QLabel(" Automatisch behebbar:"), 0, 2)
         auto_label = QtWidgets.QLabel(str(stats['auto_correctable']))
         auto_label.setStyleSheet("color: #44ff44; font-weight: bold; font-size: 14pt;")
         auto_label.setToolTip("Probleme, die automatisch korrigiert werden können")
         summary_layout.addWidget(auto_label, 0, 3)
 
-        # ✅ High confidence fixes
+        #  High confidence fixes
         if stats['high_confidence_fixes'] > 0:
             summary_layout.addWidget(QtWidgets.QLabel("  - Hohe Sicherheit (≥80%):"), 1, 2)
             high_conf_label = QtWidgets.QLabel(str(stats['high_confidence_fixes']))
@@ -107,7 +112,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             high_conf_label.setToolTip("Korrekturen mit hoher Zuverlässigkeit")
             summary_layout.addWidget(high_conf_label, 1, 3)
 
-        # ✅ Medium confidence fixes
+        #  Medium confidence fixes
         if stats['medium_confidence_fixes'] > 0:
             summary_layout.addWidget(QtWidgets.QLabel("  - Mittlere Sicherheit (60-80%):"), 2, 2)
             med_conf_label = QtWidgets.QLabel(str(stats['medium_confidence_fixes']))
@@ -115,9 +120,9 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             med_conf_label.setToolTip("Korrekturen sollten geprüft werden")
             summary_layout.addWidget(med_conf_label, 2, 3)
 
-        # ✅ Corrections applied
+        #  Corrections applied
         if stats['corrections_applied'] > 0:
-            summary_layout.addWidget(QtWidgets.QLabel("✓ Bereits korrigiert:"), 3, 2)
+            summary_layout.addWidget(QtWidgets.QLabel(" Bereits korrigiert:"), 3, 2)
             applied_label = QtWidgets.QLabel(str(stats['corrections_applied']))
             applied_label.setStyleSheet("color: #44ff44; font-weight: bold;")
             applied_label.setToolTip("Anzahl bereits angewendeter Korrekturen")
@@ -132,24 +137,31 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         
         # Tab 1: All Issues
         self.all_issues_table = self._create_issues_table()
-        self.tabs.addTab(self.all_issues_table, "📋 Alle Probleme")
+        self.tabs.addTab(self.all_issues_table, " Alle Probleme")
         
-        # ✅ Tab 2: Auto-Correctable Issues (NEW)
+        #  Tab 2: Auto-Correctable Issues (NEW)
         self.correctable_table = self._create_correctable_table()
-        self.tabs.addTab(self.correctable_table, "✨ Auto-Korrekturen")
+        self.tabs.addTab(self.correctable_table, " Auto-Korrekturen")
         
         # Tab 3: Errors Only
         self.errors_table = self._create_issues_table()
-        self.tabs.addTab(self.errors_table, "❌ Fehler")
+        self.tabs.addTab(self.errors_table, " Fehler")
         
         # Tab 4: Warnings Only
         self.warnings_table = self._create_issues_table()
-        self.tabs.addTab(self.warnings_table, "⚠️ Warnungen")
+        self.tabs.addTab(self.warnings_table, " Warnungen")
         
         # Tab 5: Info Only
         self.info_table = self._create_issues_table()
-        self.tabs.addTab(self.info_table, "ℹ️ Hinweise")
-        
+        self.tabs.addTab(self.info_table, " Hinweise")
+
+        # Tab 6: Uncertain Detections (NEW)
+        self.uncertain_widget = QtWidgets.QWidget()
+        self.uncertain_layout = QtWidgets.QVBoxLayout(self.uncertain_widget)
+        self._setup_uncertain_tab()
+        uncertain_count = len(self.uncertain_detections)
+        self.tabs.addTab(self.uncertain_widget, f"🔍 Unsicher ({uncertain_count})")
+
         layout.addWidget(self.tabs)
         
         # ========================================================================
@@ -157,15 +169,15 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         # ========================================================================
         button_layout = QtWidgets.QHBoxLayout()
         # ADD TOGGLE CHECKBOX FOR MISSING DETECTIONS (NEW)
-        self.toggle_missing_checkbox = QtWidgets.QCheckBox("🔍 Fehlende Elemente im Plan anzeigen")
+        self.toggle_missing_checkbox = QtWidgets.QCheckBox(" Fehlende Elemente im Plan anzeigen")
         self.toggle_missing_checkbox.setChecked(True)  # Show by default
         self.toggle_missing_checkbox.setToolTip("Zeigt rot markierte Bereiche im Gleisplan, wo möglicherweise Elemente fehlen")
         self.toggle_missing_checkbox.stateChanged.connect(self._on_toggle_missing_detections)
         button_layout.addWidget(self.toggle_missing_checkbox)
 
         button_layout.addStretch()
-        # ✅ NEW: Apply selected corrections button
-        self.btn_apply_selected = QtWidgets.QPushButton("✓ Ausgewählte Korrekturen übernehmen")
+        #  NEW: Apply selected corrections button
+        self.btn_apply_selected = QtWidgets.QPushButton(" Ausgewählte Korrekturen übernehmen")
         self.btn_apply_selected.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogApplyButton))
         self.btn_apply_selected.clicked.connect(self.on_apply_selected)
         self.btn_apply_selected.setEnabled(False)
@@ -173,8 +185,8 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         self.btn_apply_selected.setToolTip("Wendet nur die markierten Korrekturen an")
         button_layout.addWidget(self.btn_apply_selected)
 
-        # ✅ NEW: Apply all corrections button
-        self.btn_apply_all = QtWidgets.QPushButton("✓ Alle Korrekturen übernehmen")
+        #  NEW: Apply all corrections button
+        self.btn_apply_all = QtWidgets.QPushButton(" Alle Korrekturen übernehmen")
         self.btn_apply_all.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogYesButton))
         self.btn_apply_all.clicked.connect(self.on_apply_all)
         self.btn_apply_all.setEnabled(stats['auto_correctable'] > 0)
@@ -185,7 +197,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         button_layout.addStretch()
 
         # Export button
-        self.btn_export = QtWidgets.QPushButton("📄 Bericht exportieren (Excel)")
+        self.btn_export = QtWidgets.QPushButton(" Bericht exportieren (Excel)")
         self.btn_export.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton))
         self.btn_export.setToolTip("Exportiert den Prüfbericht als CSV-Datei für Excel")
         self.btn_export.clicked.connect(self.on_export_report)
@@ -210,9 +222,9 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
     def _create_issues_table(self) -> QtWidgets.QTableWidget:
         """Create standard issues table"""
         table = QtWidgets.QTableWidget()
-        table.setColumnCount(9)  # ✅ CHANGED: 8 → 9 (added Korrektur column)
+        table.setColumnCount(9)  #  CHANGED: 8 → 9 (added Korrektur column)
         table.setHorizontalHeaderLabels([
-            "Dringlichkeit", "Art", "Typ", "ID", "Feld", "Problem-Beschreibung", "Aktueller Wert", "🎯 Zeigen", "🔧 Korrektur"
+            "Dringlichkeit", "Art", "Typ", "ID", "Feld", "Problem-Beschreibung", "Aktueller Wert", " Zeigen", " Korrektur"
         ])
 
         # Set column widths
@@ -230,10 +242,10 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
 
-        # ✅ Disable alternating row colors to match dark theme
+        #  Disable alternating row colors to match dark theme
         table.setAlternatingRowColors(False)
 
-        # ✅ Set dark theme background
+        #  Set dark theme background
         table.setStyleSheet("""
             QTableWidget {
                 background-color: #2b2b2b;
@@ -254,9 +266,9 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
     def _create_correctable_table(self) -> QtWidgets.QTableWidget:
         """Create table for auto-correctable issues"""
         table = QtWidgets.QTableWidget()
-        table.setColumnCount(8)  # ✅ CHANGED: 7 → 8 (added Action column)
+        table.setColumnCount(8)  #  CHANGED: 7 → 8 (added Action column)
         table.setHorizontalHeaderLabels([
-            "☑", "Art", "ID", "Feld", "Aktueller Wert", "Korrektur-Vorschlag", "Sicherheit", "Aktion"
+            "", "Art", "ID", "Feld", "Aktueller Wert", "Korrektur-Vorschlag", "Sicherheit", "Aktion"
         ])
         
         # Set column widths
@@ -267,7 +279,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         table.setColumnWidth(4, 200)
         table.setColumnWidth(5, 200)
         table.setColumnWidth(6, 100)
-        table.setColumnWidth(7, 100)  # ✅ ADDED: Action column
+        table.setColumnWidth(7, 100)  #  ADDED: Action column
         
         table.horizontalHeader().setStretchLastSection(True)
         table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -275,15 +287,188 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         
         # Connect selection change
         table.itemChanged.connect(self.on_correction_selection_changed)
-        
+
         return table
-    
+
+    def _setup_uncertain_tab(self):
+        """Setup the uncertain detections review tab."""
+        if not self.uncertain_detections:
+            label = QtWidgets.QLabel("Keine unsicheren Erkennungen gefunden.")
+            label.setStyleSheet("color: #888888; font-size: 12pt; padding: 20px;")
+            self.uncertain_layout.addWidget(label)
+            return
+
+        # Instructions
+        info = QtWidgets.QLabel(
+            "Diese Erkennungen haben niedrige Konfidenz. Überprüfen Sie sie und bestätigen Sie gültige.\n"
+            "Klicken Sie 'Zeigen' um zur Position zu springen, dann 'Bestätigen' oder 'Ablehnen'."
+        )
+        info.setStyleSheet("color: #aaaaaa; padding: 10px;")
+        self.uncertain_layout.addWidget(info)
+
+        # Table for uncertain detections
+        self.uncertain_table = QtWidgets.QTableWidget()
+        self.uncertain_table.setColumnCount(7)
+        self.uncertain_table.setHorizontalHeaderLabels([
+            "Klasse", "Konfidenz", "Position", "Seite", "Zeigen", "Bestätigen", "Status"
+        ])
+        self.uncertain_table.setRowCount(len(self.uncertain_detections))
+
+        # Set column widths
+        self.uncertain_table.setColumnWidth(0, 150)  # Class
+        self.uncertain_table.setColumnWidth(1, 100)  # Confidence
+        self.uncertain_table.setColumnWidth(2, 150)  # Position
+        self.uncertain_table.setColumnWidth(3, 60)   # Page
+        self.uncertain_table.setColumnWidth(4, 80)   # Show
+        self.uncertain_table.setColumnWidth(5, 100)  # Confirm/Reject
+        self.uncertain_table.setColumnWidth(6, 100)  # Status
+
+        self.uncertain_table.horizontalHeader().setStretchLastSection(True)
+        self.uncertain_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.uncertain_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+
+        # Dark theme
+        self.uncertain_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #2b2b2b;
+                gridline-color: #3d3d3d;
+            }
+            QTableWidget::item {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QTableWidget::item:selected {
+                background-color: #3d5a80;
+            }
+        """)
+
+        for row, det in enumerate(self.uncertain_detections):
+            # Class name
+            class_item = QtWidgets.QTableWidgetItem(det.get('name', ''))
+            self.uncertain_table.setItem(row, 0, class_item)
+
+            # Confidence (color-coded)
+            conf = det.get('conf', 0)
+            conf_item = QtWidgets.QTableWidgetItem(f"{conf:.1%}")
+            conf_item.setBackground(QtGui.QColor(255, 200, 100))  # Orange for uncertain
+            conf_item.setForeground(QtGui.QColor(0, 0, 0))  # Black text
+            self.uncertain_table.setItem(row, 1, conf_item)
+
+            # Position
+            pos = f"({det.get('cx', 0):.0f}, {det.get('cy', 0):.0f})"
+            self.uncertain_table.setItem(row, 2, QtWidgets.QTableWidgetItem(pos))
+
+            # Page
+            page = det.get('page', 1)
+            self.uncertain_table.setItem(row, 3, QtWidgets.QTableWidgetItem(str(page)))
+
+            # Show button (jumps to location)
+            show_btn = QtWidgets.QPushButton("Zeigen")
+            show_btn.setStyleSheet("background-color: #4a90d9; color: white;")
+            show_btn.clicked.connect(lambda checked, d=det: self._show_uncertain(d))
+            self.uncertain_table.setCellWidget(row, 4, show_btn)
+
+            # Confirm/Reject buttons in a widget
+            btn_widget = QtWidgets.QWidget()
+            btn_layout = QtWidgets.QHBoxLayout(btn_widget)
+            btn_layout.setContentsMargins(2, 2, 2, 2)
+            btn_layout.setSpacing(4)
+
+            confirm_btn = QtWidgets.QPushButton("✓")
+            confirm_btn.setToolTip("Bestätigen")
+            confirm_btn.setStyleSheet("background-color: #90EE90; color: black; font-weight: bold;")
+            confirm_btn.setFixedWidth(30)
+            confirm_btn.clicked.connect(lambda checked, r=row: self._confirm_uncertain(r))
+            btn_layout.addWidget(confirm_btn)
+
+            reject_btn = QtWidgets.QPushButton("✗")
+            reject_btn.setToolTip("Ablehnen")
+            reject_btn.setStyleSheet("background-color: #FFB6C1; color: black; font-weight: bold;")
+            reject_btn.setFixedWidth(30)
+            reject_btn.clicked.connect(lambda checked, r=row: self._reject_uncertain(r))
+            btn_layout.addWidget(reject_btn)
+
+            self.uncertain_table.setCellWidget(row, 5, btn_widget)
+
+            # Status
+            status_item = QtWidgets.QTableWidgetItem("Ausstehend")
+            status_item.setForeground(QtGui.QColor(170, 170, 170))
+            self.uncertain_table.setItem(row, 6, status_item)
+
+        self.uncertain_layout.addWidget(self.uncertain_table)
+
+        # Bulk action buttons
+        btn_layout = QtWidgets.QHBoxLayout()
+        btn_layout.addStretch()
+
+        confirm_all_btn = QtWidgets.QPushButton("Alle bestätigen")
+        confirm_all_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 8px;")
+        confirm_all_btn.clicked.connect(self._confirm_all_uncertain)
+        btn_layout.addWidget(confirm_all_btn)
+
+        reject_all_btn = QtWidgets.QPushButton("Alle ablehnen")
+        reject_all_btn.setStyleSheet("background-color: #f44336; color: white; padding: 8px;")
+        reject_all_btn.clicked.connect(self._reject_all_uncertain)
+        btn_layout.addWidget(reject_all_btn)
+
+        apply_btn = QtWidgets.QPushButton("Bestätigte übernehmen")
+        apply_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 8px;")
+        apply_btn.clicked.connect(self._apply_confirmed_uncertain)
+        btn_layout.addWidget(apply_btn)
+
+        btn_layout.addStretch()
+        self.uncertain_layout.addLayout(btn_layout)
+
+    def _show_uncertain(self, det):
+        """Jump to uncertain detection location."""
+        pos = (det.get('cx', 0), det.get('cy', 0))
+        self.jump_to_position.emit(pos)
+
+    def _confirm_uncertain(self, row):
+        """Confirm a single uncertain detection."""
+        self.uncertain_detections[row]['user_confirmed'] = True
+        status_item = self.uncertain_table.item(row, 6)
+        status_item.setText("✓ Bestätigt")
+        status_item.setForeground(QtGui.QColor(144, 238, 144))  # Light green
+
+    def _reject_uncertain(self, row):
+        """Reject a single uncertain detection."""
+        self.uncertain_detections[row]['user_confirmed'] = False
+        status_item = self.uncertain_table.item(row, 6)
+        status_item.setText("✗ Abgelehnt")
+        status_item.setForeground(QtGui.QColor(255, 182, 193))  # Light pink
+
+    def _confirm_all_uncertain(self):
+        """Confirm all uncertain detections."""
+        for row in range(len(self.uncertain_detections)):
+            self._confirm_uncertain(row)
+
+    def _reject_all_uncertain(self):
+        """Reject all uncertain detections."""
+        for row in range(len(self.uncertain_detections)):
+            self._reject_uncertain(row)
+
+    def _apply_confirmed_uncertain(self):
+        """Apply confirmed uncertain detections."""
+        confirmed = [d for d in self.uncertain_detections if d.get('user_confirmed', False)]
+        if confirmed:
+            self.uncertain_confirmed.emit(confirmed)
+            QtWidgets.QMessageBox.information(
+                self, "Übernommen",
+                f"{len(confirmed)} bestätigte Erkennung(en) wurden übernommen."
+            )
+        else:
+            QtWidgets.QMessageBox.warning(
+                self, "Keine Auswahl",
+                "Keine Erkennungen wurden bestätigt."
+            )
+
     def _populate_data(self):
         """Populate all tables with data"""
         # All issues
         self._populate_issues_table(self.all_issues_table, self.result.issues)
         
-        # ✅ FIX: Use lowercase severity values (matching ValidationIssue)
+        #  FIX: Use lowercase severity values (matching ValidationIssue)
         # Errors only
         errors = [i for i in self.result.issues if i.severity.lower() == 'error']
         self._populate_issues_table(self.errors_table, errors)
@@ -296,16 +481,16 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         info = [i for i in self.result.issues if i.severity.lower() == 'info']
         self._populate_issues_table(self.info_table, info)
         
-        # ✅ Auto-correctable issues
-        correctable = [i for i in self.result.issues if i.auto_correctable]  # ✅ CHANGED: use can_auto_correct
+        #  Auto-correctable issues
+        correctable = [i for i in self.result.issues if i.auto_correctable]  #  CHANGED: use can_auto_correct
         self._populate_correctable_table(correctable)
         
-        # ✅ NEW: Update tab labels with counts
-        self.tabs.setTabText(0, f"📋 Alle Probleme ({len(self.result.issues)})")
-        self.tabs.setTabText(1, f"✨ Auto-Korrekturen ({len(correctable)})")
-        self.tabs.setTabText(2, f"❌ Fehler ({len(errors)})")
-        self.tabs.setTabText(3, f"⚠️ Warnungen ({len(warnings)})")
-        self.tabs.setTabText(4, f"ℹ️ Hinweise ({len(info)})")
+        #  NEW: Update tab labels with counts
+        self.tabs.setTabText(0, f" Alle Probleme ({len(self.result.issues)})")
+        self.tabs.setTabText(1, f" Auto-Korrekturen ({len(correctable)})")
+        self.tabs.setTabText(2, f" Fehler ({len(errors)})")
+        self.tabs.setTabText(3, f" Warnungen ({len(warnings)})")
+        self.tabs.setTabText(4, f" Hinweise ({len(info)})")
     
     def _populate_issues_table(self, table: QtWidgets.QTableWidget, issues: List[ValidationIssue]):
         """Populate a standard issues table"""
@@ -396,12 +581,12 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             has_position = 'position' in issue.context
             row_id_valid = issue.row_id is not None and issue.row_id >= 0
 
-            # ✅ Allow jump if either has position OR has valid row_id
+            #  Allow jump if either has position OR has valid row_id
             if (can_jump and has_position) or row_id_valid:
-                jump_btn = QtWidgets.QPushButton("🎯 Zeigen")
+                jump_btn = QtWidgets.QPushButton(" Zeigen")
                 jump_btn.setToolTip("Zur Erkennung/Position springen")
 
-                # ✅ Capture variables in lambda
+                #  Capture variables in lambda
                 row_id = issue.row_id
                 pos = issue.context.get('position', None)
 
@@ -418,26 +603,26 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             action_layout.addStretch()
             table.setCellWidget(row, 7, action_widget)
 
-            # ✅ NEW Column 8: Korrektur (Correction Action Buttons)
+            #  NEW Column 8: Korrektur (Correction Action Buttons)
             correction_widget = self._create_correction_button(issue)
             table.setCellWidget(row, 8, correction_widget)
     
     def _populate_correctable_table(self, issues: List[ValidationIssue]):
         """
-        ✅ NEW: Populate auto-correctable issues table
+         NEW: Populate auto-correctable issues table
         """
         self.correctable_table.setRowCount(len(issues))
         
-        # ✅ Block signals during population
+        #  Block signals during population
         self.correctable_table.blockSignals(True)
         
         for row, issue in enumerate(issues):
-            # ✅ Column 0: Checkbox
+            #  Column 0: Checkbox
             checkbox = QtWidgets.QCheckBox()
             checkbox.setChecked(True)
             checkbox.setProperty('issue', issue)
             
-            # ✅ Connect checkbox to update button state
+            #  Connect checkbox to update button state
             checkbox.stateChanged.connect(self.on_correction_selection_changed)
             
             checkbox_widget = QtWidgets.QWidget()
@@ -463,19 +648,19 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             # Column 4: Current value (red background with BLACK text)
             current_item = QtWidgets.QTableWidgetItem(str(issue.current_value))
             current_item.setBackground(QtGui.QColor(255, 200, 200))
-            current_item.setForeground(QtGui.QColor(0, 0, 0))  # ✅ Black text for visibility
+            current_item.setForeground(QtGui.QColor(0, 0, 0))  #  Black text for visibility
             current_item.setFont(QtGui.QFont("Courier New", 9))
             self.correctable_table.setItem(row, 4, current_item)
 
             # Column 5: Suggested value (green background with BLACK text)
             suggested_item = QtWidgets.QTableWidgetItem(str(issue.suggested_value))
             suggested_item.setBackground(QtGui.QColor(200, 255, 200))
-            suggested_item.setForeground(QtGui.QColor(0, 0, 0))  # ✅ Black text for visibility
+            suggested_item.setForeground(QtGui.QColor(0, 0, 0))  #  Black text for visibility
             suggested_item.setFont(QtGui.QFont("Courier New", 9, QtGui.QFont.Bold))
             self.correctable_table.setItem(row, 5, suggested_item)
             
             # Column 6: Confidence (color-coded)
-            # ✅ Use issue.confidence (not correction_confidence)
+            #  Use issue.confidence (not correction_confidence)
             confidence_pct = f"{issue.confidence:.0%}"
             confidence_item = QtWidgets.QTableWidgetItem(confidence_pct)
             
@@ -489,7 +674,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
                 confidence_item.setForeground(QtGui.QColor(200, 0, 0))  # Red
             
             self.correctable_table.setItem(row, 6, confidence_item)
-            # ✅ NEW: Column 7 - Action (Jump button)
+            #  NEW: Column 7 - Action (Jump button)
             action_widget = QtWidgets.QWidget()
             action_layout = QtWidgets.QHBoxLayout(action_widget)
             action_layout.setContentsMargins(4, 2, 4, 2)
@@ -499,7 +684,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             has_position = 'position' in issue.context
             
             if can_jump and has_position:
-                jump_btn = QtWidgets.QPushButton("🎯")
+                jump_btn = QtWidgets.QPushButton("")
                 jump_btn.setToolTip("Zur Position springen")
                 jump_btn.setMaximumWidth(40)
                 
@@ -515,22 +700,22 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             action_layout.addStretch()
             self.correctable_table.setCellWidget(row, 7, action_widget)
 
-        # ✅ Unblock signals and trigger initial update
+        #  Unblock signals and trigger initial update
         self.correctable_table.blockSignals(False)
         self.on_correction_selection_changed()
     
     def on_correction_selection_changed(self):
         """
-        ✅ NEW: Update button state when correction selection changes
+         NEW: Update button state when correction selection changes
         """
         selected_count = self._count_selected_corrections()
         
         self.btn_apply_selected.setEnabled(selected_count > 0)
         
         if selected_count > 0:
-            self.btn_apply_selected.setText(f"✓ {selected_count} Korrekturen anwenden")
+            self.btn_apply_selected.setText(f" {selected_count} Korrekturen anwenden")
         else:
-            self.btn_apply_selected.setText("✓ Ausgewählte Korrekturen anwenden")
+            self.btn_apply_selected.setText(" Ausgewählte Korrekturen anwenden")
     
     def _count_selected_corrections(self) -> int:
         """Count how many corrections are selected"""
@@ -547,7 +732,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
     
     def on_apply_selected(self):
         """
-        ✅ NEW: Apply only selected corrections
+         NEW: Apply only selected corrections
         """
         corrections = []
         
@@ -620,7 +805,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
     
     def on_export_report(self):
         """
-        ✅ ENHANCED: Export comprehensive validation report
+         ENHANCED: Export comprehensive validation report
         
         Formats: TXT (detailed), CSV (tabular)
         """
@@ -631,11 +816,11 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(format_dialog)
         layout.addWidget(QtWidgets.QLabel("Wählen Sie das Export-Format:"))
         
-        btn_txt = QtWidgets.QPushButton("📄 Detaillierter Bericht (TXT)")
+        btn_txt = QtWidgets.QPushButton(" Detaillierter Bericht (TXT)")
         btn_txt.clicked.connect(lambda: self._export_txt(format_dialog))
         layout.addWidget(btn_txt)
         
-        btn_csv = QtWidgets.QPushButton("📊 Tabelle (CSV)")
+        btn_csv = QtWidgets.QPushButton(" Tabelle (CSV)")
         btn_csv.clicked.connect(lambda: self._export_csv(format_dialog))
         layout.addWidget(btn_csv)
         
@@ -768,9 +953,9 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             )
     def _on_jump_clicked(self, row_id: int, position: tuple):
         """Handle jump button click"""
-        print(f"🔵 Jump button clicked: row_id={row_id}, position={position}")  # DEBUG
+        print(f"Jump button clicked: row_id={row_id}, position={position}")  # DEBUG
 
-        # ✅ If position is None, try to get it from dataframe using row_id
+        #  If position is None, try to get it from dataframe using row_id
         if position is None and row_id is not None and row_id >= 0:
             try:
                 df = self.result.df
@@ -781,9 +966,9 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
                         yc = row_data.iloc[0]['yc']
                         if not pd.isna(xc) and not pd.isna(yc):
                             position = (float(xc), float(yc))
-                            print(f"🔵 Found position from row_id: {position}")
+                            print(f"Found position from row_id: {position}")
             except Exception as e:
-                print(f"⚠️ Could not get position from row_id: {e}")
+                print(f" Could not get position from row_id: {e}")
 
         # Emit signal to parent workspace
         self.jump_to_detection.emit(row_id, position)
@@ -794,13 +979,13 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             if hasattr(self.parent(), '_set_status'):
                 if position:
                     self.parent()._set_status(
-                        f"🎯 Springe zu Position ({position[0]:.0f}, {position[1]:.0f})"
+                        f" Springe zu Position ({position[0]:.0f}, {position[1]:.0f})"
                     )
                 else:
-                    self.parent()._set_status(f"🎯 Springe zu Zeile {row_id}")
+                    self.parent()._set_status(f" Springe zu Zeile {row_id}")
 
     # ========================================================================
-    # ✅ NEW: MANUAL CORRECTION ACTION BUTTONS
+    #  NEW: MANUAL CORRECTION ACTION BUTTONS
     # ========================================================================
 
     def _create_correction_button(self, issue: ValidationIssue) -> QtWidgets.QWidget:
@@ -821,7 +1006,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         if issue.auto_correctable and issue.suggested_value is not None:
             # Show auto-fix button
             confidence_pct = int(issue.confidence * 100)
-            btn = QtWidgets.QPushButton(f"✅ Auto-Fix ({confidence_pct}%)")
+            btn = QtWidgets.QPushButton(f" Auto-Fix ({confidence_pct}%)")
             btn.setToolTip(f"Automatische Korrektur mit {confidence_pct}% Sicherheit:\n{issue.context.get('suggestion', '')}")
             btn.setStyleSheet("""
                 QPushButton {
@@ -845,13 +1030,13 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
 
             # Map action IDs to button labels
             action_labels = {
-                'manual_ocr_horizontal': '📏 OCR Horizontal',
-                'manual_ocr_angular': '📐 OCR Angular',
-                'manual_link': '📌 Verknüpfen',
-                'bbox_resize': '🔲 Bbox anpassen',
-                'manual_edit': '✏️ Bearbeiten',
-                'delete': '🗑️ Löschen',
-                'review': '🔍 Prüfen'
+                'manual_ocr_horizontal': ' OCR Horizontal',
+                'manual_ocr_angular': ' OCR Angular',
+                'manual_link': ' Verknüpfen',
+                'bbox_resize': ' Bbox anpassen',
+                'manual_edit': ' Bearbeiten',
+                'delete': ' Löschen',
+                'review': ' Prüfen'
             }
 
             # Primary action button
@@ -912,7 +1097,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.information(
                     self,
                     "Korrektur angewendet",
-                    f"✅ Korrektur erfolgreich:\n\n"
+                    f" Korrektur erfolgreich:\n\n"
                     f"Feld: {issue.field}\n"
                     f"Alt: '{old_value}'\n"
                     f"Neu: '{issue.suggested_value}'\n\n"
@@ -932,7 +1117,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
 
     def _trigger_manual_action(self, issue: ValidationIssue, action: str):
         """
-        ✅ UPGRADED: Trigger manual correction tool directly (no instruction popups)
+         UPGRADED: Trigger manual correction tool directly (no instruction popups)
 
         Actions:
         - manual_ocr_horizontal: Jump + activate horizontal OCR tool
@@ -973,7 +1158,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             msg.setDefaultButton(QtWidgets.QMessageBox.No)
 
             if msg.exec_() == QtWidgets.QMessageBox.Yes:
-                # ✅ Emit signal to delete the row automatically
+                #  Emit signal to delete the row automatically
                 self.delete_row.emit(issue.row_id)
 
         # For manual_edit and review: just jump to element (no tool activation needed)

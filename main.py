@@ -2,7 +2,7 @@
 # RailDoc Studio - Intelligente Eisenbahndokument-Analyse
 # Gleisplan-Modul v1.0
 #
-# Entwickelt von: Utkarsh Swain
+# Entwickelt von: Utkarsh Swain 
 # Siemens Mobility GmbH
 # © 2025
 # ============================================================================
@@ -12,22 +12,28 @@ import os
 from PIL import Image, ImageFile
 
 # Disable decompression bomb check for large railway plans
-Image.MAX_IMAGE_PIXELS = None  # ✅ Allow unlimited size
-ImageFile.LOAD_TRUNCATED_IMAGES = True  # ✅ Handle corrupted images
+Image.MAX_IMAGE_PIXELS = None  #  Allow unlimited size
+ImageFile.LOAD_TRUNCATED_IMAGES = True  #  Handle corrupted images
 from PyQt5 import QtCore, QtGui, QtWidgets
 from ui.setup_window import SetupAndRunWindow
 from typing import List, Dict, Tuple, Optional, Any
 from ui.auditing_window import AuditingWindow
+from utils.dpi_utils import get_adaptive_window_size, center_window
 from utils.helpers import _is_deleted
 from ui.themes import DARK_QSS, LIGHT_QSS
 import sys
 from database_sqlite import init_db, get_workspace_data, save_workspace_data
-import logging 
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RailDoc Studio - Gleisplan-Modul")
-        self.resize(300, 200)
+
+        # Adaptive window sizing for different DPI settings
+        w, h = get_adaptive_window_size(300, 200, min_width=300, min_height=200)
+        self.resize(w, h)
+        center_window(self)
+
         self.setCentralWidget(QtWidgets.QWidget())
         self.setup_window: Optional[SetupAndRunWindow] = None
         self.auditing_window: Optional[AuditingWindow] = None
@@ -88,7 +94,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setup_window.show(); self.hide()
 
 
-    def _handle_processing_done(self, df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, exception, from_database=False):
+    def _handle_processing_done(self, df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, exception, from_database=False, uncertain_detections=None):
             """Handle processing completion"""
 
             # Hide progress window
@@ -134,7 +140,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 page_dfs,
                 page_bgr_arrays,
                 track_skeleton,
-                from_database
+                from_database,
+                uncertain_detections or []
             )
             
             # Keep setup window open for processing more PDFs
@@ -142,8 +149,31 @@ class MainWindow(QtWidgets.QMainWindow):
             self.setup_window.raise_()
 
 def main():
+    # ============================================================================
+    # HIGH DPI SUPPORT - Must be set BEFORE QApplication creation
+    # ============================================================================
+
+    # Enable High DPI scaling (Qt 5.6+) - allows automatic DPI adaptation
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+
+    # Use high DPI pixmaps for crisp icons/images (Qt 5.6+)
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+
+    # Enable fractional scaling for 125%, 150% DPI (Qt 5.14+)
+    os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
+
+    # Set rounding policy for fractional scaling (Qt 5.14+)
+    # PassThrough prevents rounding fractional scales to nearest integer
+    if hasattr(QtWidgets.QApplication, 'setHighDpiScaleFactorRoundingPolicy'):
+        QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(
+            QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+
     app = QtWidgets.QApplication(sys.argv)
-    
+
+    # Fusion style scales better than native OS styles
+    app.setStyle('Fusion')
+
     # --- ADD THIS HERE ---
     # Set the password in your environment before running
     # In Windows: set DB_PASSWORD="your_strong_password_here"

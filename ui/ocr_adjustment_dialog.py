@@ -31,7 +31,7 @@ class OCRAdjustmentTracker:
                 with open(self.config_path, 'r') as f:
                     return json.load(f)
             except Exception as e:
-                print(f"⚠️ Could not load OCR adjustments: {e}")
+                print(f" Could not load OCR adjustments: {e}")
         return {}
 
     def _save_adjustments(self):
@@ -40,7 +40,7 @@ class OCRAdjustmentTracker:
             with open(self.config_path, 'w') as f:
                 json.dump(self.adjustments, f, indent=2)
         except Exception as e:
-            print(f"⚠️ Could not save OCR adjustments: {e}")
+            print(f" Could not save OCR adjustments: {e}")
 
     def record_adjustment(self, symbol_class: str, offset_x: int, offset_y: int,
                          width_delta: int, height_delta: int):
@@ -89,8 +89,8 @@ class OCRAdjustmentTracker:
 
         self._save_adjustments()
 
-        print(f"📊 Recorded adjustment for {symbol_class}: offset_x={offset_x}, offset_y={offset_y}")
-        print(f"   Learned average: offset_x={self.adjustments[symbol_class]['learned_offset_x']}, "
+        print(f"Recorded adjustment for {symbol_class}: offset_x={offset_x}, offset_y={offset_y}")
+        print(f"Learned average: offset_x={self.adjustments[symbol_class]['learned_offset_x']}, "
               f"offset_y={self.adjustments[symbol_class]['learned_offset_y']} "
               f"(confidence={self.adjustments[symbol_class]['confidence']:.2f}, n={n})")
 
@@ -179,7 +179,7 @@ class OCRAdjustmentDialog(QtWidgets.QDialog):
         before_group = self._create_preview_group(
             "VORHER (BEFORE)",
             self.old_ocr_text if self.old_ocr_text else "(leer / empty)",
-            "❌ Text nicht gefunden" if not self.old_ocr_text else "✓ Text gefunden",
+            " Text nicht gefunden" if not self.old_ocr_text else " Text gefunden",
             self.old_crop,
             QtGui.QColor(220, 220, 220)
         )
@@ -189,7 +189,7 @@ class OCRAdjustmentDialog(QtWidgets.QDialog):
         after_group = self._create_preview_group(
             "NACHHER (AFTER)",
             self.new_ocr_text if self.new_ocr_text else "(leer / empty)",
-            "✅ Text richtig gefunden" if self.new_ocr_text else "❌ Text nicht gefunden",
+            " Text richtig gefunden" if self.new_ocr_text else " Text nicht gefunden",
             self.new_crop,
             QtGui.QColor(230, 255, 230) if self.new_ocr_text else QtGui.QColor(255, 230, 230)
         )
@@ -209,7 +209,7 @@ class OCRAdjustmentDialog(QtWidgets.QDialog):
         # Test results (if available)
         if self.test_success_count is not None:
             test_label = QtWidgets.QLabel(
-                f"📊 <b>Anpassung wird getestet...</b> {self.test_success_count} von {self.instance_count} erfolgreich<br>"
+                f" <b>Anpassung wird getestet...</b> {self.test_success_count} von {self.instance_count} erfolgreich<br>"
                 f"(Testing adjustment... {self.test_success_count} of {self.instance_count} successful)"
             )
             test_label.setStyleSheet("padding: 5px; color: #0066cc;")
@@ -302,7 +302,7 @@ class OCRAdjustmentDialog(QtWidgets.QDialog):
                 image_label.setAlignment(QtCore.Qt.AlignCenter)
                 layout.addWidget(image_label)
             except Exception as e:
-                print(f"⚠️ Could not display crop image: {e}")
+                print(f" Could not display crop image: {e}")
 
         # Text label
         text_label = QtWidgets.QLabel(f"<b>{text}</b>")
@@ -350,9 +350,9 @@ class OCRAdjustmentDialog(QtWidgets.QDialog):
             parts.append(f"↕ {abs(self.height_delta)} Pixel {change} ({change_en})")
 
         if not parts:
-            return "📏 <b>Änderung:</b> Keine Änderung (No change)"
+            return " <b>Änderung:</b> Keine Änderung (No change)"
 
-        return "📏 <b>Änderung:</b><br>" + "<br>".join(parts)
+        return " <b>Änderung:</b><br>" + "<br>".join(parts)
 
     def get_options(self) -> Tuple[bool, bool, bool]:
         """Get user's choices"""
@@ -376,14 +376,14 @@ class AutoLearningSuggestionDialog(QtWidgets.QDialog):
 
     def _setup_ui(self):
         """Setup suggestion dialog UI"""
-        self.setWindowTitle("💡 Verbesserungsvorschlag (Improvement Suggestion)")
+        self.setWindowTitle(" Verbesserungsvorschlag (Improvement Suggestion)")
         self.setMinimumWidth(500)
 
         layout = QtWidgets.QVBoxLayout(self)
 
         # Icon and header
         header_layout = QtWidgets.QHBoxLayout()
-        icon_label = QtWidgets.QLabel("💡")
+        icon_label = QtWidgets.QLabel("")
         icon_label.setStyleSheet("font-size: 48pt;")
         header_layout.addWidget(icon_label)
 

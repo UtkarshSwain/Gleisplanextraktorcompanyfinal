@@ -21,22 +21,26 @@ import math
 import pickle
 import io
 from collections import defaultdict
-import logging
+import threading
+from config import debug_print
 
-logger = logging.getLogger(__name__)
-
-# Database availability flag (checked once at module load)
+# Database availability flag (checked once at module load) - with thread safety
 _DB_AVAILABLE = None
+_DB_AVAILABLE_LOCK = threading.Lock()
 
-def _check_db_available():
-    """Check if database is available (cached)."""
+def _check_db_available() -> bool:
+    """Check if database is available (cached, thread-safe)."""
     global _DB_AVAILABLE
     if _DB_AVAILABLE is None:
-        try:
-            from database_sqlite import is_db_available
-            _DB_AVAILABLE = is_db_available()
-        except Exception:
-            _DB_AVAILABLE = False
+        with _DB_AVAILABLE_LOCK:
+            # Double-check after acquiring lock
+            if _DB_AVAILABLE is None:
+                try:
+                    from database_sqlite import is_db_available
+                    _DB_AVAILABLE = is_db_available()
+                except Exception as e:
+                    debug_print('custom_symbols', f"Database not available: {e}")
+                    _DB_AVAILABLE = False
     return _DB_AVAILABLE
 
 
@@ -118,6 +122,7 @@ class DetectionResult:
             "angle": self.angle,
             "detection_method": self.method,
             "is_new_symbol": self.is_new_symbol,
+            "is_custom_symbol": self.is_new_symbol,  # Alias for consistency
         }
 
 
@@ -322,13 +327,13 @@ class NewSymbolDetector:
                         symbol.hu_moments = arrays.get('hu_moments', [])
 
                     self.symbols[name] = symbol
-                    logger.info(f"Loaded symbol '{name}' from database with {len(symbol.templates)} templates")
+                    debug_print('custom_symbols',f"Loaded symbol '{name}' from database with {len(symbol.templates)} templates")
 
                 if db_symbols:
                     loaded_from_db = True
-                    logger.info(f"Loaded {len(self.symbols)} custom symbols from PostgreSQL")
+                    debug_print('custom_symbols',f"Loaded {len(self.symbols)} custom symbols from PostgreSQL")
             except Exception as e:
-                logger.warning(f"Could not load from database: {e}")
+                print(f"Could not load from database: {e}")
 
         # Fall back to local files if DB not available or empty
         if not loaded_from_db and self.config_path.exists():
@@ -373,11 +378,11 @@ class NewSymbolDetector:
                             symbol.hu_moments.append(hu)
 
                 self.symbols[name] = symbol
-                logger.info(f"Loaded symbol '{name}' from files with {len(symbol.templates)} templates")
+                debug_print('custom_symbols',f"Loaded symbol '{name}' from files with {len(symbol.templates)} templates")
 
-            logger.info(f"Loaded {len(self.symbols)} custom symbol definitions from local files")
+            debug_print('custom_symbols',f"Loaded {len(self.symbols)} custom symbol definitions from local files")
         except Exception as e:
-            logger.warning(f"Could not load symbol config from files: {e}")
+            print(f"Could not load symbol config from files: {e}")
 
     def _save_config(self):
         """Save symbol definitions to PostgreSQL and local files (for offline fallback)."""
@@ -409,9 +414,9 @@ class NewSymbolDetector:
                     templates_data=templates_blob
                 )
 
-            logger.info(f"Saved {len(self.symbols)} symbols to PostgreSQL database")
+            debug_print('custom_symbols',f"Saved {len(self.symbols)} symbols to PostgreSQL database")
         except Exception as e:
-            logger.warning(f"Could not save to database: {e}")
+            print(f"Could not save to database: {e}")
             print(f"[WARNING] Database save failed: {e}")
 
     def _save_config_to_files(self):
@@ -447,7 +452,7 @@ class NewSymbolDetector:
             for i, hu in enumerate(symbol.hu_moments):
                 np.save(str(symbol_dir / f"hu_moments_{i}.npy"), hu)
 
-            logger.info(f"Saved {len(symbol.templates)} templates for symbol '{name}' to local files")
+            debug_print('custom_symbols',f"Saved {len(symbol.templates)} templates for symbol '{name}' to local files")
 
     def add_symbol_from_examples(
         self,
@@ -528,7 +533,7 @@ class NewSymbolDetector:
         self.symbols[name] = symbol
         self._save_config()
 
-        logger.info(f"Added new symbol '{name}' with {len(example_crops)} examples, method: {symbol.detection_method}")
+        debug_print('custom_symbols',f"Added new symbol '{name}' with {len(example_crops)} examples, method: {symbol.detection_method}")
 
         return symbol
 
@@ -570,7 +575,7 @@ class NewSymbolDetector:
             List of DetectionResult
         """
         if symbol_name not in self.symbols:
-            logger.warning(f"Symbol '{symbol_name}' not defined")
+            print(f"Symbol '{symbol_name}' not defined")
             return []
 
         symbol = self.symbols[symbol_name]
@@ -1037,7 +1042,7 @@ class SymbolRetrainer:
         with open(label_path, 'w') as f:
             f.write(f"0 {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f} {angle:.1f}\n")
 
-        logger.info(f"Added training example for '{symbol_name}'")
+        debug_print('custom_symbols',f"Added training example for '{symbol_name}'")
 
     def get_training_stats(self) -> Dict[str, int]:
         """Get count of training examples."""
@@ -1101,15 +1106,15 @@ class SymbolRetrainer:
 
         if device == "cpu":
             train_params["half"] = False  # CPU doesn't support FP16
-            logger.info("⚠️ Training on CPU - this will be slow (2-4 hours for 20 epochs)")
+            debug_print('custom_symbols'," Training on CPU - this will be slow (2-4 hours for 20 epochs)")
 
         # Train
-        logger.info(f"Starting fine-tuning with {epochs} epochs on {device}...")
+        debug_print('custom_symbols',f"Starting fine-tuning with {epochs} epochs on {device}...")
         results = base_model.train(**train_params)
 
         # Return path to best model
         best_model = self.training_data_dir / "runs" / "fine_tune" / "weights" / "best.pt"
-        logger.info(f"Fine-tuning complete! Model saved to: {best_model}")
+        debug_print('custom_symbols',f"Fine-tuning complete! Model saved to: {best_model}")
 
         return str(best_model)
 

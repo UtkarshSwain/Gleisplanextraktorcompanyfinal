@@ -15,7 +15,7 @@ Usage in pipelineworker.py:
     dets, unknown_clusters = detect_with_custom_symbols(page_bgr, dets)
 """
 
-from typing import List, Dict, Tuple, Any, Optional
+from typing import List, Dict, Tuple, Any, Optional, Union
 import numpy as np
 import logging
 
@@ -183,7 +183,7 @@ def apply_ocr_to_custom_symbols(
 
 def _get_text_region(
     detection: dict,
-    text_position: str,
+    text_position: Union[str, List[str]],
     padding: int = 10,
     text_region_size: int = 100,
 ) -> Tuple[int, int, int, int]:
@@ -192,13 +192,17 @@ def _get_text_region(
 
     Args:
         detection: Detection dict with x1, y1, x2, y2
-        text_position: "below", "above", "left", "right", "inside"
+        text_position: "below", "above", "left", "right", "inside" - or list of positions
         padding: Padding between symbol and text region
         text_region_size: Size of text search region
 
     Returns:
         (x1, y1, x2, y2) of text region
     """
+    # Handle list of positions - use first one
+    if isinstance(text_position, list):
+        text_position = text_position[0] if text_position else "below"
+
     x1, y1, x2, y2 = detection["x1"], detection["y1"], detection["x2"], detection["y2"]
     w, h = x2 - x1, y2 - y1
 
@@ -333,7 +337,7 @@ To integrate with existing pipelineworker.py, add these changes:
 
 4. In setup_window.py or auditing_window.py, add button:
 
-   btn_add_symbol = QPushButton("➕ Neues Symbol")
+   btn_add_symbol = QPushButton(" Neues Symbol")
    btn_add_symbol.clicked.connect(self.on_add_new_symbol)
 
    def on_add_new_symbol(self):

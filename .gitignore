@@ -63,6 +63,7 @@ gleisplanextraktor/
 
 # Debug files
 debug.txt
+output.txt
 
 # Docker (if not using)
 docker-compose.yml

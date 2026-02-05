@@ -12,6 +12,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from typing import Optional, List, Dict
 import json
 from pathlib import Path
+from utils.dpi_utils import get_adaptive_window_size, center_window
 
 
 class SavedWorkspacesDialog(QDialog):
@@ -26,7 +27,11 @@ class SavedWorkspacesDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Gespeicherte Arbeit laden")
-        self.setMinimumSize(500, 400)
+
+        # Adaptive sizing for different DPI settings
+        w, h = get_adaptive_window_size(500, 400, max_screen_pct=0.50)
+        self.setMinimumSize(w, h)
+        center_window(self)
 
         # Enable standard window features: minimize, maximize, close buttons
         self.setWindowFlags(
@@ -108,20 +113,22 @@ class SavedWorkspacesDialog(QDialog):
             from database_sqlite import get_connection
 
             conn = get_connection()
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            cursor.execute("""
-                SELECT t.layout_name, w.last_modified,
-                       LENGTH(w.edited_data_json) as data_size,
-                       w.edited_data_json,
-                       CASE WHEN w.track_skeleton IS NOT NULL THEN 1 ELSE 0 END as has_skeleton
-                FROM workspaces w
-                JOIN track_layouts t ON w.layout_id = t.id
-                ORDER BY w.last_modified DESC
-            """)
+                cursor.execute("""
+                    SELECT t.layout_name, w.last_modified,
+                           LENGTH(w.edited_data_json) as data_size,
+                           w.edited_data_json,
+                           CASE WHEN w.track_skeleton IS NOT NULL THEN 1 ELSE 0 END as has_skeleton
+                    FROM workspaces w
+                    JOIN track_layouts t ON w.layout_id = t.id
+                    ORDER BY w.last_modified DESC
+                """)
 
-            rows = cursor.fetchall()
-            conn.close()
+                rows = cursor.fetchall()
+            finally:
+                conn.close()
 
             if not rows:
                 self.info_label.setText("Keine gespeicherten Arbeitsbereiche gefunden.")
@@ -145,7 +152,8 @@ class SavedWorkspacesDialog(QDialog):
                 try:
                     data = json.loads(row['edited_data_json'])
                     count = len(data) if isinstance(data, list) else 0
-                except:
+                except (json.JSONDecodeError, TypeError, KeyError) as e:
+                    pass  # Silent fail for malformed JSON
                     count = 0
                 self.table.setItem(i, 2, QTableWidgetItem(str(count)))
 
@@ -221,7 +229,11 @@ class DatabaseManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Datenbank-Manager")
-        self.setMinimumSize(800, 600)
+
+        # Adaptive sizing for different DPI settings
+        w, h = get_adaptive_window_size(800, 600, max_screen_pct=0.70)
+        self.setMinimumSize(w, h)
+        center_window(self)
 
         # Enable standard window features: minimize, maximize, close buttons
         self.setWindowFlags(
@@ -528,7 +540,8 @@ class DatabaseManagerDialog(QDialog):
                             count_text = str(total_count)
                     else:
                         count_text = "0"
-                except:
+                except (json.JSONDecodeError, TypeError, KeyError) as e:
+                    pass  # Silent fail for malformed JSON
                     count_text = "0"
                 self.workspaces_table.setItem(i, 3, QTableWidgetItem(count_text))
 
@@ -584,10 +597,12 @@ class DatabaseManagerDialog(QDialog):
             from database_sqlite import get_connection
 
             conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT layout_name FROM track_layouts ORDER BY layout_name")
-            layouts = [row['layout_name'] for row in cursor.fetchall()]
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT layout_name FROM track_layouts ORDER BY layout_name")
+                layouts = [row['layout_name'] for row in cursor.fetchall()]
+            finally:
+                conn.close()
 
             # Update validation filter
             self.validation_filter.clear()
@@ -612,27 +627,29 @@ class DatabaseManagerDialog(QDialog):
             layout_filter = self.validation_filter.currentText()
 
             conn = get_connection()
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            if layout_filter and layout_filter != "(Alle)":
-                cursor.execute("""
-                    SELECT v.validation_type, v.severity, v.message, v.row_id, v.created_at
-                    FROM validation_log v
-                    JOIN track_layouts t ON v.layout_id = t.id
-                    WHERE t.layout_name = ?
-                    ORDER BY v.created_at DESC
-                    LIMIT 500
-                """, (layout_filter,))
-            else:
-                cursor.execute("""
-                    SELECT v.validation_type, v.severity, v.message, v.row_id, v.created_at
-                    FROM validation_log v
-                    ORDER BY v.created_at DESC
-                    LIMIT 500
-                """)
+                if layout_filter and layout_filter != "(Alle)":
+                    cursor.execute("""
+                        SELECT v.validation_type, v.severity, v.message, v.row_id, v.created_at
+                        FROM validation_log v
+                        JOIN track_layouts t ON v.layout_id = t.id
+                        WHERE t.layout_name = ?
+                        ORDER BY v.created_at DESC
+                        LIMIT 500
+                    """, (layout_filter,))
+                else:
+                    cursor.execute("""
+                        SELECT v.validation_type, v.severity, v.message, v.row_id, v.created_at
+                        FROM validation_log v
+                        ORDER BY v.created_at DESC
+                        LIMIT 500
+                    """)
 
-            rows = cursor.fetchall()
-            conn.close()
+                rows = cursor.fetchall()
+            finally:
+                conn.close()
 
             self.validation_table.setRowCount(len(rows))
 
@@ -667,29 +684,31 @@ class DatabaseManagerDialog(QDialog):
             layout_filter = self.corrections_filter.currentText()
 
             conn = get_connection()
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            if layout_filter and layout_filter != "(Alle)":
-                cursor.execute("""
-                    SELECT mc.row_id, mc.column_name, mc.old_value, mc.new_value,
-                           mc.correction_type, mc.created_at
-                    FROM manual_corrections mc
-                    JOIN track_layouts t ON mc.layout_id = t.id
-                    WHERE t.layout_name = ?
-                    ORDER BY mc.created_at DESC
-                    LIMIT 500
-                """, (layout_filter,))
-            else:
-                cursor.execute("""
-                    SELECT mc.row_id, mc.column_name, mc.old_value, mc.new_value,
-                           mc.correction_type, mc.created_at
-                    FROM manual_corrections mc
-                    ORDER BY mc.created_at DESC
-                    LIMIT 500
-                """)
+                if layout_filter and layout_filter != "(Alle)":
+                    cursor.execute("""
+                        SELECT mc.row_id, mc.column_name, mc.old_value, mc.new_value,
+                               mc.correction_type, mc.created_at
+                        FROM manual_corrections mc
+                        JOIN track_layouts t ON mc.layout_id = t.id
+                        WHERE t.layout_name = ?
+                        ORDER BY mc.created_at DESC
+                        LIMIT 500
+                    """, (layout_filter,))
+                else:
+                    cursor.execute("""
+                        SELECT mc.row_id, mc.column_name, mc.old_value, mc.new_value,
+                               mc.correction_type, mc.created_at
+                        FROM manual_corrections mc
+                        ORDER BY mc.created_at DESC
+                        LIMIT 500
+                    """)
 
-            rows = cursor.fetchall()
-            conn.close()
+                rows = cursor.fetchall()
+            finally:
+                conn.close()
 
             self.corrections_table.setRowCount(len(rows))
 
@@ -716,80 +735,82 @@ class DatabaseManagerDialog(QDialog):
             from database_sqlite import get_connection, DB_PATH
 
             conn = get_connection()
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            stats_lines.append("=" * 50)
-            stats_lines.append("DATENBANK-STATISTIKEN")
-            stats_lines.append("=" * 50)
-            stats_lines.append("")
+                stats_lines.append("=" * 50)
+                stats_lines.append("DATENBANK-STATISTIKEN")
+                stats_lines.append("=" * 50)
+                stats_lines.append("")
 
-            # Database size
-            db_path = Path(DB_PATH)
-            if db_path.exists():
-                size_kb = db_path.stat().st_size / 1024
-                stats_lines.append(f"Datenbankgröße: {size_kb:.1f} KB")
+                # Database size
+                db_path = Path(DB_PATH)
+                if db_path.exists():
+                    size_kb = db_path.stat().st_size / 1024
+                    stats_lines.append(f"Datenbankgröße: {size_kb:.1f} KB")
 
-            # Count layouts
-            cursor.execute("SELECT COUNT(*) as count FROM track_layouts")
-            layout_count = cursor.fetchone()['count']
-            stats_lines.append(f"Gespeicherte Layouts: {layout_count}")
+                # Count layouts
+                cursor.execute("SELECT COUNT(*) as count FROM track_layouts")
+                layout_count = cursor.fetchone()['count']
+                stats_lines.append(f"Gespeicherte Layouts: {layout_count}")
 
-            # Count workspaces
-            cursor.execute("SELECT COUNT(*) as count FROM workspaces")
-            workspace_count = cursor.fetchone()['count']
-            stats_lines.append(f"Arbeitsbereiche: {workspace_count}")
+                # Count workspaces
+                cursor.execute("SELECT COUNT(*) as count FROM workspaces")
+                workspace_count = cursor.fetchone()['count']
+                stats_lines.append(f"Arbeitsbereiche: {workspace_count}")
 
-            # Count custom symbols
-            cursor.execute("SELECT COUNT(*) as count FROM custom_symbols")
-            symbol_count = cursor.fetchone()['count']
-            stats_lines.append(f"Eigene Symbole: {symbol_count}")
+                # Count custom symbols
+                cursor.execute("SELECT COUNT(*) as count FROM custom_symbols")
+                symbol_count = cursor.fetchone()['count']
+                stats_lines.append(f"Eigene Symbole: {symbol_count}")
 
-            # Count validations
-            cursor.execute("SELECT COUNT(*) as count FROM validation_log")
-            validation_count = cursor.fetchone()['count']
-            stats_lines.append(f"Validierungseinträge: {validation_count}")
+                # Count validations
+                cursor.execute("SELECT COUNT(*) as count FROM validation_log")
+                validation_count = cursor.fetchone()['count']
+                stats_lines.append(f"Validierungseinträge: {validation_count}")
 
-            # Count corrections
-            cursor.execute("SELECT COUNT(*) as count FROM manual_corrections")
-            correction_count = cursor.fetchone()['count']
-            stats_lines.append(f"Manuelle Korrekturen: {correction_count}")
+                # Count corrections
+                cursor.execute("SELECT COUNT(*) as count FROM manual_corrections")
+                correction_count = cursor.fetchone()['count']
+                stats_lines.append(f"Manuelle Korrekturen: {correction_count}")
 
-            stats_lines.append("")
-            stats_lines.append("-" * 50)
-            stats_lines.append("ARBEITSBEREICHE DETAILS")
-            stats_lines.append("-" * 50)
-
-            # Workspace details
-            cursor.execute("""
-                SELECT t.layout_name, w.last_modified,
-                       LENGTH(w.edited_data_json) as data_size
-                FROM workspaces w
-                JOIN track_layouts t ON w.layout_id = t.id
-                ORDER BY w.last_modified DESC
-            """)
-
-            for row in cursor.fetchall():
-                size_kb = (row['data_size'] or 0) / 1024
-                last_mod = row['last_modified'] or "?"
-                if isinstance(last_mod, str) and len(last_mod) > 16:
-                    last_mod = last_mod[:16]
-                stats_lines.append(f"  {row['layout_name']}: {size_kb:.1f} KB ({last_mod})")
-
-            if symbol_count > 0:
                 stats_lines.append("")
                 stats_lines.append("-" * 50)
-                stats_lines.append("EIGENE SYMBOLE")
+                stats_lines.append("ARBEITSBEREICHE DETAILS")
                 stats_lines.append("-" * 50)
 
-                cursor.execute("SELECT symbol_name, config_json FROM custom_symbols")
-                for row in cursor.fetchall():
-                    config = json.loads(row['config_json']) if row['config_json'] else {}
-                    has_text = "mit Text" if config.get('has_text') else "ohne Text"
-                    stats_lines.append(f"  {row['symbol_name']}: {has_text}")
+                # Workspace details
+                cursor.execute("""
+                    SELECT t.layout_name, w.last_modified,
+                           LENGTH(w.edited_data_json) as data_size
+                    FROM workspaces w
+                    JOIN track_layouts t ON w.layout_id = t.id
+                    ORDER BY w.last_modified DESC
+                """)
 
-            conn.close()
+                for row in cursor.fetchall():
+                    size_kb = (row['data_size'] or 0) / 1024
+                    last_mod = row['last_modified'] or "?"
+                    if isinstance(last_mod, str) and len(last_mod) > 16:
+                        last_mod = last_mod[:16]
+                    stats_lines.append(f"  {row['layout_name']}: {size_kb:.1f} KB ({last_mod})")
+
+                if symbol_count > 0:
+                    stats_lines.append("")
+                    stats_lines.append("-" * 50)
+                    stats_lines.append("EIGENE SYMBOLE")
+                    stats_lines.append("-" * 50)
+
+                    cursor.execute("SELECT symbol_name, config_json FROM custom_symbols")
+                    for row in cursor.fetchall():
+                        config = json.loads(row['config_json']) if row['config_json'] else {}
+                        has_text = "mit Text" if config.get('has_text') else "ohne Text"
+                        stats_lines.append(f"  {row['symbol_name']}: {has_text}")
+            finally:
+                conn.close()
 
         except Exception as e:
+            print(f"Error loading stats: {e}")
             stats_lines.append(f"Fehler beim Laden der Statistiken: {e}")
 
         self.stats_text.setPlainText("\n".join(stats_lines))

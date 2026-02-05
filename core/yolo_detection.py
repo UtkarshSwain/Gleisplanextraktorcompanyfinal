@@ -2,7 +2,7 @@ from typing import List, Dict, Tuple
 import numpy as np
 import cv2
 from ultralytics import YOLO
-from config import TILE_SIZE, OVERLAP_PCT, PRED_IMGSZ, CLASS_THRESH, CLASSES,TILE_HALO, DEBUG_ANGLE_ROUTING, canon_name, OBB_ONLY, NMS_THRESHOLDS
+from config import TILE_SIZE, OVERLAP_PCT, PRED_IMGSZ, CLASS_THRESH, CLASSES,TILE_HALO, DEBUG_ANGLE_ROUTING, canon_name, OBB_ONLY, NMS_THRESHOLDS, UNCERTAIN_THRESH_MULTIPLIER, MIN_UNCERTAIN_THRESH, MIN_UNCERTAIN_THRESH_DEFAULT
 import math
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PIL import Image, ImageFile
@@ -144,8 +144,21 @@ def run_yolo_on_page(model, page_bgr: np.ndarray) -> List[dict]:
             raw_name = CLASSES[cls_i]
             name = canon_name(raw_name)
             conf = float(obb.conf[i]) if has_conf else 0.0
-            if conf < CLASS_THRESH.get(name, 0.25):
-                continue
+
+            # Determine detection status based on confidence thresholds
+            class_thresh = CLASS_THRESH.get(name, 0.25)
+            # Ensure uncertain_thresh is always below class_thresh
+            # Use per-class MIN_UNCERTAIN_THRESH with fallback to default
+            min_uncertain = MIN_UNCERTAIN_THRESH.get(name, MIN_UNCERTAIN_THRESH_DEFAULT)
+            effective_min = min(min_uncertain, class_thresh * 0.9)
+            uncertain_thresh = max(class_thresh * UNCERTAIN_THRESH_MULTIPLIER, effective_min)
+
+            if conf >= class_thresh:
+                detection_status = 'confirmed'
+            elif conf >= uncertain_thresh:
+                detection_status = 'uncertain'
+            else:
+                continue  # Too low confidence, discard
 
             theta_raw = float(theta)
             _, _, w_n, h_n, theta_n = _normalize_xywhr(cx_p, cy_p, w, h, theta_raw)
@@ -168,7 +181,7 @@ def run_yolo_on_page(model, page_bgr: np.ndarray) -> List[dict]:
                 # Create temporary dict for debug (detection not fully built yet)
                 temp_det = {
                     "angle_raw": ang_deg_raw,
-                    "angle": math.degrees(float(theta_n)),  # ✓ Use normalized angle!
+                    "angle": math.degrees(float(theta_n)),  #  Use normalized angle!
                     "name": name
                 }
                 _debug_angle("DETECTION", temp_det, category, 
@@ -193,7 +206,8 @@ def run_yolo_on_page(model, page_bgr: np.ndarray) -> List[dict]:
                 obb_cx=cx_p, obb_cy=cy_p, obb_w=w_eff, obb_h=h_eff,
                 angle=math.degrees(float(theta_n)),
                 angle_raw=math.degrees(theta_raw),
-                poly=poly
+                poly=poly,
+                detection_status=detection_status  # 'confirmed' or 'uncertain'
             ))
 
     final: List[dict] = []
@@ -205,7 +219,7 @@ def run_yolo_on_page(model, page_bgr: np.ndarray) -> List[dict]:
         boxes = [(d["x1"], d["y1"], d["x2"], d["y2"]) for d in ss]
         scores = [d["conf"] for d in ss]
         
-        # ✅ Use class-specific NMS threshold
+        #  Use class-specific NMS threshold
         nms_thr = NMS_THRESHOLDS.get(name, NMS_THRESHOLDS.get("default", 0.5))
         keep = nms(boxes, scores, thr=nms_thr)
 
@@ -236,6 +250,7 @@ def run_combined_detection(model, page_bgr: np.ndarray, detect_custom: bool = Tr
     # Mark all YOLO detections
     for det in yolo_dets:
         det['is_custom_symbol'] = False
+        det['is_new_symbol'] = False  # Alias for consistency
         det['detection_source'] = 'YOLO'
 
     if not detect_custom:
@@ -378,6 +393,7 @@ def _run_custom_detection_on_tiles(detector, page_bgr: np.ndarray, yolo_dets: Li
                     'cy': cy,
                     'angle': result.angle,
                     'is_custom_symbol': True,
+                    'is_new_symbol': True,  # Alias for consistency
                     'detection_source': 'CUSTOM',
                     'detection_method': result.method,
                 }
@@ -404,6 +420,7 @@ def _run_custom_detection_on_tiles(detector, page_bgr: np.ndarray, yolo_dets: Li
                 det['cx'] = cx
                 det['cy'] = cy
                 det['is_custom_symbol'] = True
+                det['is_new_symbol'] = True  # Alias for consistency
                 det['detection_source'] = 'CUSTOM'
                 tile_dets.append(det)
 

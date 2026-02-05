@@ -69,11 +69,11 @@ class DataValidator:
     def check_missing_required_fields(self):
         """
         Check for missing required fields
-        ✅ UPDATED: Removed coord_text from coordinate required fields
+         UPDATED: Removed coord_text from coordinate required fields
         """
         required_by_class = {
             'signal': ['anchor_text', 'page'],
-            'coordinate': ['page'],  # ✅ REMOVED 'coord_text' and 'coord_value'
+            'coordinate': ['page'],  #  REMOVED 'coord_text' and 'coord_value'
             'gks_gesteuert': ['anchor_text', 'page'],
             'gks_festkodiert': ['anchor_text', 'page'],
         }
@@ -112,7 +112,7 @@ class DataValidator:
     def check_coordinate_format(self):
         """
         Validate coordinate text format with STRICT rules:
-        ✅ UPDATED: 
+         UPDATED: 
         - Allows brackets and uppercase letters (e.g., "0.0734(Gl.112)")
         - Allows lowercase 'l' in "Gl" pattern (e.g., "0.0734(Gl.112)" with lowercase l)
         - ERROR if OTHER lowercase letters found
@@ -126,7 +126,7 @@ class DataValidator:
             if not coord_text:
                 continue  # Empty is OK (not required field anymore)
             
-            # ✅ CHECK 1: No lowercase letters allowed (EXCEPT 'l' in "Gl" pattern)
+            #  CHECK 1: No lowercase letters allowed (EXCEPT 'l' in "Gl" pattern)
             # First, temporarily replace valid "Gl" patterns to avoid false positives
             temp_text = coord_text
             
@@ -153,7 +153,7 @@ class DataValidator:
                 ))
                 continue  # Skip further checks for this coordinate
             
-            # ✅ CHECK 2: Extract numeric part (before any brackets)
+            #  CHECK 2: Extract numeric part (before any brackets)
             # Pattern: -?digits.digits (before any brackets or letters)
             numeric_part_match = re.match(r'^(-?\d+[.,]\d+)', coord_text)
             
@@ -168,7 +168,7 @@ class DataValidator:
             
             numeric_part = numeric_part_match.group(1)
             
-            # ✅ CHECK 3: No letters between digits in numeric part
+            #  CHECK 3: No letters between digits in numeric part
             # After removing the decimal separator, there should be only digits (and optional minus)
             numeric_clean = numeric_part.replace('.', '').replace(',', '').replace('-', '')
             
@@ -187,7 +187,7 @@ class DataValidator:
                 ))
                 continue
             
-            # ✅ CHECK 4: Validate bracket part (if present)
+            #  CHECK 4: Validate bracket part (if present)
             # Pattern: (Gl.XXX) or (GI.XXX) or similar
             bracket_part = coord_text[len(numeric_part):].strip()
             
@@ -204,7 +204,7 @@ class DataValidator:
                     # Check content inside brackets
                     inside_brackets = bracket_part[1:-1]  # Remove ( and )
                     
-                    # ✅ UPDATED: Allow uppercase letters, digits, dots, slashes, hyphens
+                    #  UPDATED: Allow uppercase letters, digits, dots, slashes, hyphens
                     # AND lowercase 'l' (for "Gl" pattern)
                     # Pattern: Should match things like "Gl.112", "GI.13", "PF13", etc.
                     
@@ -244,20 +244,20 @@ class DataValidator:
                                 }
                             ))
             
-            # ✅ ALL CHECKS PASSED - This is a valid coordinate format
+            #  ALL CHECKS PASSED - This is a valid coordinate format
             # (No warning/error added)
 
     def check_coordinate_values(self):
         """
         Check coordinate values for plausibility
-        ✅ UPDATED: Removed warning for unparseable coord_text
+         UPDATED: Removed warning for unparseable coord_text
         """
         coords = self.df[self.df['cls'] == 'coordinate']
         
         for _, row in coords.iterrows():
             coord_val = row.get('coord_value')
             
-            # ✅ REMOVED: Warning for missing coord_value when coord_text exists
+            #  REMOVED: Warning for missing coord_value when coord_text exists
             # This is now silently accepted (parsing failures are OK)
             
             if pd.isna(coord_val):
@@ -295,7 +295,7 @@ class DataValidator:
     def check_signal_duplicates(self):
         """
         Check for duplicate signal names and validate their consistency
-        ✅ NEW: Validates that duplicate signals have:
+         NEW: Validates that duplicate signals have:
         - Same Fahrtrichtung across all instances
         - Same coordinate across all instances
         - Warns if any instance is missing coordinate or Fahrtrichtung
@@ -345,17 +345,17 @@ class DataValidator:
                 # Multiple instances - check for consistency
                 row_ids = group['row_id'].tolist()
                 
-                # ✅ CHECK 1: Collect all coordinates
+                #  CHECK 1: Collect all coordinates
                 coords = group['coord_text'].dropna()
                 coords = coords[coords != '']  # Remove empty strings
                 unique_coords = coords.unique()
                 
-                # ✅ CHECK 2: Collect all Fahrtrichtung values
+                #  CHECK 2: Collect all Fahrtrichtung values
                 fahrtrichtungen = group['fahrtrichtung'].dropna()
                 fahrtrichtungen = fahrtrichtungen[fahrtrichtungen != '']
                 unique_fahrtrichtungen = fahrtrichtungen.unique()
                 
-                # ✅ ERROR: Different coordinates for same signal
+                #  ERROR: Different coordinates for same signal
                 if len(unique_coords) > 1:
                     coord_details = []
                     for _, row in group.iterrows():
@@ -377,7 +377,7 @@ class DataValidator:
                         }
                     ))
                 
-                # ✅ ERROR: Different Fahrtrichtung for same signal
+                #  ERROR: Different Fahrtrichtung for same signal
                 if len(unique_fahrtrichtungen) > 1:
                     fahrt_details = []
                     for _, row in group.iterrows():
@@ -399,7 +399,7 @@ class DataValidator:
                         }
                     ))
                 
-                # ✅ WARNING: Some instances missing coordinate
+                #  WARNING: Some instances missing coordinate
                 missing_coord_count = group['coord_text'].isna().sum() + (group['coord_text'] == '').sum()
                 
                 if missing_coord_count > 0 and missing_coord_count < instances:
@@ -437,7 +437,7 @@ class DataValidator:
                         }
                     ))
                 
-                # ✅ WARNING: Some instances missing Fahrtrichtung
+                #  WARNING: Some instances missing Fahrtrichtung
                 missing_fahrt_count = group['fahrtrichtung'].isna().sum() + (group['fahrtrichtung'] == '').sum()
                 
                 if missing_fahrt_count > 0 and missing_fahrt_count < instances:

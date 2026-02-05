@@ -68,7 +68,7 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
         has_selection = len(selected) > 0
         
         # EDIT MENU
-        edit_menu = m.addMenu("✏️ Bearbeiten")
+        edit_menu = m.addMenu(" Bearbeiten")
         
         act_copy = edit_menu.addAction("Kopieren (Ctrl+C)")
         act_copy.setEnabled(has_selection)
@@ -93,7 +93,7 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
         act_find.triggered.connect(self.find_replace)
         
         # INSERT MENU
-        insert_menu = m.addMenu("➕ Einfügen")
+        insert_menu = m.addMenu(" Einfügen")
         
         act_add_row = insert_menu.addAction("Zeile hinzufügen...")
         act_add_row.triggered.connect(self.add_row)
@@ -102,7 +102,7 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
         act_add_col.triggered.connect(self.add_column)
         
         # DELETE MENU
-        delete_menu = m.addMenu("🗑️ Löschen")
+        delete_menu = m.addMenu(" Löschen")
         
         act_del_rows = delete_menu.addAction("Ausgewählte Zeilen löschen")
         act_del_rows.setEnabled(has_selection)
@@ -118,7 +118,7 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
         act_clear_cells.triggered.connect(self.clear_cells)
         
         # COLUMN MENU
-        column_menu = m.addMenu("📊 Spalten")
+        column_menu = m.addMenu(" Spalten")
         
         act_edit_headers = column_menu.addAction("Überschriften bearbeiten...")
         act_edit_headers.triggered.connect(self.edit_headers)
@@ -132,7 +132,7 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
         act_resize.triggered.connect(self.resize_columns_to_contents)
         
         # DATA MENU
-        data_menu = m.addMenu("📈 Daten")
+        data_menu = m.addMenu(" Daten")
         
         act_sort = data_menu.addAction("Sortieren...")
         act_sort.triggered.connect(self.show_sort_dialog)
@@ -1083,8 +1083,13 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
         
         # Flash sequence
         def restore_bg():
-            for col in range(self.columnCount()):
-                item.setBackground(col, original_bg)
+            try:
+                # Check if item still exists (may have been deleted on page change)
+                for col in range(self.columnCount()):
+                    item.setBackground(col, original_bg)
+            except RuntimeError:
+                # Item was deleted before timer fired - ignore
+                pass
         
         # Set flash color
         for col in range(self.columnCount()):

@@ -3,7 +3,7 @@ import math
 import re
 import pandas as pd
 import numpy as np
-from config import LINK_RULES, COORD_RE, DEBUG_ANGLE_ROUTING
+from config import LINK_RULES, COORD_RE, DEBUG_ANGLE_ROUTING, DEBUG_LINKING, DEBUG_TRACK
 from utils.helpers import _is_cardinal,_norm_angle,_is_angular,ANGLE_TOL,_is_near,_debug_angle
 # ====================================================================================
 # NAME WINDOWS + LINKING (unchanged from Code 1)
@@ -67,15 +67,17 @@ def find_nearest_track_perpendicular(signal_point, track_skeleton, signal_angle_
         dx_below = -dx_above
         dy_below = -dy_above
         
-        print(f"      🔄 Angular signal: perpendicular angle = {perpendicular_angle:.1f}°")
+        if DEBUG_TRACK:
+            print(f" Angular signal: perpendicular angle = {perpendicular_angle:.1f}°")
     else:
         # For horizontal/vertical signals: simple vertical direction
         dx_above = 0
         dy_above = -1  # Up
         dx_below = 0
         dy_below = 1   # Down
-        
-        print(f"      ⬆️ Horizontal/Vertical signal: vertical rays (up/down)")
+
+        if DEBUG_TRACK:
+            print(f"Horizontal/Vertical signal: vertical rays (up/down)")
     
     # ============================================================================
     # Calculate smart search distances
@@ -104,7 +106,7 @@ def find_nearest_track_perpendicular(signal_point, track_skeleton, signal_angle_
     max_dist = max(max_distance_above, max_distance_below)
     
     for dist in range(1, max_dist + 1):
-        # ✅ Check "above" direction (perpendicular to signal)
+        #  Check "above" direction (perpendicular to signal)
         if distance_above is None and dist <= max_distance_above:
             check_x = int(x + dist * dx_above)
             check_y = int(y + dist * dy_above)
@@ -118,9 +120,9 @@ def find_nearest_track_perpendicular(signal_point, track_skeleton, signal_angle_
                 
                 # Check if track exists in window
                 if np.any(track_skeleton[y_min:y_max, x_min:x_max] > 0):
-                    distance_above = dist  # ✅ STOP - track found!
+                    distance_above = dist  #  STOP - track found!
         
-        # ✅ Check "below" direction (perpendicular to signal)
+        #  Check "below" direction (perpendicular to signal)
         if distance_below is None and dist <= max_distance_below:
             check_x = int(x + dist * dx_below)
             check_y = int(y + dist * dy_below)
@@ -134,9 +136,9 @@ def find_nearest_track_perpendicular(signal_point, track_skeleton, signal_angle_
                 
                 # Check if track exists in window
                 if np.any(track_skeleton[y_min:y_max, x_min:x_max] > 0):
-                    distance_below = dist  # ✅ STOP - track found!
+                    distance_below = dist  #  STOP - track found!
         
-        # ✅ If BOTH found, stop searching entirely
+        #  If BOTH found, stop searching entirely
         if distance_above is not None and distance_below is not None:
             break
     
@@ -308,10 +310,10 @@ def _get_oriented_distance(anchor, coord, angle_raw):
     dx_global = coord["cx"] - anchor["cx"]
     dy_global = coord["cy"] - anchor["cy"]
     
-    # ✅ Convert RAW angle to radians for rotation matrix
+    #  Convert RAW angle to radians for rotation matrix
     angle_rad = math.radians(angle_raw)
     
-    # ✅ Rotate global vector to anchor's local coordinate system
+    #  Rotate global vector to anchor's local coordinate system
     # Note: We use negative angle to rotate TO local coords (inverse rotation)
     dx_local = dx_global * math.cos(-angle_rad) - dy_global * math.sin(-angle_rad)
     dy_local = dx_global * math.sin(-angle_rad) + dy_global * math.cos(-angle_rad)
@@ -335,10 +337,10 @@ def _check_direction(anchor, coord, mode, is_angular, angle_raw, tilted_ok):
     
     # For directional modes (below, above, right_or_below)
     if is_angular and not tilted_ok:
-        # ✅ Use oriented direction for angular boxes (with RAW angle)
+        #  Use oriented direction for angular boxes (with RAW angle)
         return _check_oriented_direction(anchor, coord, mode, angle_raw)
     else:
-        # ✅ Use axis-aligned direction for cardinal boxes
+        #  Use axis-aligned direction for cardinal boxes
         return _check_axis_aligned_direction(anchor, coord, mode)
 
 
@@ -355,7 +357,7 @@ def _check_oriented_direction(anchor, coord, mode, angle_raw):
     dx_global = coord["cx"] - anchor["cx"]
     dy_global = coord["cy"] - anchor["cy"]
     
-    # ✅ Convert to anchor's local coordinate system using RAW angle
+    #  Convert to anchor's local coordinate system using RAW angle
     angle_rad = math.radians(angle_raw)
     
     # Transform to local coordinates (inverse rotation)
@@ -363,7 +365,7 @@ def _check_oriented_direction(anchor, coord, mode, angle_raw):
     dy_local = dx_global * math.sin(-angle_rad) + dy_global * math.cos(-angle_rad)
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"      Oriented: dx_local={dx_local:.1f}, dy_local={dy_local:.1f}")
+        print(f"Oriented: dx_local={dx_local:.1f}, dy_local={dy_local:.1f}")
     
     if mode == "below":
         # Coordinate should be "below" in anchor's local coordinate system
@@ -393,7 +395,7 @@ def _check_axis_aligned_direction(anchor, coord, mode):
         return coord["cy"] < anchor["cy"]
     
     elif mode == "right_or_below":
-        # ✅ FIXED: More lenient "right" check
+        #  FIXED: More lenient "right" check
         # Consider "right" if coordinate's LEFT edge is at or past anchor's RIGHT edge
         # OR if coordinate's right edge overlaps with anchor's right half
         # This handles side-by-side placements like "PB | 3,6223"
@@ -402,7 +404,7 @@ def _check_axis_aligned_direction(anchor, coord, mode):
         is_below = coord["cy"] > anchor["cy"] + 0.3 * anchor["h"]  # Must be clearly below
         
         if DEBUG_ANGLE_ROUTING:
-            print(f"      right_or_below: is_to_right={is_to_right} "
+            print(f"right_or_below: is_to_right={is_to_right} "
                   f"(coord_x1={coord['x1']:.0f} vs anchor_x2-margin={anchor['x2'] - 0.3*anchor['w']:.0f}), "
                   f"is_below={is_below} (coord_cy={coord['cy']:.0f} vs anchor_cy+margin={anchor['cy']+0.3*anchor['h']:.0f})")
         
@@ -440,13 +442,13 @@ def link_anchor_to_coord(anchor, coords, learned_patterns=None):
     is_cardinal_box = _is_cardinal(anchor_angle_norm)
     is_angular = not is_cardinal_box
     
-    # ✅ ONLY print if DEBUG_ANGLE_ROUTING is True
+    #  ONLY print if DEBUG_ANGLE_ROUTING is True
     anchor_text = anchor.get("text", anchor.get("anchor_text", ""))
     if DEBUG_ANGLE_ROUTING:
-        print(f"\n🔗 LINKING {anchor['name'].upper()} '{anchor_text}': raw={anchor_angle_raw:.1f}° norm={anchor_angle_norm:.1f}° "
+        print(f"\n LINKING {(anchor.get('name') or '').upper()} '{anchor_text}': raw={anchor_angle_raw:.1f}° norm={anchor_angle_norm:.1f}° "
               f"cardinal={is_cardinal_box} mode={mode} dx_mult={dx_multiplier} dy_mult={dy_multiplier}")
-        print(f"   Anchor position: cx={anchor['cx']:.1f}, cy={anchor['cy']:.1f}")
-        print(f"   Searching in {len(coords)} coordinates...")
+        print(f"Anchor position: cx={anchor['cx']:.1f}, cy={anchor['cy']:.1f}")
+        print(f"Searching in {len(coords)} coordinates...")
     
     # Initialize with infinity for distance-based scoring
     best, best_score = None, (float('inf'), float('inf'), 0)
@@ -466,7 +468,7 @@ def link_anchor_to_coord(anchor, coords, learned_patterns=None):
             
             if DEBUG_ANGLE_ROUTING:
                 coord_text = c.get('text', c.get('coord_text', '?'))
-                print(f"   Coord '{coord_text}': oriented dx={dx:.1f} dy={dy:.1f} euclidean={dist_euclidean:.1f}")
+                print(f"Coord '{coord_text}': oriented dx={dx:.1f} dy={dy:.1f} euclidean={dist_euclidean:.1f}")
         else:
             # Axis-aligned
             dx = abs(c["cx"] - anchor["cx"])
@@ -475,13 +477,13 @@ def link_anchor_to_coord(anchor, coords, learned_patterns=None):
             
             if DEBUG_ANGLE_ROUTING:
                 coord_text = c.get('text', c.get('coord_text', '?'))
-                print(f"   Coord '{coord_text}': axis-aligned dx={dx:.1f} dy={dy:.1f} euclidean={dist_euclidean:.1f}")
-                print(f"      Coord position: cx={c['cx']:.1f}, cy={c['cy']:.1f}")
+                print(f"Coord '{coord_text}': axis-aligned dx={dx:.1f} dy={dy:.1f} euclidean={dist_euclidean:.1f}")
+                print(f"Coord position: cx={c['cx']:.1f}, cy={c['cy']:.1f}")
         
         # Vertical distance check
         if dy > dy_max:
             if DEBUG_ANGLE_ROUTING:
-                print(f"      → SKIP: dy={dy:.1f} > dy_max={dy_max:.1f}")
+                print(f"→ SKIP: dy={dy:.1f} > dy_max={dy_max:.1f}")
             continue
         
         # Directional check
@@ -489,7 +491,7 @@ def link_anchor_to_coord(anchor, coords, learned_patterns=None):
         
         if not ok_dir:
             if DEBUG_ANGLE_ROUTING:
-                print(f"      → SKIP: wrong direction (mode={mode})")
+                print(f"→ SKIP: wrong direction (mode={mode})")
             continue
         
         # Horizontal tolerance
@@ -506,11 +508,11 @@ def link_anchor_to_coord(anchor, coords, learned_patterns=None):
             if coord_is_left:
                 dx_max *= 1.3
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"      → LEFT-SIDE BONUS: dx_max={dx_max:.1f}")
+                    print(f"→ LEFT-SIDE BONUS: dx_max={dx_max:.1f}")
         
         if dx > dx_max:
             if DEBUG_ANGLE_ROUTING:
-                print(f"      → SKIP: dx={dx:.1f} > dx_max={dx_max:.1f}")
+                print(f"→ SKIP: dx={dx:.1f} > dx_max={dx_max:.1f}")
             continue
         
         # Calculate overlap
@@ -526,28 +528,28 @@ def link_anchor_to_coord(anchor, coords, learned_patterns=None):
                 score = (dy, dx, -xo)
         
         if DEBUG_ANGLE_ROUTING:
-            print(f"      → CANDIDATE: score={score} xo={xo:.1f}")
+            print(f"→ CANDIDATE: score={score} xo={xo:.1f}")
         
         if score < best_score:
             best_score, best = score, c
             if DEBUG_ANGLE_ROUTING:
-                print(f"      → NEW BEST!")
+                print(f"→ NEW BEST!")
     
-    # ✅ FINAL DEBUG - only if DEBUG_ANGLE_ROUTING
+    #  FINAL DEBUG - only if DEBUG_ANGLE_ROUTING
     if DEBUG_ANGLE_ROUTING:
         if best:
-            print(f"   ✅ LINKED: {best.get('text', best.get('coord_text', '?'))}")
+            print(f"LINKED: {best.get('text', best.get('coord_text', '?'))}")
         else:
-            print(f"   ❌ NO MATCH")
+            print(f"NO MATCH")
     
     # Adaptive fallback
     if best is None and learned_patterns and anchor["name"] in learned_patterns:
         patterns = learned_patterns[anchor["name"]]
         
         if len(patterns) >= 2:
-            # ✅ ONLY print if DEBUG_ANGLE_ROUTING
+            #  ONLY print if DEBUG_ANGLE_ROUTING
             if DEBUG_ANGLE_ROUTING:
-                print(f"\n🔄 ADAPTIVE SEARCH for {anchor['name']}: {len(patterns)} patterns learned")
+                print(f"\n ADAPTIVE SEARCH for {anchor['name']}: {len(patterns)} patterns learned")
             
             avg_dx = sum(p[0] for p in patterns) / len(patterns)
             avg_dy = sum(p[1] for p in patterns) / len(patterns)
@@ -555,7 +557,7 @@ def link_anchor_to_coord(anchor, coords, learned_patterns=None):
             std_dy = (sum((p[1] - avg_dy)**2 for p in patterns) / len(patterns))**0.5 if len(patterns) > 1 else 50
             
             if DEBUG_ANGLE_ROUTING:
-                print(f"   Pattern: dx={avg_dx:.1f}±{std_dx:.1f}, dy={avg_dy:.1f}±{std_dy:.1f}")
+                print(f"Pattern: dx={avg_dx:.1f}±{std_dx:.1f}, dy={avg_dy:.1f}±{std_dy:.1f}")
             
             search_dx = max(3 * std_dx, 150)
             search_dy = max(3 * std_dy, 80)
@@ -571,21 +573,21 @@ def link_anchor_to_coord(anchor, coords, learned_patterns=None):
                     
                     if DEBUG_ANGLE_ROUTING:
                         coord_text = c.get('text', c.get('coord_text', '?'))
-                        print(f"   Adaptive candidate: '{coord_text}' offset=({dx_offset:.1f}, {dy_offset:.1f}) dist={pattern_distance:.1f}")
+                        print(f"Adaptive candidate: '{coord_text}' offset=({dx_offset:.1f}, {dy_offset:.1f}) dist={pattern_distance:.1f}")
             
             if adaptive_candidates:
                 adaptive_candidates.sort(key=lambda x: x[0])
                 best = adaptive_candidates[0][1]
                 if DEBUG_ANGLE_ROUTING:
                     best_text = best.get('text', best.get('coord_text', '?'))
-                    print(f"   ✅ ADAPTIVE MATCH: '{best_text}'")
+                    print(f"ADAPTIVE MATCH: '{best_text}'")
     
     return best
 
 def link_haltetafel_to_gks(haltetafel_det, gks_dets, coords, gks_coord_map,
-                           max_distance=250,  # ✅ Increased from 150
-                           dy_tolerance=100,   # ✅ Increased from 80
-                           dx_tolerance=300):  # ✅ Increased from 100
+                           max_distance=250,  #  Increased from 150
+                           dy_tolerance=100,   #  Increased from 80
+                           dx_tolerance=300):  #  Increased from 100
     """
     Link haltetafel to GKS box's coordinate if:
     1. Haltetafel is spatially close to GKS (touching/overlapping)
@@ -620,7 +622,7 @@ def link_haltetafel_to_gks(haltetafel_det, gks_dets, coords, gks_coord_map,
         distance = (dx**2 + dy**2) ** 0.5
         
         if DEBUG_ANGLE_ROUTING:
-            print(f"      GKS at ({gks_cx:.0f}, {gks_cy:.0f}): dx={dx:.0f}, dy={dy:.0f}, dist={distance:.0f}")
+            print(f"GKS at ({gks_cx:.0f}, {gks_cy:.0f}): dx={dx:.0f}, dy={dy:.0f}, dist={distance:.0f}")
         
         # Check if haltetafel is touching/near GKS
         if distance < max_distance and dx < dx_tolerance and dy < dy_tolerance:
@@ -630,7 +632,7 @@ def link_haltetafel_to_gks(haltetafel_det, gks_dets, coords, gks_coord_map,
     
     if not nearest_gks:
         if DEBUG_ANGLE_ROUTING:
-            print(f"      → No nearby GKS found")
+            print(f"→ No nearby GKS found")
         return None
     
     # Get GKS's linked coordinate from the map
@@ -641,23 +643,23 @@ def link_haltetafel_to_gks(haltetafel_det, gks_dets, coords, gks_coord_map,
         gks_text = nearest_gks.get('text', '?')
         if gks_coord:
             coord_text = gks_coord.get('text', '?')
-            print(f"      ✅ Found GKS '{gks_text}' with coordinate '{coord_text}'")
+            print(f"Found GKS '{gks_text}' with coordinate '{coord_text}'")
         else:
-            print(f"      ⚠️ Found GKS '{gks_text}' but it has NO coordinate")
+            print(f"Found GKS '{gks_text}' but it has NO coordinate")
     
     return gks_coord
 
 def detect_fahrtrichtung(signal_det, gks_dets, 
                         track_skeleton=None,
-                        track_bounds=None,  # ✅ NEW: Track layout bounds
+                        track_bounds=None,  #  NEW: Track layout bounds
                         max_distance=250,
                         dy_min=30,             
                         dy_max=200,
                         dx_tolerance_left=120,
                         dx_tolerance_right=120,
                         angle_tolerance=20,
-                        track_search_radius=500,  # ✅ KEPT: Not used in new method, but kept for compatibility
-                        track_sample_distance=200):  # ✅ KEPT: Not used in new method, but kept for compatibility
+                        track_search_radius=500,  #  KEPT: Not used in new method, but kept for compatibility
+                        track_sample_distance=200):  #  KEPT: Not used in new method, but kept for compatibility
     """
     Determine Fahrtrichtung (A or B) based on GKS box position relative to signal.
     
@@ -686,7 +688,7 @@ def detect_fahrtrichtung(signal_det, gks_dets,
     # 1. V-signals (Vorsignale) - e.g., V1, V2, VA1
     # 2. Single letter + 3+ digits - e.g., A123, U456, B789
     #    (detection parameters don't work for these, coordinate linking is sufficient)
-    signal_text = signal_det.get("text", "").upper().strip()
+    signal_text = (signal_det.get("text") or "").upper().strip()
 
     # Check V-signal
     if signal_text.startswith("V"):
@@ -706,14 +708,19 @@ def detect_fahrtrichtung(signal_det, gks_dets,
     if signal_cx is None or signal_cy is None:
         signal_cx = (signal_det["x1"] + signal_det["x2"]) / 2
         signal_cy = (signal_det["y1"] + signal_det["y2"]) / 2
-        print(f"   ⚠️ Using bounding box center (OBB center not available)")
-    
+        if DEBUG_LINKING:
+            print(f"Using bounding box center (OBB center not available)")
+
+    # DEBUG: Show signal center coordinates
+    if DEBUG_LINKING:
+        print(f"DEBUG SIGNAL '{signal_text}': center=({signal_cx:.0f}, {signal_cy:.0f})")
+
     # Get signal angles
     signal_angle = float(signal_det.get("angle", 0.0))  # NORMALIZED
     signal_angle_raw = float(signal_det.get("angle_raw", signal_angle))  # RAW
     
     # ============================================================================
-    # ✅ ANGLE CORRECTION: Use OBB dimensions to detect horizontal text with 90° angle
+    #  ANGLE CORRECTION: Use OBB dimensions to detect horizontal text with 90° angle
     # ============================================================================
     obb_w = float(signal_det.get("obb_w", 0))
     obb_h = float(signal_det.get("obb_h", 0))
@@ -724,16 +731,20 @@ def detect_fahrtrichtung(signal_det, gks_dets,
     
     # If shape says horizontal but angle says vertical (85-95°), correct angle
     if is_horizontal_by_shape and 75.0 <= abs(signal_angle_raw) <= 105.0:
-        print(f"   ⚠️ ANGLE CORRECTION: Shape={obb_w:.0f}x{obb_h:.0f} (horizontal) but angle={signal_angle_raw:.1f}° (vertical)")
+        if DEBUG_LINKING:
+            print(f"ANGLE CORRECTION: Shape={obb_w:.0f}x{obb_h:.0f} (horizontal) but angle={signal_angle_raw:.1f}° (vertical)")
         signal_angle_raw_corrected = signal_angle_raw - 90.0
-        print(f"   ⚠️ Correcting angle: {signal_angle_raw:.1f}° → {signal_angle_raw_corrected:.1f}°")
+        if DEBUG_LINKING:
+            print(f"Correcting angle: {signal_angle_raw:.1f}° → {signal_angle_raw_corrected:.1f}°")
         signal_angle_raw = signal_angle_raw_corrected
-    
+
     # If shape says vertical but angle says horizontal (near 0° or 180°), correct angle
     elif is_vertical_by_shape and (abs(signal_angle_raw) < 15.0 or abs(signal_angle_raw - 180.0) < 15.0):
-        print(f"   ⚠️ ANGLE CORRECTION: Shape={obb_w:.0f}x{obb_h:.0f} (vertical) but angle={signal_angle_raw:.1f}° (horizontal)")
+        if DEBUG_LINKING:
+            print(f"ANGLE CORRECTION: Shape={obb_w:.0f}x{obb_h:.0f} (vertical) but angle={signal_angle_raw:.1f}° (horizontal)")
         signal_angle_raw_corrected = signal_angle_raw + 90.0
-        print(f"   ⚠️ Correcting angle: {signal_angle_raw:.1f}° → {signal_angle_raw_corrected:.1f}°")
+        if DEBUG_LINKING:
+            print(f"Correcting angle: {signal_angle_raw:.1f}° → {signal_angle_raw_corrected:.1f}°")
         signal_angle_raw = signal_angle_raw_corrected
     
     # ============================================================================
@@ -768,7 +779,12 @@ def detect_fahrtrichtung(signal_det, gks_dets,
         dx = gks_cx - signal_cx
         dy = gks_cy - signal_cy
         distance = (dx**2 + dy**2) ** 0.5
-        
+
+        # DEBUG: Show all GKS within 500px
+        gks_text = gks.get('text', '?')
+        if distance <= 500 and DEBUG_LINKING:
+            print(f"  GKS '{gks_text}': pos=({gks_cx:.0f},{gks_cy:.0f}), dx={dx:.1f}, dy={dy:.1f}, dist={distance:.1f}")
+
         if is_angular_signal:
             gks_angle = float(gks.get("angle", 0.0))
             angle_diff = abs(signal_angle - gks_angle)
@@ -777,7 +793,8 @@ def detect_fahrtrichtung(signal_det, gks_dets,
                 angle_diff = 360 - angle_diff
             
             if angle_diff > angle_tolerance:
-                print(f"   [Skip GKS] Angle mismatch: signal={signal_angle:.1f}°, gks={gks_angle:.1f}°, diff={angle_diff:.1f}°")
+                if DEBUG_LINKING:
+                    print(f"[Skip GKS] Angle mismatch: signal={signal_angle:.1f}°, gks={gks_angle:.1f}°, diff={angle_diff:.1f}°")
                 continue
         
         if distance < min_distance and distance <= max_distance:
@@ -799,67 +816,79 @@ def detect_fahrtrichtung(signal_det, gks_dets,
         gks_angle = float(nearest_gks['angle'])
         
         angle_info = f", signal_θ={signal_angle:.1f}°, gks_θ={gks_angle:.1f}°" if is_angular_signal else ""
-        print(f"   [{orientation}] Signal '{signal_text}' → GKS: dx={dx:.1f}px, dy={dy:.1f}px, dist={nearest_gks['distance']:.1f}px{angle_info}")
+        gks_selected_text = nearest_gks['det'].get('text', '?')
+        if DEBUG_LINKING:
+            print(f"[{orientation}] Signal '{signal_text}' → SELECTED GKS '{gks_selected_text}': dx={dx:.1f}px, dy={dy:.1f}px, dist={nearest_gks['distance']:.1f}px{angle_info}")
         
         if is_angular_signal:
             angle_rad = math.radians(signal_angle_raw)
             
             dx_local = dx * math.cos(-angle_rad) - dy * math.sin(-angle_rad)
             dy_local = dx * math.sin(-angle_rad) + dy * math.cos(-angle_rad)
-            
-            print(f"       Rotated coords: dx_local={dx_local:.1f}px, dy_local={dy_local:.1f}px")
-            
+
+            if DEBUG_LINKING:
+                print(f"Rotated coords: dx_local={dx_local:.1f}px, dy_local={dy_local:.1f}px")
+
             if dy_min < dy_local < dy_max and -dx_tolerance_left < dx_local < dx_tolerance_right:
-                print(f"   → Fahrtrichtung: B (GKS below in rotated frame)")
+                if DEBUG_LINKING:
+                    print(f"→ Fahrtrichtung: B (GKS below in rotated frame)")
                 return "B"
-            
+
             if -dy_max < dy_local < -dy_min and -dx_tolerance_right < dx_local < dx_tolerance_left:
-                print(f"   → Fahrtrichtung: A (GKS above in rotated frame)")
+                if DEBUG_LINKING:
+                    print(f"→ Fahrtrichtung: A (GKS above in rotated frame)")
                 return "A"
-        
+
         elif is_vertical_signal:
-            # ✅ For vertical text, swap dx/dy logic
+            #  For vertical text, swap dx/dy logic
             # "Below" in vertical text = to the RIGHT (+dx)
             # "Above" in vertical text = to the LEFT (-dx)
             if dy_min < dx < dy_max and -dx_tolerance_left < dy < dx_tolerance_right:
-                print(f"   → Fahrtrichtung: B (GKS to the right)")
+                if DEBUG_LINKING:
+                    print(f"→ Fahrtrichtung: B (GKS to the right)")
                 return "B"
-            
+
             if -dy_max < dx < -dy_min and -dx_tolerance_right < dy < dx_tolerance_left:
-                print(f"   → Fahrtrichtung: A (GKS to the left)")
+                if DEBUG_LINKING:
+                    print(f"→ Fahrtrichtung: A (GKS to the left)")
                 return "A"
-        
+
         else:
             # Horizontal signals
             if dy_min < dy < dy_max and -dx_tolerance_left < dx < dx_tolerance_right:
-                print(f"   → Fahrtrichtung: B (GKS below)")
+                if DEBUG_LINKING:
+                    print(f"→ Fahrtrichtung: B (GKS below)")
                 return "B"
-            
+
             if -dy_max < dy < -dy_min and -dx_tolerance_right < dx < dx_tolerance_left:
-                print(f"   → Fahrtrichtung: A (GKS above)")
+                if DEBUG_LINKING:
+                    print(f"→ Fahrtrichtung: A (GKS above)")
                 return "A"
-        
-        print(f"   → GKS found but outside range, trying track fallback...")
+
+        if DEBUG_LINKING:
+            print(f"→ GKS found but outside range, trying track fallback...")
     
 # ============================================================================
     # STAGE 2: TRACK FALLBACK (DYNAMIC PERPENDICULAR RAY-CASTING)
     # ============================================================================
     
     if track_skeleton is None:
-        print(f"   [{orientation}] Signal '{signal_text}' → No GKS, no track skeleton → Undetermined")
+        if DEBUG_TRACK:
+            print(f"[{orientation}] Signal '{signal_text}' → No GKS, no track skeleton → Undetermined")
         return None
-    
-    print(f"\n   🛤️  TRACK FALLBACK for Signal '{signal_text}'")
-    print(f"      Signal position: ({signal_cx:.0f}, {signal_cy:.0f})")
-    print(f"      Signal angle: raw={signal_angle_raw:.1f}°, norm={signal_angle:.1f}°")
-    print(f"      Signal orientation: {orientation} (shape: {obb_w:.0f}x{obb_h:.0f})")
-    
+
+    if DEBUG_TRACK:
+        print(f"\n     TRACK FALLBACK for Signal '{signal_text}'")
+        print(f"Signal position: ({signal_cx:.0f}, {signal_cy:.0f})")
+        print(f"Signal angle: raw={signal_angle_raw:.1f}°, norm={signal_angle:.1f}°")
+        print(f"Signal orientation: {orientation} (shape: {obb_w:.0f}x{obb_h:.0f})")
+
     # Get track bounds for smart distance calculation
-    if track_bounds:
-        print(f"      Track layout bounds: Y=[{track_bounds['y_min']}, {track_bounds['y_max']}] (height={track_bounds['height']}px)")
+    if track_bounds and DEBUG_TRACK:
+        print(f"Track layout bounds: Y=[{track_bounds['y_min']}, {track_bounds['y_max']}] (height={track_bounds['height']}px)")
     
     # ============================================================================
-    # ✅ RE-DETERMINE is_angular AFTER angle correction
+    #  RE-DETERMINE is_angular AFTER angle correction
     # The angle correction above may have changed the signal from "angular" to "horizontal"
     # ============================================================================
     
@@ -872,11 +901,11 @@ def detect_fahrtrichtung(signal_det, gks_dets,
     
     orientation_corrected = "HORIZONTAL" if is_horizontal_corrected else ("VERTICAL" if is_vertical_corrected else "ANGULAR")
     
-    if orientation_corrected != orientation:
-        print(f"      ⚠️ Orientation changed after angle correction: {orientation} → {orientation_corrected}")
-        print(f"      Using corrected orientation for track detection")
+    if orientation_corrected != orientation and DEBUG_TRACK:
+        print(f"Orientation changed after angle correction: {orientation} → {orientation_corrected}")
+        print(f"Using corrected orientation for track detection")
     
-    # ✅ DYNAMIC PERPENDICULAR RAY-CASTING
+    #  DYNAMIC PERPENDICULAR RAY-CASTING
     # - Horizontal/Vertical signals: Cast vertical rays (up/down)
     # - Angular signals: Cast rays perpendicular to signal angle
     signal_center = (int(signal_cx), int(signal_cy))
@@ -884,23 +913,24 @@ def detect_fahrtrichtung(signal_det, gks_dets,
     track_result = find_nearest_track_perpendicular(
         signal_center, 
         track_skeleton,
-        signal_angle_raw=signal_angle_raw,  # ✅ Use CORRECTED angle
+        signal_angle_raw=signal_angle_raw,  #  Use CORRECTED angle
         track_bounds=track_bounds,
         max_distance=1500,  # Safety limit
-        is_angular=is_angular_corrected  # ✅ Use CORRECTED orientation
+        is_angular=is_angular_corrected  #  Use CORRECTED orientation
     )
     
     track_above = track_result['track_above']
     track_below = track_result['track_below']
     
-    # 📊 Enhanced logging
-    print(f"      🔍 Search range: {track_result['max_distance_above']}px above, {track_result['max_distance_below']}px below")
-    print(f"      Track above: {track_above} (distance: {track_result['distance_above']}px)")
-    print(f"      Track below: {track_below} (distance: {track_result['distance_below']}px)")
+    #  Enhanced logging
+    if DEBUG_TRACK:
+        print(f"Search range: {track_result['max_distance_above']}px above, {track_result['max_distance_below']}px below")
+        print(f"Track above: {track_above} (distance: {track_result['distance_above']}px)")
+        print(f"Track below: {track_below} (distance: {track_result['distance_below']}px)")
     
-    if track_result['hit_above_first'] is not None:
+    if track_result['hit_above_first'] is not None and DEBUG_TRACK:
         first_hit = "above" if track_result['hit_above_first'] else "below"
-        print(f"      🎯 First track hit: {first_hit}")
+        print(f" First track hit: {first_hit}")
     
     # ============================================================================
     # Determine Fahrtrichtung based on track position
@@ -908,7 +938,7 @@ def detect_fahrtrichtung(signal_det, gks_dets,
     # ============================================================================
 
     if is_angular_corrected:
-        # ✅ For angular signals: calculate track position in rotated frame
+        #  For angular signals: calculate track position in rotated frame
         
         # We need to find where the track actually is
         # Use the hit point from the ray-casting
@@ -957,10 +987,11 @@ def detect_fahrtrichtung(signal_det, gks_dets,
             track_x = signal_cx + distance * dx
             track_y = signal_cy + distance * dy
         else:
-            print(f"   → Fahrtrichtung: Undetermined (no track found)")
+            if DEBUG_TRACK:
+                print(f"→ Fahrtrichtung: Undetermined (no track found)")
             return None
-        
-        # ✅ Now convert track position to ROTATED coordinates (like GKS detection)
+
+        #  Now convert track position to ROTATED coordinates (like GKS detection)
         dx_global = track_x - signal_cx
         dy_global = track_y - signal_cy
         
@@ -968,38 +999,46 @@ def detect_fahrtrichtung(signal_det, gks_dets,
         dx_local = dx_global * math.cos(-angle_rad) - dy_global * math.sin(-angle_rad)
         dy_local = dx_global * math.sin(-angle_rad) + dy_global * math.cos(-angle_rad)
         
-        print(f"      Track in rotated coords: dx_local={dx_local:.1f}, dy_local={dy_local:.1f}")
-        
-        # ✅ Use SAME logic as GKS detection
+        if DEBUG_TRACK:
+            print(f"Track in rotated coords: dx_local={dx_local:.1f}, dy_local={dy_local:.1f}")
+
+        #  Use SAME logic as GKS detection
         if dy_local < 0:
             # Track is ABOVE in rotated frame → Fahrtrichtung A
-            print(f"   → Fahrtrichtung: A (track above in rotated frame)")
+            if DEBUG_TRACK:
+                print(f"→ Fahrtrichtung: A (track above in rotated frame)")
             return "A"
         else:
             # Track is BELOW in rotated frame → Fahrtrichtung B
-            print(f"   → Fahrtrichtung: B (track below in rotated frame)")
+            if DEBUG_TRACK:
+                print(f"→ Fahrtrichtung: B (track below in rotated frame)")
             return "B"
 
     else:
-        # ✅ For horizontal/vertical signals: simple global Y-axis
+        #  For horizontal/vertical signals: simple global Y-axis
         if track_above and not track_below:
-            print(f"   → Fahrtrichtung: A (track above signal)")
+            if DEBUG_TRACK:
+                print(f"→ Fahrtrichtung: A (track above signal)")
             return "A"
-        
+
         elif track_below and not track_above:
-            print(f"   → Fahrtrichtung: B (track below signal)")
+            if DEBUG_TRACK:
+                print(f"→ Fahrtrichtung: B (track below signal)")
             return "B"
-        
+
         elif track_above and track_below:
             if track_result['hit_above_first']:
-                print(f"   → Fahrtrichtung: A (track above is closer)")
+                if DEBUG_TRACK:
+                    print(f"→ Fahrtrichtung: A (track above is closer)")
                 return "A"
             else:
-                print(f"   → Fahrtrichtung: B (track below is closer)")
+                if DEBUG_TRACK:
+                    print(f"→ Fahrtrichtung: B (track below is closer)")
                 return "B"
-        
+
         else:
-            print(f"   → Fahrtrichtung: Undetermined (no track found)")
+            if DEBUG_TRACK:
+                print(f"→ Fahrtrichtung: Undetermined (no track found)")
             return None
 
 
@@ -1050,8 +1089,9 @@ def detect_fahrtrichtung_gks_relaxed(signal_det, gks_dets, used_gks_ids=None,
     signal_text = signal_det.get("text", "?")
     signal_angle = float(signal_det.get("angle", 0.0))
 
-    print(f"\n   🔍 TIER 3 (GKS Relaxed): Signal '{signal_text}' at ({signal_cx:.0f}, {signal_cy:.0f})")
-    print(f"      Parameters: dx≤{dx_tolerance}px, dy=[{dy_min}, {dy_max}]px")
+    if DEBUG_LINKING:
+        print(f"\n   TIER 3 (GKS Relaxed): Signal '{signal_text}' at ({signal_cx:.0f}, {signal_cy:.0f})")
+        print(f"Parameters: dx≤{dx_tolerance}px, dy=[{dy_min}, {dy_max}]px")
 
     # Find candidates in column
     candidates = []
@@ -1094,7 +1134,8 @@ def detect_fahrtrichtung_gks_relaxed(signal_det, gks_dets, used_gks_ids=None,
             continue
 
         gks_text = gks.get("text", gks.get("anchor_text", "?"))
-        print(f"      → Candidate: GKS '{gks_text}' at ({gks_cx:.0f}, {gks_cy:.0f}), dx={dx:.0f}, dy={dy:.0f}")
+        if DEBUG_LINKING:
+            print(f"→ Candidate: GKS '{gks_text}' at ({gks_cx:.0f}, {gks_cy:.0f}), dx={dx:.0f}, dy={dy:.0f}")
 
         candidates.append({
             'gks': gks,
@@ -1104,7 +1145,8 @@ def detect_fahrtrichtung_gks_relaxed(signal_det, gks_dets, used_gks_ids=None,
         })
 
     if not candidates:
-        print(f"      ❌ No GKS candidates found in column")
+        if DEBUG_LINKING:
+            print(f"No GKS candidates found in column")
         return None, None
 
     # Pick closest (smallest dy_abs)
@@ -1118,11 +1160,13 @@ def detect_fahrtrichtung_gks_relaxed(signal_det, gks_dets, used_gks_ids=None,
     if dy < 0:
         # GKS is ABOVE signal
         fahrtrichtung = "A"
-        print(f"      ✅ MATCH: GKS '{gks_text}' is ABOVE → Fahrtrichtung A")
+        if DEBUG_LINKING:
+            print(f"MATCH: GKS '{gks_text}' is ABOVE → Fahrtrichtung A")
     else:
         # GKS is BELOW signal
         fahrtrichtung = "B"
-        print(f"      ✅ MATCH: GKS '{gks_text}' is BELOW → Fahrtrichtung B")
+        if DEBUG_LINKING:
+            print(f"MATCH: GKS '{gks_text}' is BELOW → Fahrtrichtung B")
 
     return fahrtrichtung, gks
 
@@ -1174,8 +1218,9 @@ def detect_fahrtrichtung_gks_nearest(signal_det, gks_dets, used_gks_ids=None,
     signal_text = signal_det.get("text", "?")
     signal_angle = float(signal_det.get("angle", 0.0))
 
-    print(f"\n   🔍 TIER 4 (GKS Nearest): Signal '{signal_text}' at ({signal_cx:.0f}, {signal_cy:.0f})")
-    print(f"      Parameters: max_dist≤{max_distance}px, dy_min={dy_min}px")
+    if DEBUG_LINKING:
+        print(f"\n   TIER 4 (GKS Nearest): Signal '{signal_text}' at ({signal_cx:.0f}, {signal_cy:.0f})")
+        print(f"Parameters: max_dist≤{max_distance}px, dy_min={dy_min}px")
 
     # Find candidates
     candidates = []
@@ -1220,7 +1265,8 @@ def detect_fahrtrichtung_gks_nearest(signal_det, gks_dets, used_gks_ids=None,
             continue
 
         gks_text = gks.get("text", gks.get("anchor_text", "?"))
-        print(f"      → Candidate: GKS '{gks_text}' at ({gks_cx:.0f}, {gks_cy:.0f}), dist={euclidean_dist:.0f}, dy={dy:.0f}")
+        if DEBUG_LINKING:
+            print(f"→ Candidate: GKS '{gks_text}' at ({gks_cx:.0f}, {gks_cy:.0f}), dist={euclidean_dist:.0f}, dy={dy:.0f}")
 
         candidates.append({
             'gks': gks,
@@ -1229,7 +1275,8 @@ def detect_fahrtrichtung_gks_nearest(signal_det, gks_dets, used_gks_ids=None,
         })
 
     if not candidates:
-        print(f"      ❌ No GKS candidates found nearby")
+        if DEBUG_LINKING:
+            print(f"No GKS candidates found nearby")
         return None, None
 
     # Pick closest (smallest Euclidean distance)
@@ -1243,11 +1290,13 @@ def detect_fahrtrichtung_gks_nearest(signal_det, gks_dets, used_gks_ids=None,
     if dy < 0:
         # GKS is ABOVE signal
         fahrtrichtung = "A"
-        print(f"      ✅ MATCH: GKS '{gks_text}' is ABOVE → Fahrtrichtung A")
+        if DEBUG_LINKING:
+            print(f"MATCH: GKS '{gks_text}' is ABOVE → Fahrtrichtung A")
     else:
         # GKS is BELOW signal
         fahrtrichtung = "B"
-        print(f"      ✅ MATCH: GKS '{gks_text}' is BELOW → Fahrtrichtung B")
+        if DEBUG_LINKING:
+            print(f"MATCH: GKS '{gks_text}' is BELOW → Fahrtrichtung B")
 
     return fahrtrichtung, gks
 
@@ -1262,10 +1311,10 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
     Merge duplicate signal instances with SPATIAL CLUSTERING for multi-section plans.
     
     NEW FEATURES:
-    ✅ Auto-detects multi-section plans (finds gaps in Y-positions)
-    ✅ Clusters signals by 2D proximity (X AND Y)
-    ✅ Merges duplicates WITHIN each cluster only
-    ✅ Preserves signals across different sections
+     Auto-detects multi-section plans (finds gaps in Y-positions)
+     Clusters signals by 2D proximity (X AND Y)
+     Merges duplicates WITHIN each cluster only
+     Preserves signals across different sections
     
     Priority Rules (within each cluster):
     1. Identify Haltepunkt coordinates (exclude them)
@@ -1282,10 +1331,11 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
         gks_dets: IGNORED (kept for backward compatibility)
         spatial_threshold: Override auto-detection (pixels). None = auto-detect
     """
-    print(f"\n{'='*70}")
-    print(f"🔄 MERGING DUPLICATE SIGNALS (Spatial Clustering + Full Data)")
-    print(f"{'='*70}")
-    
+    if DEBUG_LINKING:
+        print(f"\n{'='*70}")
+        print(f" MERGING DUPLICATE SIGNALS (Spatial Clustering + Full Data)")
+        print(f"{'='*70}")
+
     # ========================================
     # STEP 0: Auto-detect spatial threshold
     # ========================================
@@ -1293,7 +1343,8 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
         signal_rows = [r for r in all_rows if r.get('cls') == 'signal' and r.get('anchor_text')]
         spatial_threshold = estimate_spatial_threshold(signal_rows)
     else:
-        print(f"   🔧 Using manual threshold: {spatial_threshold}px")
+        if DEBUG_LINKING:
+            print(f" Using manual threshold: {spatial_threshold}px")
     
     # ========================================
     # STEP 1: Detect Haltepunkt coordinates
@@ -1364,7 +1415,8 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
                 key = (page, signal_text)
                 haltepunkt_coords[key] = coord_text
                 
-                print(f"   🏢 Haltepunkt coordinate: signal='{signal_text}', coord='{coord_text}' (EXCLUDE THIS)")
+                if DEBUG_LINKING:
+                    print(f" Haltepunkt coordinate: signal='{signal_text}', coord='{coord_text}' (EXCLUDE THIS)")
     
     # ========================================
     # STEP 2: Group signal instances by (page, name)
@@ -1398,10 +1450,11 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
         
         key = (page, anchor_text)
         haltepunkt_coord = haltepunkt_coords.get(key)
-        
-        print(f"\n📍 Signal '{anchor_text}' on page {page}: {len(instances)} instances")
-        if haltepunkt_coord:
-            print(f"   🏢 Haltepunkt coordinate to EXCLUDE: '{haltepunkt_coord}'")
+
+        if DEBUG_LINKING:
+            print(f"\n Signal '{anchor_text}' on page {page}: {len(instances)} instances")
+            if haltepunkt_coord:
+                print(f" Haltepunkt coordinate to EXCLUDE: '{haltepunkt_coord}'")
         
         # ========================================
         # STEP 3A: SPATIAL CLUSTERING (2D: X and Y)
@@ -1442,7 +1495,8 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
             else:
                 clusters.append([inst])
         
-        print(f"   🗂️  Clustered into {len(clusters)} spatial groups (threshold={spatial_threshold}px)")
+        if DEBUG_LINKING:
+            print(f"Clustered into {len(clusters)} spatial groups (threshold={spatial_threshold}px)")
         
         # ========================================
         # STEP 3B: Process each cluster independently
@@ -1451,14 +1505,16 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
         for cluster_idx, cluster in enumerate(clusters):
             if len(cluster) == 1:
                 # Single instance in cluster - no merging needed
-                print(f"   📦 Cluster {cluster_idx+1}: 1 instance → no merge needed")
+                if DEBUG_LINKING:
+                    print(f" Cluster {cluster_idx+1}: 1 instance → no merge needed")
                 continue
-            
+
             # Calculate cluster centroid for logging
             cluster_cx = sum(r.get('cx', (r['ax1'] + r['ax2']) / 2) for r in cluster) / len(cluster)
             cluster_cy = sum(r.get('cy', (r['ay1'] + r['ay2']) / 2) for r in cluster) / len(cluster)
-            
-            print(f"\n   📦 Cluster {cluster_idx+1}: {len(cluster)} instances at ({cluster_cx:.0f}, {cluster_cy:.0f})")
+
+            if DEBUG_LINKING:
+                print(f"\n    Cluster {cluster_idx+1}: {len(cluster)} instances at ({cluster_cx:.0f}, {cluster_cy:.0f})")
             
             # ========================================
             # STEP 3C: Classify instances WITHIN cluster (IMPROVED)
@@ -1466,46 +1522,51 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
             coord_only_instances = []
             fahrtrichtung_instances = []
             haltepunkt_instances = []
-            coord_with_fahr_instances = []  # ✅ NEW: Instances with BOTH coord and fahr
+            coord_with_fahr_instances = []  #  NEW: Instances with BOTH coord and fahr
 
             for inst in cluster:
                 has_coord = pd.notna(inst.get('coord_text')) and inst.get('coord_text')
                 has_fahr = pd.notna(inst.get('fahrtrichtung')) and inst.get('fahrtrichtung')
                 coord_text = inst.get('coord_text', '')
                 
-                # ✅ NEW: Classify instances with BOTH coord and fahr
+                #  NEW: Classify instances with BOTH coord and fahr
                 if has_coord and has_fahr:
                     coord_with_fahr_instances.append(inst)
-                    
-                    # ✅ DIAGNOSTIC: Show Fahrtrichtung source
+
+                    #  DIAGNOSTIC: Show Fahrtrichtung source
                     fahr_source = inst.get('_fahrtrichtung_source', 'MISSING!')
-                    
-                    if fahr_source == 'gks':
-                        print(f"      🔄 Coord+Fahr instance: row_id={inst['row_id']}, coord={coord_text}, fahr={inst.get('fahrtrichtung')} (from GKS - TRUSTED)")
-                    else:
-                        print(f"      🔄 Coord+Fahr instance: row_id={inst['row_id']}, coord={coord_text}, fahr={inst.get('fahrtrichtung')} (source={fahr_source})")
-                    
+
+                    if DEBUG_LINKING:
+                        if fahr_source == 'gks':
+                            print(f" Coord+Fahr instance: row_id={inst['row_id']}, coord={coord_text}, fahr={inst.get('fahrtrichtung')} (from GKS - TRUSTED)")
+                        else:
+                            print(f" Coord+Fahr instance: row_id={inst['row_id']}, coord={coord_text}, fahr={inst.get('fahrtrichtung')} (source={fahr_source})")
+
                     continue
                 
                 # Fahrtrichtung-only instance
                 if has_fahr:
                     fahrtrichtung_instances.append(inst)
-                    print(f"      ➡️  Fahrtrichtung instance: row_id={inst['row_id']}, dir={inst.get('fahrtrichtung')}")
+                    if DEBUG_LINKING:
+                        print(f"Fahrtrichtung instance: row_id={inst['row_id']}, dir={inst.get('fahrtrichtung')}")
                     continue
                 
                 # Coordinate-only instance
                 if has_coord:
                     if haltepunkt_coord and coord_text == haltepunkt_coord:
                         haltepunkt_instances.append(inst)
-                        print(f"      🏢 Haltepunkt coordinate instance: row_id={inst['row_id']}, coord={coord_text} (SAVE POSITION)")
+                        if DEBUG_LINKING:
+                            print(f" Haltepunkt coordinate instance: row_id={inst['row_id']}, coord={coord_text} (SAVE POSITION)")
                     else:
                         coord_only_instances.append(inst)
-                        print(f"      📍 Coordinate-only instance: row_id={inst['row_id']}, coord={coord_text}")
+                        if DEBUG_LINKING:
+                            print(f" Coordinate-only instance: row_id={inst['row_id']}, coord={coord_text}")
                     continue
-                
+
                 # Bare haltepunkt instance (no coord, no fahr)
                 haltepunkt_instances.append(inst)
-                print(f"      🏢 Bare haltepunkt instance: row_id={inst['row_id']} (SAVE POSITION)")
+                if DEBUG_LINKING:
+                    print(f" Bare haltepunkt instance: row_id={inst['row_id']} (SAVE POSITION)")
             
             # ========================================
             # STEP 3D: Select PRIMARY coordinate instance (IMPROVED)
@@ -1513,46 +1574,53 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
 
             coord_instance = None
 
-            # ✅ PRIORITY 1: Coordinate-only instances (cleanest)
+            #  PRIORITY 1: Coordinate-only instances (cleanest)
             if coord_only_instances:
                 if len(coord_only_instances) == 1:
                     coord_instance = coord_only_instances[0]
-                    print(f"      ✅ PRIMARY (coord-only): row_id={coord_instance['row_id']}, coord={coord_instance.get('coord_text')}")
+                    if DEBUG_LINKING:
+                        print(f"PRIMARY (coord-only): row_id={coord_instance['row_id']}, coord={coord_instance.get('coord_text')}")
                 else:
                     # Multiple coord-only instances - use haltepunkt distance logic
-                    print(f"      ⚠️ Multiple coordinate-only instances: {len(coord_only_instances)}")
-                    
+                    if DEBUG_LINKING:
+                        print(f"Multiple coordinate-only instances: {len(coord_only_instances)}")
+
                     if haltepunkt_coord:
                         try:
                             halt_val = float(haltepunkt_coord.replace(',', '.'))
                             best_coord = None
                             best_diff = 0
-                            
+
                             for c_inst in coord_only_instances:
-                                coord_val = float(c_inst.get('coord_text', '0').replace(',', '.'))
+                                coord_val = float((c_inst.get('coord_text') or '0').replace(',', '.'))
                                 diff = abs(coord_val - halt_val)
-                                print(f"         Candidate: row_id={c_inst['row_id']}, coord={c_inst.get('coord_text')}, diff={diff:.4f}")
-                                
+                                if DEBUG_LINKING:
+                                    print(f"Candidate: row_id={c_inst['row_id']}, coord={c_inst.get('coord_text')}, diff={diff:.4f}")
+
                                 if diff > best_diff:
                                     best_diff = diff
                                     best_coord = c_inst
-                            
+
                             coord_instance = best_coord
-                            print(f"      ✅ PRIMARY (furthest from Haltepunkt): row_id={coord_instance['row_id']}, diff={best_diff:.4f}")
-                            
+                            if DEBUG_LINKING:
+                                print(f"PRIMARY (furthest from Haltepunkt): row_id={coord_instance['row_id']}, diff={best_diff:.4f}")
+
                             for c_inst in coord_only_instances:
                                 if c_inst['row_id'] != coord_instance['row_id']:
                                     processed_row_ids.add(c_inst['row_id'])
                                     c_inst['_hidden'] = True
-                                    print(f"         🚫 Hiding duplicate: row_id={c_inst['row_id']}")
+                                    if DEBUG_LINKING:
+                                        print(f" Hiding duplicate: row_id={c_inst['row_id']}")
                         except ValueError:
                             coord_instance = coord_only_instances[0]
-                            print(f"      ⚠️ Could not parse - using first: row_id={coord_instance['row_id']}")
+                            if DEBUG_LINKING:
+                                print(f"Could not parse - using first: row_id={coord_instance['row_id']}")
                     else:
                         coord_instance = coord_only_instances[0]
-                        print(f"      ✅ PRIMARY (first): row_id={coord_instance['row_id']}")
+                        if DEBUG_LINKING:
+                            print(f"PRIMARY (first): row_id={coord_instance['row_id']}")
                 
-                # ✅ FIX: Check if coord+fahr instances have GKS-based Fahrtrichtung
+                #  FIX: Check if coord+fahr instances have GKS-based Fahrtrichtung
                 coord_fahr_with_gks = None
                 if coord_with_fahr_instances:
                     for inst in coord_with_fahr_instances:
@@ -1560,67 +1628,76 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
                             coord_fahr_with_gks = inst
                             break
                 
-                # ✅ If coord+fahr has GKS-based Fahrtrichtung, PRESERVE it!
+                #  If coord+fahr has GKS-based Fahrtrichtung, PRESERVE it!
                 if coord_fahr_with_gks:
-                    print(f"      ✅ PRESERVING Fahrtrichtung '{coord_fahr_with_gks.get('fahrtrichtung')}' from coord+fahr instance (GKS-based - TRUSTED)")
+                    if DEBUG_LINKING:
+                        print(f"PRESERVING Fahrtrichtung '{coord_fahr_with_gks.get('fahrtrichtung')}' from coord+fahr instance (GKS-based - TRUSTED)")
                     coord_instance['fahrtrichtung'] = coord_fahr_with_gks.get('fahrtrichtung')
                     coord_instance['_fahrtrichtung_source'] = 'gks'
-                
-                # ✅ Hide ALL coord+fahr instances (we chose coord-only as PRIMARY)
+
+                #  Hide ALL coord+fahr instances (we chose coord-only as PRIMARY)
                 if coord_with_fahr_instances:
-                    print(f"      🚫 Hiding {len(coord_with_fahr_instances)} coord+fahr instances (coord-only is PRIMARY)")
+                    if DEBUG_LINKING:
+                        print(f" Hiding {len(coord_with_fahr_instances)} coord+fahr instances (coord-only is PRIMARY)")
                     for inst in coord_with_fahr_instances:
                         processed_row_ids.add(inst['row_id'])
                         inst['_hidden'] = True
-                        print(f"         - row_id={inst['row_id']}, coord={inst.get('coord_text')}, fahr={inst.get('fahrtrichtung')}")
+                        if DEBUG_LINKING:
+                            print(f"- row_id={inst['row_id']}, coord={inst.get('coord_text')}, fahr={inst.get('fahrtrichtung')}")
 
-            # ✅ PRIORITY 2: Coord+Fahr instances (if no coord-only exists)
+            #  PRIORITY 2: Coord+Fahr instances (if no coord-only exists)
             elif coord_with_fahr_instances:
                 coord_instance = coord_with_fahr_instances[0]
-                
-                # ✅ CHECK: Is this Fahrtrichtung from GKS or from duplicate?
+
+                #  CHECK: Is this Fahrtrichtung from GKS or from duplicate?
                 fahr_source = coord_instance.get('_fahrtrichtung_source', 'unknown')
-                
-                if fahr_source == 'gks':
-                    # ✅ GKS-based Fahrtrichtung - TRUSTED!
-                    print(f"      ✅ PRIMARY (coord+fahr): row_id={coord_instance['row_id']}, coord={coord_instance.get('coord_text')}, fahr={coord_instance.get('fahrtrichtung')} (from GKS - TRUSTED)")
-                else:
-                    # ⚠️ Unknown source - will be verified later
-                    print(f"      ✅ PRIMARY (coord+fahr): row_id={coord_instance['row_id']}, coord={coord_instance.get('coord_text')}, fahr={coord_instance.get('fahrtrichtung')} (source={fahr_source} - will be verified)")
-                
-                # ✅ FIX: Only hide OTHER coord+fahr instances (NOT the PRIMARY!)
+
+                if DEBUG_LINKING:
+                    if fahr_source == 'gks':
+                        #  GKS-based Fahrtrichtung - TRUSTED!
+                        print(f"PRIMARY (coord+fahr): row_id={coord_instance['row_id']}, coord={coord_instance.get('coord_text')}, fahr={coord_instance.get('fahrtrichtung')} (from GKS - TRUSTED)")
+                    else:
+                        #  Unknown source - will be verified later
+                        print(f"PRIMARY (coord+fahr): row_id={coord_instance['row_id']}, coord={coord_instance.get('coord_text')}, fahr={coord_instance.get('fahrtrichtung')} (source={fahr_source} - will be verified)")
+
+                #  FIX: Only hide OTHER coord+fahr instances (NOT the PRIMARY!)
                 for inst in coord_with_fahr_instances:
-                    if inst['row_id'] != coord_instance['row_id']:  # ✅ SKIP the PRIMARY
+                    if inst['row_id'] != coord_instance['row_id']:  #  SKIP the PRIMARY
                         processed_row_ids.add(inst['row_id'])
                         inst['_hidden'] = True
-                        print(f"         🚫 Hiding OTHER coord+fahr instance: row_id={inst['row_id']}")
+                        if DEBUG_LINKING:
+                            print(f" Hiding OTHER coord+fahr instance: row_id={inst['row_id']}")
                 
-                # ✅ Mark the PRIMARY as processed (but DON'T hide it!)
+                #  Mark the PRIMARY as processed (but DON'T hide it!)
                 processed_row_ids.add(coord_instance['row_id'])
 
-            # ✅ PRIORITY 3: No coordinate instance found
+            #  PRIORITY 3: No coordinate instance found
             else:
-                print(f"      ⏭️  No coordinate instance found in this cluster")
+                if DEBUG_LINKING:
+                    print(f"No coordinate instance found in this cluster")
                 for inst in haltepunkt_instances:
                     processed_row_ids.add(inst['row_id'])
                     inst['_hidden'] = True
                 continue  # Skip this cluster
-            
+
             # ========================================
             # STEP 3E: Select Fahrtrichtung instance
             # ========================================
-            
+
             fahrtrichtung_instance = None
-            
+
             if len(fahrtrichtung_instances) == 0:
-                print(f"      ⏭️  No Fahrtrichtung instance (will be filled by track fallback later)")
-            
+                if DEBUG_LINKING:
+                    print(f"No Fahrtrichtung instance (will be filled by track fallback later)")
+
             elif len(fahrtrichtung_instances) == 1:
                 fahrtrichtung_instance = fahrtrichtung_instances[0]
-                print(f"      ✅ FAHRTRICHTUNG: row_id={fahrtrichtung_instance['row_id']}, dir={fahrtrichtung_instance.get('fahrtrichtung')}")
-            
+                if DEBUG_LINKING:
+                    print(f"FAHRTRICHTUNG: row_id={fahrtrichtung_instance['row_id']}, dir={fahrtrichtung_instance.get('fahrtrichtung')}")
+
             else:
-                print(f"      ⚠️ Multiple Fahrtrichtung instances: {len(fahrtrichtung_instances)} - using first")
+                if DEBUG_LINKING:
+                    print(f"Multiple Fahrtrichtung instances: {len(fahrtrichtung_instances)} - using first")
                 fahrtrichtung_instance = fahrtrichtung_instances[0]
                 
                 for f_inst in fahrtrichtung_instances[1:]:
@@ -1635,7 +1712,8 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
             
             if len(haltepunkt_instances) > 0:
                 haltepunkt_instance = haltepunkt_instances[0]
-                print(f"      ✅ HALTEPUNKT: row_id={haltepunkt_instance['row_id']}")
+                if DEBUG_LINKING:
+                    print(f"HALTEPUNKT: row_id={haltepunkt_instance['row_id']}")
                 
                 for halt_inst in haltepunkt_instances[1:]:
                     processed_row_ids.add(halt_inst['row_id'])
@@ -1647,37 +1725,40 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
 
             final_row = coord_instance.copy()
 
-        # ✅ IMPROVED RULE: Use Fahrtrichtung from fahr-only instance OR from GKS-based coord+fahr
+        #  IMPROVED RULE: Use Fahrtrichtung from fahr-only instance OR from GKS-based coord+fahr
 
             if fahrtrichtung_instance:
                 # fahr-only instance exists → TRUSTED
                 final_row['fahrtrichtung'] = fahrtrichtung_instance.get('fahrtrichtung')
                 final_row['_fahrtrichtung_source'] = 'gks'
-                print(f"      ✅ Using Fahrtrichtung '{fahrtrichtung_instance.get('fahrtrichtung')}' from fahr-only instance")
-                
+                if DEBUG_LINKING:
+                    print(f"Using Fahrtrichtung '{fahrtrichtung_instance.get('fahrtrichtung')}' from fahr-only instance")
+
                 processed_row_ids.add(fahrtrichtung_instance['row_id'])
 
             else:
                 # No fahr-only instance - check if coord+fahr has GKS-based Fahrtrichtung
                 coord_fahr_source = coord_instance.get('_fahrtrichtung_source', 'unknown')
-                
+
                 if coord_fahr_source == 'gks' and coord_instance.get('fahrtrichtung'):
-                    # ✅ Coord+Fahr has GKS-based Fahrtrichtung → TRUSTED!
+                    #  Coord+Fahr has GKS-based Fahrtrichtung → TRUSTED!
                     final_row['fahrtrichtung'] = coord_instance.get('fahrtrichtung')
                     final_row['_fahrtrichtung_source'] = 'gks'
-                    print(f"      ✅ Using Fahrtrichtung '{coord_instance.get('fahrtrichtung')}' from coord+fahr instance (GKS-based - TRUSTED)")
-                
+                    if DEBUG_LINKING:
+                        print(f"Using Fahrtrichtung '{coord_instance.get('fahrtrichtung')}' from coord+fahr instance (GKS-based - TRUSTED)")
+
                 else:
                     # No trusted Fahrtrichtung → track fallback
                     final_row['fahrtrichtung'] = None
                     final_row['_fahrtrichtung_source'] = 'none'
-                    
-                    # ✅ Log if we're ignoring coord+fahr Fahrtrichtung
-                    if coord_instance.get('fahrtrichtung'):
-                        print(f"      ⚠️ Ignoring Fahrtrichtung '{coord_instance.get('fahrtrichtung')}' from coord+fahr instance (source={coord_fahr_source} - not trusted)")
-                        print(f"      ⏭️  Track fallback will determine Fahrtrichtung")
-                    else:
-                        print(f"      ⏭️  No Fahrtrichtung → track fallback will fill")
+
+                    #  Log if we're ignoring coord+fahr Fahrtrichtung
+                    if DEBUG_LINKING:
+                        if coord_instance.get('fahrtrichtung'):
+                            print(f"Ignoring Fahrtrichtung '{coord_instance.get('fahrtrichtung')}' from coord+fahr instance (source={coord_fahr_source} - not trusted)")
+                            print(f"Track fallback will determine Fahrtrichtung")
+                        else:
+                            print(f"No Fahrtrichtung → track fallback will fill")
             
             # Store ALL signal positions
             signal_positions = {
@@ -1707,7 +1788,8 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
                     'ay2': haltepunkt_instance['ay2'],
                     'row_id': haltepunkt_instance['row_id']
                 }
-                print(f"      💾 Stored Haltepunkt signal position")
+                if DEBUG_LINKING:
+                    print(f" Stored Haltepunkt signal position")
             
             final_row['_signal_positions'] = signal_positions
             
@@ -1728,28 +1810,32 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
                 'label': f"{anchor_text} @ {coord_instance.get('coord_text')}"
             }]
             
-            print(f"      📦 Single Overlay: Signal + Coordinate {coord_instance.get('coord_text')}")
-            
+            if DEBUG_LINKING:
+                print(f" Single Overlay: Signal + Coordinate {coord_instance.get('coord_text')}")
+
             num_positions = len(signal_positions)
-            print(f"      💾 Stored {num_positions} signal positions in _signal_positions")
-            
+            if DEBUG_LINKING:
+                print(f" Stored {num_positions} signal positions in _signal_positions")
+
             final_row['_all_bboxes'] = all_bboxes
-            
+
             processed_row_ids.add(coord_instance['row_id'])
             if fahrtrichtung_instance:
                 processed_row_ids.add(fahrtrichtung_instance['row_id'])
-            
+
             if haltepunkt_instance:
                 processed_row_ids.add(haltepunkt_instance['row_id'])
                 haltepunkt_instance['_hidden'] = True
-                print(f"      🙈 Hiding haltepunkt instance: row_id={haltepunkt_instance['row_id']} (data preserved)")
-            
+                if DEBUG_LINKING:
+                    print(f" Hiding haltepunkt instance: row_id={haltepunkt_instance['row_id']} (data preserved)")
+
             merged_rows.append(final_row)
-            
-            fahr_display = final_row.get('fahrtrichtung', 'None')
-            fahr_source = final_row.get('_fahrtrichtung_source', 'unknown')
-            print(f"      ✅ CLUSTER MERGED: row_id={final_row['row_id']}, coord={final_row.get('coord_text')}, "
-                  f"fahr={fahr_display} (source={fahr_source})")
+
+            if DEBUG_LINKING:
+                fahr_display = final_row.get('fahrtrichtung', 'None')
+                fahr_source = final_row.get('_fahrtrichtung_source', 'unknown')
+                print(f"CLUSTER MERGED: row_id={final_row['row_id']}, coord={final_row.get('coord_text')}, "
+                      f"fahr={fahr_display} (source={fahr_source})")
     
     # ========================================
     # STEP 4: Build final result
@@ -1772,17 +1858,18 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
     
     visible = len([r for r in result if not r.get('_hidden')])
     hidden = len([r for r in result if r.get('_hidden')])
-    
-    print(f"\n{'='*70}")
-    print(f"✅ Merging complete: {len(result)} rows ({visible} visible, {hidden} hidden)")
-    print(f"   Merged: {len(merged_rows)} signal groups")
-    
-    gks_count = sum(1 for m in merged_rows if m.get('_fahrtrichtung_source') == 'gks')
-    none_count = sum(1 for m in merged_rows if m.get('_fahrtrichtung_source') == 'none')
-    
-    print(f"   Fahrtrichtung sources: GKS={gks_count}, None={none_count} (track fallback will run later)")
-    print(f"{'='*70}\n")
-    
+
+    if DEBUG_LINKING:
+        print(f"\n{'='*70}")
+        print(f"Merging complete: {len(result)} rows ({visible} visible, {hidden} hidden)")
+        print(f"Merged: {len(merged_rows)} signal groups")
+
+        gks_count = sum(1 for m in merged_rows if m.get('_fahrtrichtung_source') == 'gks')
+        none_count = sum(1 for m in merged_rows if m.get('_fahrtrichtung_source') == 'none')
+
+        print(f"Fahrtrichtung sources: GKS={gks_count}, None={none_count} (track fallback will run later)")
+        print(f"{'='*70}\n")
+
     return result
 
 def estimate_spatial_threshold(signal_rows: List[dict]) -> int:
@@ -1794,7 +1881,8 @@ def estimate_spatial_threshold(signal_rows: List[dict]) -> int:
         Threshold in pixels (1000-2500)
     """
     if len(signal_rows) < 10:
-        print(f"   🔍 Few signals ({len(signal_rows)}) → using default threshold: 1500px")
+        if DEBUG_LINKING:
+            print(f"Few signals ({len(signal_rows)}) → using default threshold: 1500px")
         return 1500
     
     # Get all Y-positions (use center Y)
@@ -1827,21 +1915,23 @@ def estimate_spatial_threshold(signal_rows: List[dict]) -> int:
         # Clamp to reasonable range
         threshold = max(1000, min(2500, threshold))
         
-        print(f"   🔍 Multi-section plan detected:")
-        print(f"      - {len(large_gaps)} section boundaries found")
-        print(f"      - Average section gap: {avg_section_gap:.0f}px")
-        print(f"      - Median within-section gap: {median_gap:.0f}px")
-        print(f"      - Auto threshold: {threshold}px (40% of section gap)")
-        
+        if DEBUG_LINKING:
+            print(f"Multi-section plan detected:")
+            print(f"- {len(large_gaps)} section boundaries found")
+            print(f"- Average section gap: {avg_section_gap:.0f}px")
+            print(f"- Median within-section gap: {median_gap:.0f}px")
+            print(f"- Auto threshold: {threshold}px (40% of section gap)")
+
         return threshold
     else:
         # Single-section plan
         # Use smaller threshold for tighter merging
         threshold = 1000
-        print(f"   🔍 Single-section plan detected:")
-        print(f"      - Median signal spacing: {median_gap:.0f}px")
-        print(f"      - Auto threshold: {threshold}px")
-        
+        if DEBUG_LINKING:
+            print(f"Single-section plan detected:")
+            print(f"- Median signal spacing: {median_gap:.0f}px")
+            print(f"- Auto threshold: {threshold}px")
+
         return threshold
 
 def detect_haltepunkt_signal_group(haltepunkt_det, signal_dets, coord_dets,
@@ -1933,7 +2023,7 @@ def detect_haltepunkt_signal_group(haltepunkt_det, signal_dets, coord_dets,
     
     if not nearest_signal:
         if DEBUG_ANGLE_ROUTING:
-            print(f"      → No signal found")
+            print(f"→ No signal found")
         return None
     
     # Find coordinate in between haltepunkt and signal
@@ -1944,7 +2034,7 @@ def detect_haltepunkt_signal_group(haltepunkt_det, signal_dets, coord_dets,
     min_coord_dist = float('inf')
     
     for coord_det in coord_dets:
-        # ✅ FIX: Handle both formats (detection dict vs processed dict)
+        #  FIX: Handle both formats (detection dict vs processed dict)
         if "cx1" in coord_det and coord_det["cx1"] is not None:
             coord_cx = (coord_det["cx1"] + coord_det["cx2"]) / 2
             coord_cy = (coord_det["cy1"] + coord_det["cy2"]) / 2
@@ -1990,7 +2080,7 @@ def detect_haltepunkt_signal_group(haltepunkt_det, signal_dets, coord_dets,
     
     result = {
         'signal': nearest_signal['text'],
-        'signal_det': nearest_signal['det'],  # ✅ ADD THIS
+        'signal_det': nearest_signal['det'],  #  ADD THIS
         'coordinate': None
     }
     
@@ -2001,11 +2091,11 @@ def detect_haltepunkt_signal_group(haltepunkt_det, signal_dets, coord_dets,
         
         if DEBUG_ANGLE_ROUTING:
             position = "below" if (nearest_signal.get('dy_local', nearest_signal.get('dy', 0)) > 0) else "above"
-            print(f"      → Signal '{result['signal']}' {position}, Coordinate '{coord_text}' in between")
+            print(f"→ Signal '{result['signal']}' {position}, Coordinate '{coord_text}' in between")
     else:
         if DEBUG_ANGLE_ROUTING:
             position = "below" if (nearest_signal.get('dy_local', nearest_signal.get('dy', 0)) > 0) else "above"
-            print(f"      → Signal '{result['signal']}' {position}, No coordinate in between")
+            print(f"→ Signal '{result['signal']}' {position}, No coordinate in between")
     
     return result
 
@@ -2030,21 +2120,21 @@ def link_isolierstoss_fallback(anchor, coords, used_coord_ids, max_radius=300):
     anchor_cy = anchor["cy"]
 
     if DEBUG_ANGLE_ROUTING:
-        print(f"\n🔍 ISOLIERSTOSS FALLBACK: Searching all around for unlinked coordinates")
-        print(f"   Anchor position: ({anchor_cx:.0f}, {anchor_cy:.0f})")
-        print(f"   Max radius: {max_radius}px")
+        print(f"\nISOLIERSTOSS FALLBACK: Searching all around for unlinked coordinates")
+        print(f"Anchor position: ({anchor_cx:.0f}, {anchor_cy:.0f})")
+        print(f"Max radius: {max_radius}px")
 
     # Filter to unlinked coordinates only
     available_coords = [c for c in coords if id(c) not in used_coord_ids]
 
     if DEBUG_ANGLE_ROUTING:
-        print(f"   Total coordinates: {len(coords)}")
-        print(f"   Already linked: {len(coords) - len(available_coords)}")
-        print(f"   Available (unlinked): {len(available_coords)}")
+        print(f"Total coordinates: {len(coords)}")
+        print(f"Already linked: {len(coords) - len(available_coords)}")
+        print(f"Available (unlinked): {len(available_coords)}")
 
     if not available_coords:
         if DEBUG_ANGLE_ROUTING:
-            print(f"   ❌ No unlinked coordinates available")
+            print(f"No unlinked coordinates available")
         return None
 
     # Find nearest unlinked coordinate within radius
@@ -2067,15 +2157,15 @@ def link_isolierstoss_fallback(anchor, coords, used_coord_ids, max_radius=300):
             if DEBUG_ANGLE_ROUTING:
                 coord_text = c.get('text', '?')
                 angle = math.degrees(math.atan2(dy, dx))
-                print(f"   → Candidate: '{coord_text}' at distance={distance:.1f}px, angle={angle:.1f}°")
+                print(f"→ Candidate: '{coord_text}' at distance={distance:.1f}px, angle={angle:.1f}°")
 
     if best_coord:
         if DEBUG_ANGLE_ROUTING:
             coord_text = best_coord.get('text', '?')
-            print(f"   ✅ FOUND: Nearest unlinked coordinate '{coord_text}' at {best_distance:.1f}px")
+            print(f"FOUND: Nearest unlinked coordinate '{coord_text}' at {best_distance:.1f}px")
     else:
         if DEBUG_ANGLE_ROUTING:
-            print(f"   ❌ No unlinked coordinates within {max_radius}px radius")
+            print(f"No unlinked coordinates within {max_radius}px radius")
 
     return best_coord
 
@@ -2088,15 +2178,15 @@ def parse_coord(text: str):
     # Remove trailing single letters (common OCR error)
     s = re.sub(r'[a-zA-Z]$', '', s)
     
-    # ✅ ONLY print if DEBUG_ANGLE_ROUTING
+    #  ONLY print if DEBUG_ANGLE_ROUTING
     if DEBUG_ANGLE_ROUTING and text and text != s:
-        print(f"   [parse_coord] Input: '{original_text}' → After cleaning: '{s}'")
+        print(f"[parse_coord] Input: '{original_text}' → After cleaning: '{s}'")
     
     m = COORD_RE.match(s)
     if not m:
-        # ✅ ONLY print if DEBUG_ANGLE_ROUTING
+        #  ONLY print if DEBUG_ANGLE_ROUTING
         if DEBUG_ANGLE_ROUTING and text:
-            print(f"   [parse_coord] ❌ NO MATCH: '{s}' (COORD_RE pattern failed)")
+            print(f"[parse_coord] NO MATCH: '{s}' (COORD_RE pattern failed)")
         return None, None
     
     val = m.group(1).replace(",", ".")
@@ -2105,12 +2195,12 @@ def parse_coord(text: str):
     except:
         f = None
         if DEBUG_ANGLE_ROUTING:
-            print(f"   [parse_coord] ❌ FLOAT CONVERSION FAILED: '{val}'")
+            print(f"[parse_coord] FLOAT CONVERSION FAILED: '{val}'")
     
     gi_gl = m.group(2) if len(m.groups()) > 1 else None
     
-    # ✅ ONLY print if DEBUG_ANGLE_ROUTING
+    #  ONLY print if DEBUG_ANGLE_ROUTING
     if DEBUG_ANGLE_ROUTING and text:
-        print(f"   [parse_coord] ✅ Parsed: '{original_text}' → value={f}, gi_gl={gi_gl}")
+        print(f"[parse_coord] Parsed: '{original_text}' → value={f}, gi_gl={gi_gl}")
     
     return f, gi_gl

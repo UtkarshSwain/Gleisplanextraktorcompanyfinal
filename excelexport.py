@@ -94,12 +94,12 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
 
         # Presets
         toolbar_layout.addWidget(QtWidgets.QLabel("<b>Vorlagen:</b>"))
-        self.btn_techniker = QtWidgets.QPushButton("🔧 Techniker")
+        self.btn_techniker = QtWidgets.QPushButton(" Techniker")
         self.btn_techniker.setToolTip("Nur die 3 Basis-Spalten")
         self.btn_techniker.clicked.connect(self._select_techniker_preset)
         toolbar_layout.addWidget(self.btn_techniker)
 
-        self.btn_entwickler = QtWidgets.QPushButton("💻 Entwickler")
+        self.btn_entwickler = QtWidgets.QPushButton(" Entwickler")
         self.btn_entwickler.setToolTip("Alle Spalten inkl. technische")
         self.btn_entwickler.clicked.connect(self._select_entwickler_preset)
         toolbar_layout.addWidget(self.btn_entwickler)
@@ -108,12 +108,12 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
 
         # Quick selection
         toolbar_layout.addWidget(QtWidgets.QLabel("<b>Auswahl:</b>"))
-        btn_select_all = QtWidgets.QPushButton("✓ Alle")
+        btn_select_all = QtWidgets.QPushButton(" Alle")
         btn_select_all.setToolTip("Alle Klassen und Spalten auswählen")
         btn_select_all.clicked.connect(self._select_all)
         toolbar_layout.addWidget(btn_select_all)
 
-        btn_select_none = QtWidgets.QPushButton("✗ Keine")
+        btn_select_none = QtWidgets.QPushButton(" Keine")
         btn_select_none.setToolTip("Alle abwählen")
         btn_select_none.clicked.connect(self._select_none)
         toolbar_layout.addWidget(btn_select_none)
@@ -122,7 +122,7 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
 
         # Help
         toolbar_layout.addStretch()
-        help_btn = QtWidgets.QPushButton("❓ Hilfe")
+        help_btn = QtWidgets.QPushButton(" Hilfe")
         help_btn.clicked.connect(self._show_help)
         toolbar_layout.addWidget(help_btn)
 
@@ -799,25 +799,25 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
         if not is_reference_col:
             # Toggle exclude/include
             if col_name in self.excluded_columns:
-                action_toggle = menu.addAction(f"✓ '{col_name}' einschließen")
+                action_toggle = menu.addAction(f" '{col_name}' einschließen")
             else:
-                action_toggle = menu.addAction(f"✗ '{col_name}' ausschließen")
+                action_toggle = menu.addAction(f" '{col_name}' ausschließen")
             action_toggle.triggered.connect(lambda: self._on_column_header_clicked(logical_index))
 
             menu.addSeparator()
 
             # Rename column for export
-            action_rename = menu.addAction(f"✏ '{col_name}' umbenennen...")
+            action_rename = menu.addAction(f" '{col_name}' umbenennen...")
             action_rename.triggered.connect(lambda: self._rename_column(col_name, logical_index))
 
             # Remove column from tree (uncheck in tree)
-            action_remove = menu.addAction(f"🗑 '{col_name}' aus Export entfernen")
+            action_remove = menu.addAction(f" '{col_name}' aus Export entfernen")
             action_remove.triggered.connect(lambda: self._remove_column_from_tree(col_name))
 
         menu.addSeparator()
 
         # Add columns submenu - show available columns that are not currently shown
-        add_menu = menu.addMenu("➕ Spalte hinzufügen")
+        add_menu = menu.addMenu(" Spalte hinzufügen")
         available_cols = self._get_addable_columns()
         if available_cols:
             for col_key, col_display in available_cols.items():
@@ -1193,9 +1193,9 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
                     self._cached_scan_result = scan_result
 
                     if scan_result['formula_count'] > 0:
-                        warning_text = f" ⚠️ {scan_result['formula_count']} Formeln!"
+                        warning_text = f"  {scan_result['formula_count']} Formeln!"
                     elif scan_result['data_count'] > 0:
-                        warning_text = f" ⚠️ {scan_result['data_count']} Zellen mit Daten"
+                        warning_text = f"  {scan_result['data_count']} Zellen mit Daten"
 
                 self.position_hint.setText(
                     f"→ Daten: {col}{row} bis {end_col}{row + total_rows - 1}{warning_text}"
@@ -1891,7 +1891,7 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
                 formula_list = ", ".join(scan_result['formulas'][:5])
                 if len(scan_result['formulas']) > 5:
                     formula_list += f" ..."
-                warning_title = "⚠️ Formeln im Zielbereich!"
+                warning_title = " Formeln im Zielbereich!"
                 warning_text = (
                     f"Im Zielbereich ({start_col}{start_row}) befinden sich "
                     f"{scan_result['formula_count']} Formeln:\n{formula_list}\n\n"
@@ -1914,7 +1914,7 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
 
             # Option to keep formulas (skip formula cells during export)
             if scan_result['formula_count'] > 0:
-                btn_keep_formulas = msg_box.addButton("📊 Formeln behalten", QtWidgets.QMessageBox.ActionRole)
+                btn_keep_formulas = msg_box.addButton(" Formeln behalten", QtWidgets.QMessageBox.ActionRole)
                 btn_keep_formulas.setToolTip("Daten exportieren, aber Formelzellen überspringen")
             else:
                 btn_keep_formulas = None
@@ -1925,8 +1925,8 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
             else:
                 btn_auto = None
 
-            btn_adjust = msg_box.addButton("✏ Anpassen", QtWidgets.QMessageBox.ActionRole)
-            btn_override = msg_box.addButton("⚠ Überschreiben", QtWidgets.QMessageBox.DestructiveRole)
+            btn_adjust = msg_box.addButton(" Anpassen", QtWidgets.QMessageBox.ActionRole)
+            btn_override = msg_box.addButton(" Überschreiben", QtWidgets.QMessageBox.DestructiveRole)
             btn_cancel = msg_box.addButton("Abbrechen", QtWidgets.QMessageBox.RejectRole)
 
             msg_box.exec_()
@@ -2028,18 +2028,18 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
 
         if verification_result['success']:
             QtWidgets.QMessageBox.information(
-                self, "✓ Export erfolgreich",
+                self, " Export erfolgreich",
                 f"Daten exportiert nach:\n{file_path}\nBlatt: {sheet_name}\n\n"
-                f"✓ Strukturprüfung bestanden\n"
+                f" Strukturprüfung bestanden\n"
                 f"{skip_info}"
                 f"  • {verification_result['formulas_preserved']} Formeln außerhalb des Zielbereichs erhalten"
             )
         else:
             QtWidgets.QMessageBox.warning(
-                self, "⚠️ Export mit Warnung",
+                self, " Export mit Warnung",
                 f"Daten exportiert nach:\n{file_path}\nBlatt: {sheet_name}\n\n"
                 f"{skip_info}"
-                f"⚠️ Strukturprüfung:\n{verification_result['message']}"
+                f" Strukturprüfung:\n{verification_result['message']}"
             )
 
     def _build_export_dataframe(self, config):
@@ -2191,27 +2191,27 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
     def _show_help(self):
         """Show comprehensive help dialog"""
         help_text = """
-        <h2>📊 Excel Export - Anleitung</h2>
+        <h2> Excel Export - Anleitung</h2>
 
         <hr>
-        <h3>🎯 Schnellstart</h3>
+        <h3> Schnellstart</h3>
         <ol>
-            <li><b>Vorlagen wählen:</b> Klicken Sie auf <b>🔧 Techniker</b> oder <b>💻 Entwickler</b></li>
+            <li><b>Vorlagen wählen:</b> Klicken Sie auf <b> Techniker</b> oder <b> Entwickler</b></li>
             <li><b>Vorschau prüfen:</b> Die rechte Tabelle zeigt, was exportiert wird</li>
             <li><b>Exportieren:</b> Klicken Sie auf <b>Exportieren</b></li>
         </ol>
 
         <hr>
-        <h3>🔧 Toolbar</h3>
+        <h3> Toolbar</h3>
         <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;">
-            <tr><td><b>🔧 Techniker</b></td><td>Nur Basis-Spalten (Text, Koordinaten, Fahrtrichtung)</td></tr>
-            <tr><td><b>💻 Entwickler</b></td><td>Alle Spalten inkl. technische Daten</td></tr>
-            <tr><td><b>✓ Alle</b></td><td>Alle Klassen und Spalten auswählen</td></tr>
-            <tr><td><b>✗ Keine</b></td><td>Alles abwählen</td></tr>
+            <tr><td><b> Techniker</b></td><td>Nur Basis-Spalten (Text, Koordinaten, Fahrtrichtung)</td></tr>
+            <tr><td><b> Entwickler</b></td><td>Alle Spalten inkl. technische Daten</td></tr>
+            <tr><td><b> Alle</b></td><td>Alle Klassen und Spalten auswählen</td></tr>
+            <tr><td><b> Keine</b></td><td>Alles abwählen</td></tr>
         </table>
 
         <hr>
-        <h3>📋 Datenvorschau</h3>
+        <h3> Datenvorschau</h3>
         <ul>
             <li><b>Spalten ziehen:</b> Ziehen Sie Spaltenköpfe um die Reihenfolge zu ändern</li>
             <li><b>Linksklick auf Spaltenkopf:</b> Spalte ein-/ausschließen</li>
@@ -2226,7 +2226,7 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
         </ul>
 
         <hr>
-        <h3>⚙ Optionen</h3>
+        <h3> Optionen</h3>
 
         <h4>Basis-Optionen:</h4>
         <ul>
@@ -2257,7 +2257,7 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
         </ul>
 
         <hr>
-        <h3>📁 Export-Ziel</h3>
+        <h3> Export-Ziel</h3>
         <ul>
             <li><b>Neue Datei:</b> Erstellt eine neue Excel- oder CSV-Datei</li>
             <li><b>Bestehende:</b> Fügt Daten in vorhandene Excel-Datei ein
@@ -2270,7 +2270,7 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
         </ul>
 
         <hr>
-        <h3>❓ Tipps</h3>
+        <h3> Tipps</h3>
         <ul>
             <li>Spalten können per Drag & Drop umsortiert werden</li>
             <li>Rechtsklick auf Spalte → "Umbenennen" ändert nur den Export-Namen</li>
@@ -2278,7 +2278,7 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
             <li>UTF-8 Encoding wird verwendet - Umlaute funktionieren korrekt</li>
         </ul>
         """
-        dialog = HelpDialog("📚 Hilfe - Excel Export", help_text, self)
+        dialog = HelpDialog(" Hilfe - Excel Export", help_text, self)
         dialog.exec_()
 
 
@@ -2360,7 +2360,7 @@ class AdvancedExcelExportDialog(QtWidgets.QDialog):
         # ============================================================
         # SECTION 1: Template Management
         # ============================================================
-        template_group = QtWidgets.QGroupBox("📋 Vorlagen")
+        template_group = QtWidgets.QGroupBox(" Vorlagen")
         template_layout = QtWidgets.QHBoxLayout(template_group)
         
         template_layout.addWidget(QtWidgets.QLabel("Vorlage:"))
@@ -2477,7 +2477,7 @@ class AdvancedExcelExportDialog(QtWidgets.QDialog):
         # ============================================================
         # SECTION 3: Export Options
         # ============================================================
-        options_group = QtWidgets.QGroupBox("⚙ Export-Optionen")
+        options_group = QtWidgets.QGroupBox(" Export-Optionen")
         options_layout = QtWidgets.QGridLayout(options_group)
         
         # Row 0: Sheet organization
@@ -2524,7 +2524,7 @@ class AdvancedExcelExportDialog(QtWidgets.QDialog):
         # ============================================================
         # SECTION 3.5: Export Target (New/Existing File)
         # ============================================================
-        target_group = QtWidgets.QGroupBox("📁 Export-Ziel")
+        target_group = QtWidgets.QGroupBox(" Export-Ziel")
         target_layout = QtWidgets.QVBoxLayout(target_group)
 
         # Radio buttons for new vs existing file
@@ -2617,7 +2617,7 @@ class AdvancedExcelExportDialog(QtWidgets.QDialog):
         # ============================================================
         # SECTION 4: Data Preview Table
         # ============================================================
-        preview_group = QtWidgets.QGroupBox("👁 Datenvorschau")
+        preview_group = QtWidgets.QGroupBox(" Datenvorschau")
         preview_layout = QtWidgets.QVBoxLayout(preview_group)
 
         # Status label
@@ -2637,7 +2637,7 @@ class AdvancedExcelExportDialog(QtWidgets.QDialog):
         # Preview controls
         preview_controls = QtWidgets.QHBoxLayout()
 
-        self.btn_update_preview = QtWidgets.QPushButton("🔄 Vorschau aktualisieren")
+        self.btn_update_preview = QtWidgets.QPushButton(" Vorschau aktualisieren")
         self.btn_update_preview.clicked.connect(self._update_data_preview)
         preview_controls.addWidget(self.btn_update_preview)
 
@@ -2656,7 +2656,7 @@ class AdvancedExcelExportDialog(QtWidgets.QDialog):
         # ============================================================
         button_layout = QtWidgets.QHBoxLayout()
 
-        self.btn_export = QtWidgets.QPushButton("📊 Exportieren")
+        self.btn_export = QtWidgets.QPushButton(" Exportieren")
         self.btn_export.setStyleSheet("font-weight: bold; padding: 8px;")
         self.btn_export.clicked.connect(self._on_export_clicked)
         button_layout.addWidget(self.btn_export)
@@ -2927,7 +2927,7 @@ class AdvancedExcelExportDialog(QtWidgets.QDialog):
             if not config['classes']:
                 self.preview_table.setRowCount(0)
                 self.preview_table.setColumnCount(0)
-                self.preview_status.setText("⚠ Keine Klassen ausgewählt!")
+                self.preview_status.setText(" Keine Klassen ausgewählt!")
                 self.preview_status.setStyleSheet("color: orange; font-weight: bold;")
                 self.preview_row_count.setText("")
                 return
@@ -2936,7 +2936,7 @@ class AdvancedExcelExportDialog(QtWidgets.QDialog):
             df_base = self.workspace.df_all.copy()
 
             if df_base.empty:
-                self.preview_status.setText("⚠ Keine Daten vorhanden!")
+                self.preview_status.setText(" Keine Daten vorhanden!")
                 self.preview_status.setStyleSheet("color: red; font-weight: bold;")
                 self.preview_row_count.setText("")
                 return
@@ -2982,7 +2982,7 @@ class AdvancedExcelExportDialog(QtWidgets.QDialog):
                     all_rows.append(row_data)
 
             if not all_rows:
-                self.preview_status.setText("⚠ Keine Daten nach Filterung!")
+                self.preview_status.setText(" Keine Daten nach Filterung!")
                 self.preview_status.setStyleSheet("color: orange; font-weight: bold;")
                 self.preview_row_count.setText("")
                 self.preview_table.setRowCount(0)
@@ -3019,18 +3019,18 @@ class AdvancedExcelExportDialog(QtWidgets.QDialog):
             self.preview_table.resizeColumnsToContents()
 
             # Update status
-            self.preview_status.setText("✓ Vorschau der Exportdaten:")
+            self.preview_status.setText(" Vorschau der Exportdaten:")
             self.preview_status.setStyleSheet("color: green; font-weight: bold;")
 
             if total_rows > max_preview_rows:
                 self.preview_row_count.setText(
-                    f"📊 {total_rows} Zeilen gesamt (zeige erste {max_preview_rows})"
+                    f" {total_rows} Zeilen gesamt (zeige erste {max_preview_rows})"
                 )
             else:
-                self.preview_row_count.setText(f"📊 {total_rows} Zeilen werden exportiert")
+                self.preview_row_count.setText(f" {total_rows} Zeilen werden exportiert")
 
         except Exception as e:
-            self.preview_status.setText(f"⚠ Fehler: {str(e)}")
+            self.preview_status.setText(f" Fehler: {str(e)}")
             self.preview_status.setStyleSheet("color: red;")
             self.preview_row_count.setText("")
             print(f"Preview error: {e}")
@@ -3340,7 +3340,7 @@ class AdvancedExcelExportDialog(QtWidgets.QDialog):
         <p>Zeigt eine Zusammenfassung Ihrer aktuellen Export-Einstellungen an. Klicken Sie auf <b>"Vorschau aktualisieren"</b>, um die Anzeige zu aktualisieren.</p>
 
         <h3>Export starten</h3>
-        <p>Klicken Sie auf <b>"📊 Exportieren"</b>, um den Export zu starten.</p>
+        <p>Klicken Sie auf <b>" Exportieren"</b>, um den Export zu starten.</p>
         <ul>
             <li><b>Bei neuer Datei:</b> Sie werden nach dem Speicherort gefragt.</li>
             <li><b>Bei bestehender Datei:</b> Die ausgewählte Datei wird direkt aktualisiert (ein Backup wird empfohlen!).</li>

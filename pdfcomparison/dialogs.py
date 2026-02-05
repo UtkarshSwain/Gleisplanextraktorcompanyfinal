@@ -105,26 +105,26 @@ class WorkspaceWindow(QtWidgets.QMainWindow):
         # Set size (same as main window)
         self.resize(1400, 900)
         
-        # ✅ FIX: Create central widget properly
+        #  FIX: Create central widget properly
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         
         main_layout = QtWidgets.QVBoxLayout(central)
-        main_layout.setContentsMargins(5, 5, 5, 5)  # ✅ Small margins
+        main_layout.setContentsMargins(5, 5, 5, 5)  #  Small margins
         main_layout.setSpacing(5)
         
         # Add redock button at top
-        redock_btn = QtWidgets.QPushButton("⬅️ Zurück ins Hauptfenster")
+        redock_btn = QtWidgets.QPushButton("⬅ Zurück ins Hauptfenster")
         redock_btn.setToolTip("Workspace zurück in Tab-Ansicht verschieben")
-        redock_btn.setMaximumHeight(30)  # ✅ Limit button height
+        redock_btn.setMaximumHeight(30)  #  Limit button height
         redock_btn.clicked.connect(self.redock_workspace)
         main_layout.addWidget(redock_btn)
         
-        # ✅ FIX: Properly reparent workspace widget
+        #  FIX: Properly reparent workspace widget
         workspace_widget.setParent(central)
         main_layout.addWidget(workspace_widget)
         
-        # ✅ FIX: Ensure workspace is visible
+        #  FIX: Ensure workspace is visible
         workspace_widget.setVisible(True)
         workspace_widget.show()
         
@@ -168,9 +168,9 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         
         # Instructions
         info_label = QtWidgets.QLabel(
-            "📋 Wählen Sie zwei geöffnete Gleispläne zum Vergleichen:\n"
+            " Wählen Sie zwei geöffnete Gleispläne zum Vergleichen:\n"
             "(z.B. 'layout_v1' und 'layout_v2')\n\n"
-            "ℹ️ Vergleicht: Klassen, Koordinatenwerte, hinzugefügte/gelöschte Elemente"
+            " Vergleicht: Klassen, Koordinatenwerte, hinzugefügte/gelöschte Elemente"
         )
         info_label.setObjectName("compareInfoLabel")
         layout.addWidget(info_label)
@@ -209,7 +209,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         layout.addLayout(selector_layout)
         
         # Compare button
-        self.btn_compare = QtWidgets.QPushButton("🔍 Vergleichen")
+        self.btn_compare = QtWidgets.QPushButton(" Vergleichen")
         self.btn_compare.clicked.connect(self.on_compare)
         layout.addWidget(self.btn_compare)
         
@@ -219,7 +219,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         # Summary tab
         self.summary_text = QtWidgets.QPlainTextEdit()
         self.summary_text.setReadOnly(True)
-        self.results_tabs.addTab(self.summary_text, "📊 Zusammenfassung")
+        self.results_tabs.addTab(self.summary_text, " Zusammenfassung")
         
         # Added tab
         self.added_table = QtWidgets.QTableWidget()
@@ -228,7 +228,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         self.added_table.horizontalHeader().setStretchLastSection(False)
         self.added_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         self.added_table.itemSelectionChanged.connect(self._on_table_selection_changed)  
-        self.results_tabs.addTab(self.added_table, "➕ Hinzugefügt")
+        self.results_tabs.addTab(self.added_table, " Hinzugefügt")
         
         # Deleted tab
         self.deleted_table = QtWidgets.QTableWidget()
@@ -237,7 +237,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         self.deleted_table.horizontalHeader().setStretchLastSection(False)
         self.deleted_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         self.deleted_table.itemSelectionChanged.connect(self._on_table_selection_changed)
-        self.results_tabs.addTab(self.deleted_table, "➖ Gelöscht")
+        self.results_tabs.addTab(self.deleted_table, " Gelöscht")
 
         # Moved tab (FA-011: Verschoben - coord_value changed = element moved along track)
         self.moved_table = QtWidgets.QTableWidget()
@@ -246,7 +246,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         self.moved_table.horizontalHeader().setStretchLastSection(False)
         self.moved_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         self.moved_table.itemSelectionChanged.connect(self._on_table_selection_changed)
-        self.results_tabs.addTab(self.moved_table, "↔️ Verschoben")
+        self.results_tabs.addTab(self.moved_table, "↔ Verschoben")
 
         # Modified tab
         self.modified_table = QtWidgets.QTableWidget()
@@ -255,7 +255,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         self.modified_table.horizontalHeader().setStretchLastSection(False)
         self.modified_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         self.modified_table.itemSelectionChanged.connect(self._on_table_selection_changed)
-        self.results_tabs.addTab(self.modified_table, "📝 Modifiziert")
+        self.results_tabs.addTab(self.modified_table, " Modifiziert")
         
         layout.addWidget(self.results_tabs)
 
@@ -263,7 +263,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         button_layout = QtWidgets.QHBoxLayout()
 
         # Export button
-        self.export_btn = QtWidgets.QPushButton("📥 Exportieren")
+        self.export_btn = QtWidgets.QPushButton(" Exportieren")
         self.export_btn.setToolTip("Vergleichsergebnisse als Excel exportieren")
         self.export_btn.setEnabled(False)  # Disabled until comparison is run
         self.export_btn.clicked.connect(self._export_results)
@@ -313,8 +313,12 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         elif current_tab == 2:  # Deleted tab
             self._highlight_in_workspace(change, is_new=False)
         elif current_tab == 3:  # Moved tab (FA-011: Verschoben)
-            # For moved, show both old and new positions
-            self._highlight_in_workspace(change, is_new=True, show_both=True)
+            # Check which column was clicked to determine primary workspace
+            clicked_col = selected_items[0].column() if selected_items else 0
+            # Column 2 = "Alte km-Position" → go to OLD workspace first
+            # Column 3 = "Neue km-Position" → go to NEW workspace first
+            is_new_primary = (clicked_col != 2)  # Default to new, unless "Alte" column clicked
+            self._highlight_in_workspace(change, is_new=is_new_primary, show_both=True)
         elif current_tab == 4:  # Modified tab
             # For modified, show both old and new
             self._highlight_in_workspace(change, is_new=True, show_both=True)
@@ -350,7 +354,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         
         print(f"[DIALOG] Highlighting row_id {row_id} on page {page} in {'new' if is_new else 'old'} workspace")
         
-        # ✅ CRITICAL: Switch to the correct workspace tab first
+        #  CRITICAL: Switch to the correct workspace tab first
         parent_window = self.parent_window
         
         if hasattr(parent_window, 'tab_widget'):
@@ -369,7 +373,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
             else:
                 print(f"[DIALOG] WARNING: Could not find workspace in tabs")
         
-        # ✅ Switch to the correct page within the workspace
+        #  Switch to the correct page within the workspace
         if hasattr(workspace, 'switch_to_page'):
             workspace.switch_to_page(page)
         elif hasattr(workspace, 'page_spin'):
@@ -378,9 +382,10 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
             print(f"[DIALOG] Switched to page {page}")
         
         # Small delay to ensure page has loaded
-        QtCore.QTimer.singleShot(100, lambda: self._do_highlight(workspace, row_id))
+        # CRITICAL: Use default arguments to capture values by VALUE, not reference
+        QtCore.QTimer.singleShot(100, lambda ws=workspace, rid=row_id: self._do_highlight(ws, rid))
         
-        # ✅ If show_both, also highlight in the other workspace
+        #  If show_both, also highlight in the other workspace
         if show_both:
             other_workspace = self.pdf1_combo.currentData() if is_new else self.pdf2_combo.currentData()
             other_data = change.old_data if is_new else change.new_data
@@ -405,7 +410,8 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
                         other_workspace.page_spin.setValue(other_page)
                     
                     # Highlight with delay
-                    QtCore.QTimer.singleShot(150, lambda: self._do_highlight(other_workspace, other_row_id))
+                    # CRITICAL: Use default arguments to capture values by VALUE, not reference
+                    QtCore.QTimer.singleShot(150, lambda ws=other_workspace, rid=other_row_id: self._do_highlight(ws, rid))
 
     def _do_highlight(self, workspace, row_id: int):
         """
@@ -436,17 +442,17 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         <ol>
             <li>Wählen Sie im Feld <b>"Gleisplan 1 (Alt)"</b> den älteren oder Referenz-Gleisplan aus.</li>
             <li>Wählen Sie im Feld <b>"Gleisplan 2 (Neu)"</b> den neueren oder zu vergleichenden Gleisplan aus.</li>
-            <li>Klicken Sie auf <b>"🔍 Vergleichen"</b>.</li>
+            <li>Klicken Sie auf <b>" Vergleichen"</b>.</li>
         </ol>
 
         <h3>Vergleichsergebnisse</h3>
         <p>Die Ergebnisse werden in verschiedenen Tabs angezeigt:</p>
         <ul>
-            <li><b>📊 Zusammenfassung:</b> Ein Überblick über die Anzahl der Änderungen.</li>
-            <li><b>➕ Hinzugefügt:</b> Elemente, die in Gleisplan 2 (Neu) vorhanden sind, aber nicht in Gleisplan 1 (Alt).</li>
-            <li><b>➖ Gelöscht:</b> Elemente, die in Gleisplan 1 (Alt) vorhanden waren, aber in Gleisplan 2 (Neu) fehlen.</li>
-            <li><b>↔️ Verschoben:</b> Elemente mit gleicher Kennung, aber unterschiedlicher Position.</li>
-            <li><b>📝 Modifiziert:</b> Elemente, die in beiden Gleisplänen vorhanden sind, sich aber in wichtigen Eigenschaften (Text, Koordinatenwert, Fahrtrichtung) unterscheiden.</li>
+            <li><b> Zusammenfassung:</b> Ein Überblick über die Anzahl der Änderungen.</li>
+            <li><b> Hinzugefügt:</b> Elemente, die in Gleisplan 2 (Neu) vorhanden sind, aber nicht in Gleisplan 1 (Alt).</li>
+            <li><b> Gelöscht:</b> Elemente, die in Gleisplan 1 (Alt) vorhanden waren, aber in Gleisplan 2 (Neu) fehlen.</li>
+            <li><b>↔ Verschoben:</b> Elemente mit gleicher Kennung, aber unterschiedlicher Position.</li>
+            <li><b> Modifiziert:</b> Elemente, die in beiden Gleisplänen vorhanden sind, sich aber in wichtigen Eigenschaften (Text, Koordinatenwert, Fahrtrichtung) unterscheiden.</li>
         </ul>
 
         <h3>Wichtige Hinweise</h3>
@@ -487,53 +493,53 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Fehler", "Bitte unterschiedliche Gleispläne wählen")
             return
         
-        # ✅ ADD DEBUG CODE HERE - BEFORE comparison
+        #  ADD DEBUG CODE HERE - BEFORE comparison
         print("\n" + "="*70)
-        print("🔍 DEBUGGING UUID PRESENCE")
+        print("DEBUGGING UUID PRESENCE")
         print("="*70)
         
         # Check DataFrame columns
-        print(f"\n📋 WS1 ({ws1.layout_name}) columns:")
-        print(f"   {list(ws1.df_all.columns)}")
+        print(f"\n WS1 ({ws1.layout_name}) columns:")
+        print(f"{list(ws1.df_all.columns)}")
         
-        print(f"\n📋 WS2 ({ws2.layout_name}) columns:")
-        print(f"   {list(ws2.df_all.columns)}")
+        print(f"\n WS2 ({ws2.layout_name}) columns:")
+        print(f"{list(ws2.df_all.columns)}")
         
         # Check if detection_id column exists
         has_uuid_ws1 = 'detection_id' in ws1.df_all.columns
         has_uuid_ws2 = 'detection_id' in ws2.df_all.columns
         
-        print(f"\n🔑 UUID column exists:")
-        print(f"   WS1: {has_uuid_ws1}")
-        print(f"   WS2: {has_uuid_ws2}")
+        print(f"\n UUID column exists:")
+        print(f"WS1: {has_uuid_ws1}")
+        print(f"WS2: {has_uuid_ws2}")
         
         if has_uuid_ws1:
             # Check if UUIDs are actually populated
             uuid_count_ws1 = ws1.df_all['detection_id'].notna().sum()
             total_ws1 = len(ws1.df_all)
-            print(f"\n📊 WS1 UUID stats:")
-            print(f"   Total rows: {total_ws1}")
-            print(f"   Rows with UUID: {uuid_count_ws1}")
-            print(f"   Rows without UUID: {total_ws1 - uuid_count_ws1}")
+            print(f"\nWS1 UUID stats:")
+            print(f"Total rows: {total_ws1}")
+            print(f"Rows with UUID: {uuid_count_ws1}")
+            print(f"Rows without UUID: {total_ws1 - uuid_count_ws1}")
             
             # Show first few UUIDs
             sample_uuids = ws1.df_all['detection_id'].dropna().head(3).tolist()
-            print(f"   Sample UUIDs: {sample_uuids}")
+            print(f"Sample UUIDs: {sample_uuids}")
         
         if has_uuid_ws2:
             uuid_count_ws2 = ws2.df_all['detection_id'].notna().sum()
             total_ws2 = len(ws2.df_all)
-            print(f"\n📊 WS2 UUID stats:")
-            print(f"   Total rows: {total_ws2}")
-            print(f"   Rows with UUID: {uuid_count_ws2}")
-            print(f"   Rows without UUID: {total_ws2 - uuid_count_ws2}")
+            print(f"\nWS2 UUID stats:")
+            print(f"Total rows: {total_ws2}")
+            print(f"Rows with UUID: {uuid_count_ws2}")
+            print(f"Rows without UUID: {total_ws2 - uuid_count_ws2}")
             
             sample_uuids = ws2.df_all['detection_id'].dropna().head(3).tolist()
-            print(f"   Sample UUIDs: {sample_uuids}")
+            print(f"Sample UUIDs: {sample_uuids}")
         
         print("="*70 + "\n")
         
-        # ✅ NOW run comparison
+        #  NOW run comparison
         try:
             engine = LayoutComparisonEngine()
             result = engine.compare(ws1.df_all, ws2.df_all)
@@ -563,25 +569,25 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
 
     ═══════════════════════════════════════════════════════
 
-    📊 ZUSAMMENFASSUNG:
+     ZUSAMMENFASSUNG:
 
-    ➕ HINZUGEFÜGT: {summary['total_added']} Element(e)
+     HINZUGEFÜGT: {summary['total_added']} Element(e)
     Neue Elemente in PDF 2, die in PDF 1 nicht vorhanden waren
 
-    ➖ GELÖSCHT: {summary['total_deleted']} Element(e)
+     GELÖSCHT: {summary['total_deleted']} Element(e)
     Elemente aus PDF 1, die in PDF 2 fehlen
 
-    ↔️ VERSCHOBEN: {summary.get('total_moved', 0)} Element(e)
+    ↔ VERSCHOBEN: {summary.get('total_moved', 0)} Element(e)
     Gleiche Kennung, aber unterschiedliche Position
 
-    📝 MODIFIZIERT: {summary['total_modified']} Element(e)
+     MODIFIZIERT: {summary['total_modified']} Element(e)
     Feldwerte geändert (Text, Koordinatenwert, etc.)
 
-    ✓ UNVERÄNDERT: {summary['total_unchanged']} Element(e)
+     UNVERÄNDERT: {summary['total_unchanged']} Element(e)
 
     ═══════════════════════════════════════════════════════
 
-    📋 ÄNDERUNGEN NACH KLASSE:
+     ÄNDERUNGEN NACH KLASSE:
 
     """
         
@@ -596,13 +602,13 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
                 if added or deleted or moved or modified:
                     summary_text += f"\n{cls}:\n"
                     if added:
-                        summary_text += f"   ➕ {added} hinzugefügt\n"
+                        summary_text += f"    {added} hinzugefügt\n"
                     if deleted:
-                        summary_text += f"   ➖ {deleted} gelöscht\n"
+                        summary_text += f"    {deleted} gelöscht\n"
                     if moved:
-                        summary_text += f"   ↔️ {moved} verschoben\n"
+                        summary_text += f"   ↔ {moved} verschoben\n"
                     if modified:
-                        summary_text += f"   📝 {modified} modifiziert\n"
+                        summary_text += f"    {modified} modifiziert\n"
         else:
             summary_text += "\n(Keine Änderungen nach Klasse)\n"
         
@@ -610,7 +616,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         
         # Add page breakdown
         if summary.get('by_page'):
-            summary_text += "\n📄 ÄNDERUNGEN NACH SEITE:\n\n"
+            summary_text += "\n ÄNDERUNGEN NACH SEITE:\n\n"
             for page, counts in sorted(summary['by_page'].items()):
                 added = counts.get('added', 0)
                 deleted = counts.get('deleted', 0)
@@ -620,16 +626,16 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
                 if added or deleted or moved or modified:
                     summary_text += f"Seite {page}:\n"
                     if added:
-                        summary_text += f"   ➕ {added} hinzugefügt\n"
+                        summary_text += f"    {added} hinzugefügt\n"
                     if deleted:
-                        summary_text += f"   ➖ {deleted} gelöscht\n"
+                        summary_text += f"    {deleted} gelöscht\n"
                     if moved:
-                        summary_text += f"   ↔️ {moved} verschoben\n"
+                        summary_text += f"   ↔ {moved} verschoben\n"
                     if modified:
-                        summary_text += f"   📝 {modified} modifiziert\n"
+                        summary_text += f"    {modified} modifiziert\n"
                     summary_text += "\n"
         
-        summary_text += "\n💡 Tipp: Klicken Sie auf eine Zeile, um das Element im Layout zu sehen.\n"
+        summary_text += "\n Tipp: Klicken Sie auf eine Zeile, um das Element im Layout zu sehen.\n"
         
         self.summary_text.setPlainText(summary_text)
         
@@ -697,7 +703,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
                 continue
             
             # Column 0: Class with indicator
-            indicator = "➕ " if is_added else "➖ "
+            indicator = " " if is_added else " "
             class_text = f"{indicator}{data.get('cls', '')}"
             table.setItem(i, 0, QtWidgets.QTableWidgetItem(class_text))
             
@@ -734,7 +740,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
             spatial = change.spatial_change or {}
 
             # Column 0: Class with indicator
-            class_text = f"↔️ {new_data.get('cls', '')}"
+            class_text = f"↔ {new_data.get('cls', '')}"
             table.setItem(i, 0, QtWidgets.QTableWidgetItem(class_text))
 
             # Column 1: Identifier (anchor_text or coord_text)
@@ -776,11 +782,11 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
             if not change.field_changes:
                 continue
             
-            data = change.new_data
-            
+            data = change.new_data or {}
+
             for field, diff in change.field_changes.items():
                 # Column 0: Class with change indicator
-                table.setItem(row_idx, 0, QtWidgets.QTableWidgetItem(f"📝 {data.get('cls', '')}"))
+                table.setItem(row_idx, 0, QtWidgets.QTableWidgetItem(f" {data.get('cls', '')}"))
                 
                 # Column 1: Anchor text
                 table.setItem(row_idx, 1, QtWidgets.QTableWidgetItem(str(data.get('anchor_text', ''))))
@@ -878,7 +884,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         # Update status
         gleisplan_name = "Gleisplan 2 (Neu)" if is_new else "Gleisplan 1 (Alt)"
         if hasattr(parent_window, '_set_status'):
-            parent_window._set_status(f"🪟 {gleisplan_name} ausgekoppelt - Verschieben Sie es auf Ihren zweiten Monitor")
+            parent_window._set_status(f" {gleisplan_name} ausgekoppelt - Verschieben Sie es auf Ihren zweiten Monitor")
 
     def closeEvent(self, event: QtGui.QCloseEvent):
         """Clear highlights when dialog is closed"""

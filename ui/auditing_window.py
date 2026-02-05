@@ -9,6 +9,7 @@ from typing import List, Dict, Tuple, Optional, Any
 import os
 import re
 import math
+from utils.dpi_utils import get_adaptive_window_size, center_window
 from ui.themes import DARK_QSS,LIGHT_QSS
 import pandas as pd
 import numpy as np
@@ -27,7 +28,11 @@ class AuditingWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.main_app_ref = main_app_ref
         self.setWindowTitle("RailDoc Studio - Bearbeitung & Korrektur")
-        self.resize(1400, 900)
+
+        # Adaptive window sizing for different DPI settings - large workspace
+        w, h = get_adaptive_window_size(1400, 900, max_screen_pct=0.90)
+        self.resize(w, h)
+        center_window(self)
         # Initialize status bar labels FIRST (before creating menus/toolbar)
         self.status_label = None
         self.row_count_label = None
@@ -63,16 +68,18 @@ class AuditingWindow(QtWidgets.QMainWindow):
         self.workspaces: Dict[int, WorkspaceWidget] = {}
         self.tab_widget.currentChanged.connect(self.update_status_bar)
         
-        self.statusBar().showMessage("✅ Analyse abgeschlossen - Sie können nun die Daten überprüfen und bearbeiten")
+        self.statusBar().showMessage(" Analyse abgeschlossen - Sie können nun die Daten überprüfen und bearbeiten")
     
     def add_workspace(self, layout_name: str, df_all: pd.DataFrame,
                     page_base_pix: Dict, page_dfs: Dict, page_bgr_arrays: Dict,
                     track_skeleton: Optional[np.ndarray] = None,
-                    from_database: bool = False):
+                    from_database: bool = False,
+                    uncertain_detections: list = None):
         """Add a new PDF workspace as a tab
 
         Args:
             from_database: If True, data was loaded from database (skip DB check in workspace)
+            uncertain_detections: List of low-confidence detections for user review
         """
         from ui.workspace_widget import WorkspaceWidget
 
@@ -85,7 +92,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
 
         # Create workspace widget
         workspace = WorkspaceWidget(self, layout_name)
-        workspace.load_data(df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, from_database)
+        workspace.load_data(df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, from_database, uncertain_detections or [])
         
         # Add as tab (use filename without extension for cleaner look)
         tab_label = os.path.basename(layout_name)
@@ -155,140 +162,153 @@ class AuditingWindow(QtWidgets.QMainWindow):
         # File Menu - Essential save and export operations
         file_menu = mb.addMenu("Datei")
 
-        act_save = file_menu.addAction("💾 Speichern")
+        act_save = file_menu.addAction(" Speichern")
         act_save.setShortcut("Ctrl+S")
         act_save.setToolTip("Speichert den aktuellen Plan")
         act_save.triggered.connect(self.on_save_current)
 
-        act_save_all = file_menu.addAction("💾 Alle speichern")
+        act_save_all = file_menu.addAction(" Alle speichern")
         act_save_all.setShortcut("Ctrl+Shift+S")
         act_save_all.setToolTip("Speichert alle geöffneten Pläne")
         act_save_all.triggered.connect(self.on_save_all)
 
         file_menu.addSeparator()
 
-        act_export_excel = file_menu.addAction("📊 Excel Export")
+        act_export_excel = file_menu.addAction(" Excel Export")
         act_export_excel.setShortcut("Ctrl+E")
         act_export_excel.setToolTip("Exportiert als Excel-Datei")
         act_export_excel.triggered.connect(self.on_export_excel)
 
-        act_export_json = file_menu.addAction("📄 JSON Export")
+        act_export_json = file_menu.addAction(" JSON Export")
         act_export_json.setShortcut("Ctrl+J")
         act_export_json.setToolTip("Exportiert als JSON-Datei")
         act_export_json.triggered.connect(self.on_export_json)
 
         file_menu.addSeparator()
 
-        act_close_tab = file_menu.addAction("❌ Tab schließen")
+        act_close_tab = file_menu.addAction(" Tab schließen")
         act_close_tab.setShortcut("Ctrl+W")
         act_close_tab.triggered.connect(lambda: self.on_close_tab(self.tab_widget.currentIndex()))
 
         # Edit Menu - Basic editing operations
         edit_menu = mb.addMenu("Bearbeiten")
 
-        act_find = edit_menu.addAction("🔍 Suchen")
+        act_find = edit_menu.addAction(" Suchen")
         act_find.setShortcut("Ctrl+F")
         act_find.triggered.connect(self.on_find_replace)
 
         edit_menu.addSeparator()
 
-        act_copy = edit_menu.addAction("📋 Kopieren")
+        act_copy = edit_menu.addAction(" Kopieren")
         act_copy.setShortcut("Ctrl+C")
         act_copy.triggered.connect(self.on_copy)
 
-        act_paste = edit_menu.addAction("📌 Einfügen")
+        act_paste = edit_menu.addAction(" Einfügen")
         act_paste.setShortcut("Ctrl+V")
         act_paste.triggered.connect(self.on_paste)
 
         edit_menu.addSeparator()
 
-        act_add_row = edit_menu.addAction("➕ Zeile hinzufügen")
+        act_add_row = edit_menu.addAction(" Zeile hinzufügen")
         act_add_row.setShortcut("Ctrl+Shift+N")
         act_add_row.triggered.connect(self.on_add_row)
 
-        act_del_rows = edit_menu.addAction("🗑️ Zeilen löschen")
+        act_del_rows = edit_menu.addAction(" Zeilen löschen")
         act_del_rows.setShortcut("Ctrl+D")
         act_del_rows.triggered.connect(self.on_delete_selected_table_rows)
 
         edit_menu.addSeparator()
 
-        act_bulk = edit_menu.addAction("✏️ Massenbearbeitung")
+        act_bulk = edit_menu.addAction(" Massenbearbeitung")
         act_bulk.setToolTip("Bearbeitet mehrere Zeilen gleichzeitig")
         act_bulk.triggered.connect(self.on_bulk_edit)
 
         # Data Menu - Sort and filter
         data_menu = mb.addMenu("Daten")
 
-        act_sort = data_menu.addAction("🔀 Sortieren")
+        act_sort = data_menu.addAction(" Sortieren")
         act_sort.triggered.connect(self.on_sort)
 
-        act_filter = data_menu.addAction("🔍 Filter")
+        act_filter = data_menu.addAction(" Filter")
         act_filter.triggered.connect(self.on_filter)
 
         data_menu.addSeparator()
 
-        act_stats = data_menu.addAction("📈 Statistik")
+        act_stats = data_menu.addAction(" Statistik")
         act_stats.setToolTip("Zeigt Statistiken über die Daten")
         act_stats.triggered.connect(self.on_statistics)
 
         data_menu.addSeparator()
 
-        act_db_manager = data_menu.addAction("🗄️ Datenbank-Manager...")
+        act_db_manager = data_menu.addAction(" Datenbank-Manager...")
         act_db_manager.setToolTip("Gespeicherte Daten und Arbeitsbereiche verwalten")
         act_db_manager.triggered.connect(self._show_database_manager)
 
         # Compare Menu - Gleisplan comparison (IMPORTANT FEATURE!)
         compare_menu = mb.addMenu("Vergleichen")
 
-        act_compare = compare_menu.addAction("🔍 Zwei Gleispläne vergleichen")
+        act_compare = compare_menu.addAction(" Zwei Gleispläne vergleichen")
         act_compare.setToolTip("Vergleicht zwei geöffnete Gleispläne um Unterschiede zu finden")
         act_compare.triggered.connect(self.on_compare_pdfs)
 
         # View Menu - Simple view options
         view_menu = mb.addMenu("Ansicht")
 
-        act_expand_all = view_menu.addAction("📂 Alle ausklappen")
+        act_expand_all = view_menu.addAction(" Alle ausklappen")
         act_expand_all.triggered.connect(self.on_expand_all)
 
-        act_collapse_all = view_menu.addAction("📁 Alle einklappen")
+        act_collapse_all = view_menu.addAction(" Alle einklappen")
         act_collapse_all.triggered.connect(self.on_collapse_all)
 
         view_menu.addSeparator()
 
-        act_resize = view_menu.addAction("📏 Spaltenbreite anpassen")
+        act_resize = view_menu.addAction(" Spaltenbreite anpassen")
         act_resize.triggered.connect(self.on_resize_columns)
 
         # Symbols Menu - Symbol management
         symbol_menu = mb.addMenu("Symbole")
-        act_new_symbol = symbol_menu.addAction("➕ Neues Symbol definieren")
+        act_new_symbol = symbol_menu.addAction(" Neues Symbol definieren")
         act_new_symbol.setToolTip("Neues Symbol ohne Modell-Training definieren")
         act_new_symbol.triggered.connect(self.on_add_new_symbol)
 
         symbol_menu.addSeparator()
 
-        act_run_template = symbol_menu.addAction("🔍 Template Matching")
+        act_run_template = symbol_menu.addAction(" Template Matching")
         act_run_template.setToolTip("Sucht nach neu definierten Symbolen im Layout")
         act_run_template.triggered.connect(self.on_run_template_matching_only)
 
         # Help Menu
         help_menu = mb.addMenu("Hilfe")
-        help_menu.addAction("📖 Bedienungsanleitung", self._show_help_guide)
+        help_menu.addAction(" Bedienungsanleitung", self._show_help_guide)
         help_menu.addSeparator()
-        help_menu.addAction("ℹ Über", self._show_about)
+        help_menu.addAction(" Über", self._show_about)
     
     def _create_toolbar(self):
         """Create streamlined toolbar with essential tools only"""
         toolbar = self.addToolBar("Hauptwerkzeuge")
         toolbar.setMovable(False)
 
+        # Make toolbar buttons bigger with larger font
+        toolbar.setStyleSheet("""
+            QToolBar {
+                spacing: 4px;
+                padding: 4px;
+            }
+            QToolButton {
+                font-size: 11pt;
+                padding: 6px 10px;
+                min-height: 28px;
+            }
+        """)
+
         # Save Section - Most important actions first
-        act_save = QtWidgets.QAction("💾 Speichern", self)
+        act_save = QtWidgets.QAction(" Speichern", self)
         act_save.setShortcut("Ctrl+S")
         act_save.setToolTip("Speichert alle Änderungen (Strg+S)")
         act_save.triggered.connect(self.on_save_current)
         toolbar.addAction(act_save)
 
-        act_save_all = QtWidgets.QAction("💾 Alle", self)
+        act_save_all = QtWidgets.QAction(" Alle", self)
         act_save_all.setShortcut("Ctrl+Shift+S")
         act_save_all.setToolTip("Speichert alle geöffneten Pläne (Strg+Shift+S)")
         act_save_all.triggered.connect(self.on_save_all)
@@ -297,12 +317,12 @@ class AuditingWindow(QtWidgets.QMainWindow):
         toolbar.addSeparator()
 
         # Clipboard Section
-        act_copy = QtWidgets.QAction("📋 Kopieren", self)
+        act_copy = QtWidgets.QAction(" Kopieren", self)
         act_copy.setToolTip("Kopiert ausgewählte Zellen (Strg+C)")
         act_copy.triggered.connect(self.on_copy)
         toolbar.addAction(act_copy)
 
-        act_paste = QtWidgets.QAction("📌 Einfügen", self)
+        act_paste = QtWidgets.QAction(" Einfügen", self)
         act_paste.setToolTip("Fügt kopierte Daten ein (Strg+V)")
         act_paste.triggered.connect(self.on_paste)
         toolbar.addAction(act_paste)
@@ -310,17 +330,17 @@ class AuditingWindow(QtWidgets.QMainWindow):
         toolbar.addSeparator()
 
         # Search and Data Management
-        act_find = QtWidgets.QAction("🔍 Suchen", self)
+        act_find = QtWidgets.QAction(" Suchen", self)
         act_find.setToolTip("Sucht und ersetzt Text (Strg+F)")
         act_find.triggered.connect(self.on_find_replace)
         toolbar.addAction(act_find)
 
-        act_sort = QtWidgets.QAction("🔀 Sortieren", self)
+        act_sort = QtWidgets.QAction(" Sortieren", self)
         act_sort.setToolTip("Sortiert Daten nach Spalte")
         act_sort.triggered.connect(self.on_sort)
         toolbar.addAction(act_sort)
 
-        act_filter = QtWidgets.QAction("🔍 Filter", self)
+        act_filter = QtWidgets.QAction(" Filter", self)
         act_filter.setToolTip("Filtert Daten nach Kriterien")
         act_filter.triggered.connect(self.on_filter)
         toolbar.addAction(act_filter)
@@ -328,52 +348,52 @@ class AuditingWindow(QtWidgets.QMainWindow):
         toolbar.addSeparator()
 
         # Export Section
-        act_excel = QtWidgets.QAction("📊 Excel Export", self)
+        act_excel = QtWidgets.QAction(" Excel Export", self)
         act_excel.setToolTip("Exportiert als Excel-Datei (Strg+E)")
         act_excel.triggered.connect(self.on_export_excel)
         toolbar.addAction(act_excel)
 
-        act_json = QtWidgets.QAction("📄 JSON", self)
+        act_json = QtWidgets.QAction(" JSON", self)
         act_json.setToolTip("Exportiert als JSON (Strg+J)")
         act_json.triggered.connect(self.on_export_json)
         toolbar.addAction(act_json)
 
         toolbar.addSeparator()
 
-        # Advanced Features
-        act_bulk = QtWidgets.QAction("✏️ Massenbearbeitung", self)
-        act_bulk.setToolTip("Bearbeitet mehrere Zeilen gleichzeitig")
+        # Advanced Features - with clearer labels for non-technical users
+        act_bulk = QtWidgets.QAction(" Mehrere ändern", self)
+        act_bulk.setToolTip("Mehrere Einträge gleichzeitig bearbeiten\n\nNützlich wenn Sie viele ähnliche\nÄnderungen machen möchten")
         act_bulk.triggered.connect(self.on_bulk_edit)
         toolbar.addAction(act_bulk)
 
-        act_compare = QtWidgets.QAction("🔍 Vergleichen", self)
-        act_compare.setToolTip("Vergleicht zwei Gleispläne")
+        act_compare = QtWidgets.QAction(" Pläne vergleichen", self)
+        act_compare.setToolTip("Zwei Gleispläne nebeneinander vergleichen\n\nHilft Unterschiede zwischen\nVersionen zu finden")
         act_compare.triggered.connect(self.on_compare_pdfs)
         toolbar.addAction(act_compare)
 
         toolbar.addSeparator()
 
-        # Row Management
-        act_add_row = QtWidgets.QAction("➕ Zeile", self)
-        act_add_row.setToolTip("Fügt neue Zeile hinzu (Strg+Shift+N)")
+        # Row Management - clearer labels
+        act_add_row = QtWidgets.QAction(" Neuer Eintrag", self)
+        act_add_row.setToolTip("Neuen Eintrag hinzufügen (Strg+Shift+N)\n\nErstellt einen neuen leeren Eintrag")
         act_add_row.triggered.connect(self.on_add_row)
         toolbar.addAction(act_add_row)
 
-        act_del_row = QtWidgets.QAction("🗑️ Löschen", self)
-        act_del_row.setToolTip("Löscht ausgewählte Zeilen (Strg+D)")
+        act_del_row = QtWidgets.QAction(" Entfernen", self)
+        act_del_row.setToolTip("Ausgewählte Einträge entfernen (Strg+D)\n\n Diese Aktion kann nicht\nrückgängig gemacht werden")
         act_del_row.triggered.connect(self.on_delete_selected_table_rows)
         toolbar.addAction(act_del_row)
 
         toolbar.addSeparator()
 
-        # Symbol Management
-        self.act_new_symbol = QtWidgets.QAction("➕ Neues Symbol", self)
-        self.act_new_symbol.setToolTip("Definiert neues Symbol ohne Modell-Training")
+        # Symbol Management - clearer German labels
+        self.act_new_symbol = QtWidgets.QAction(" Symbol definieren", self)
+        self.act_new_symbol.setToolTip("Neues Symbol definieren\n\nErmöglicht das Hinzufügen von\nSymbolen die nicht automatisch\nerkannt wurden")
         self.act_new_symbol.triggered.connect(self.on_add_new_symbol)
         toolbar.addAction(self.act_new_symbol)
 
-        self.act_run_template = QtWidgets.QAction("🔍 Template Matching", self)
-        self.act_run_template.setToolTip("Sucht nach neu definierten Symbolen")
+        self.act_run_template = QtWidgets.QAction(" Symbol suchen", self)
+        self.act_run_template.setToolTip("Nach definierten Symbolen suchen\n\nFindet alle Vorkommen eines\nneu definierten Symbols im Plan")
         self.act_run_template.triggered.connect(self.on_run_template_matching_only)
         toolbar.addAction(self.act_run_template)
 
@@ -382,11 +402,11 @@ class AuditingWindow(QtWidgets.QMainWindow):
         self.status_bar = self.statusBar()
 
         # Create labels with icons - no custom styling
-        self.status_label = QtWidgets.QLabel("✅ Bereit")
+        self.status_label = QtWidgets.QLabel("Bereit")
 
-        self.row_count_label = QtWidgets.QLabel("📊 Zeilen: 0")
+        self.row_count_label = QtWidgets.QLabel("Zeilen: 0")
 
-        self.selection_label = QtWidgets.QLabel("🔍 Auswahl: 0")
+        self.selection_label = QtWidgets.QLabel("Auswahl: 0")
 
         # Add to status bar
         self.status_bar.addWidget(self.status_label, 1)
@@ -433,13 +453,13 @@ class AuditingWindow(QtWidgets.QMainWindow):
         workspace = self.workspaces.get(idx)
         if workspace:
             workspace.save_to_db()
-            self.statusBar().showMessage(f"✅ {workspace.layout_name} gespeichert")
+            self.statusBar().showMessage(f" {workspace.layout_name} gespeichert")
     
     def on_save_all(self):
         """Save all open workspaces"""
         for workspace in self.workspaces.values():
             workspace.save_to_db()
-        self.statusBar().showMessage(f"✅ Alle {len(self.workspaces)} Workspaces gespeichert")
+        self.statusBar().showMessage(f" Alle {len(self.workspaces)} Workspaces gespeichert")
     
     def on_export_excel(self):
         """Export current workspace to Excel"""
@@ -472,12 +492,12 @@ class AuditingWindow(QtWidgets.QMainWindow):
         
         #  MAKE IT A CHILD WINDOW (minimizes within app)
         dialog.setWindowFlags(
-            QtCore.Qt.Dialog |  # ✅ Changed from Window to Dialog
+            QtCore.Qt.Dialog |  #  Changed from Window to Dialog
             QtCore.Qt.WindowMinimizeButtonHint |
             QtCore.Qt.WindowMaximizeButtonHint |
             QtCore.Qt.WindowCloseButtonHint
         )
-        dialog.setModal(False)  # ✅ Ensure it's non-modal
+        dialog.setModal(False)  #  Ensure it's non-modal
 
         # Apply theme
         if self.main_app_ref._current_theme == "dark":
@@ -485,7 +505,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
         else:
             dialog.setStyleSheet(LIGHT_QSS)
         
-        # ✅ SHOW NON-MODAL (not exec_())
+        #  SHOW NON-MODAL (not exec_())
         dialog.show()
 
     def on_add_new_symbol(self):
@@ -595,7 +615,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
         import time
         import sys
         print("\n" + "="*60, flush=True)
-        print("🔍 TEMPLATE MATCHING ONLY - STARTED", flush=True)
+        print("TEMPLATE MATCHING ONLY - STARTED", flush=True)
         print("="*60, flush=True)
 
         # Get current workspace
@@ -610,13 +630,13 @@ class AuditingWindow(QtWidgets.QMainWindow):
             )
             return
 
-        print(f"   workspace.page_bgr_arrays: {len(workspace.page_bgr_arrays)} pages", flush=True)
-        print(f"   workspace.page_base_pix: {len(workspace.page_base_pix) if workspace.page_base_pix else 0} pages", flush=True)
+        print(f"workspace.page_bgr_arrays: {len(workspace.page_bgr_arrays)} pages", flush=True)
+        print(f"workspace.page_base_pix: {len(workspace.page_base_pix) if workspace.page_base_pix else 0} pages", flush=True)
 
         if not workspace.page_bgr_arrays:
             # Try to rebuild from page_base_pix if available
             if workspace.page_base_pix:
-                print("   🔄 Rebuilding page_bgr_arrays from page_base_pix...")
+                print(f" Rebuilding page_bgr_arrays from page_base_pix...")
                 import cv2
                 for pidx, pix in workspace.page_base_pix.items():
                     if pix is not None:
@@ -629,8 +649,8 @@ class AuditingWindow(QtWidgets.QMainWindow):
                         arr = np.array(ptr).reshape(height, width, 4)
                         bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
                         workspace.page_bgr_arrays[pidx] = bgr
-                        print(f"      Page {pidx}: rebuilt {bgr.shape}")
-                print(f"   ✅ Rebuilt {len(workspace.page_bgr_arrays)} pages")
+                        print(f"Page {pidx}: rebuilt {bgr.shape}")
+                print(f"Rebuilt {len(workspace.page_bgr_arrays)} pages")
             else:
                 QtWidgets.QMessageBox.warning(
                     self,
@@ -732,12 +752,12 @@ class AuditingWindow(QtWidgets.QMainWindow):
                             existing_custom_centers[page] = []
                         existing_custom_centers[page].append((cx, cy, cls))
 
-                    print(f"   ℹ️ Found {len(custom_df)} existing custom symbol detections", flush=True)
+                    print(f"Found {len(custom_df)} existing custom symbol detections", flush=True)
 
             if already_detected_classes:
-                print(f"   ℹ️ Already detected custom symbol classes: {already_detected_classes}", flush=True)
+                print(f"Already detected custom symbol classes: {already_detected_classes}", flush=True)
                 total_existing = sum(len(centers) for centers in existing_custom_centers.values())
-                print(f"   ℹ️ Total existing positions to check: {total_existing}", flush=True)
+                print(f"Total existing positions to check: {total_existing}", flush=True)
 
             # Filter symbol_names to only detect symbols that aren't already fully detected
             # But still allow detection at NEW positions for partially detected symbols
@@ -755,7 +775,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
             import os
             from concurrent.futures import ThreadPoolExecutor, as_completed
             max_workers = min(os.cpu_count() or 4, 8)  # Use up to 8 cores
-            print(f"   ℹ️ Using {max_workers} CPU threads for template matching", flush=True)
+            print(f"Using {max_workers} CPU threads for template matching", flush=True)
 
             # Show progress dialog with accurate tile count
             progress = QtWidgets.QProgressDialog(
@@ -870,7 +890,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
                         page_detections[page_num].extend(tile_dets)
 
                     except Exception as e:
-                        print(f"   ⚠️ Tile processing error: {e}")
+                        print(f"Tile processing error: {e}")
 
                     tiles_processed += 1
 
@@ -975,11 +995,11 @@ class AuditingWindow(QtWidgets.QMainWindow):
             progress.close()
 
             # Debug: Show detection counts
-            print(f"\n📊 Detection Summary:")
-            print(f"   Total pages processed: {len(page_detections)}")
+            print(f"\nDetection Summary:")
+            print(f"Total pages processed: {len(page_detections)}")
             total_raw = sum(len(dets) for dets in page_detections.values())
-            print(f"   Raw detections before NMS: {total_raw}")
-            print(f"   Detections after NMS: {len(all_new_detections)}")
+            print(f"Raw detections before NMS: {total_raw}")
+            print(f"Detections after NMS: {len(all_new_detections)}")
 
             if not all_new_detections:
                 QtWidgets.QMessageBox.information(
@@ -1046,7 +1066,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
             # Link new custom symbols to nearby text (coordinates) from existing data
             # Uses symbol definition settings: links_to_coordinate, coordinate_position, max_link_distance
             # ========================================================================
-            print(f"\n🔗 Linking new symbols to existing text...", flush=True)
+            print(f"\n Linking new symbols to existing text...", flush=True)
             linked_count = 0
 
             for page_num in new_df['page'].unique():
@@ -1060,7 +1080,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
                 coords = existing_df[coord_mask]
 
                 if coords.empty:
-                    print(f"   Page {page_num}: No coordinates found for linking")
+                    print(f"Page {page_num}: No coordinates found for linking")
                     continue
 
                 # Get set of coord_texts that are already linked to other anchors
@@ -1076,7 +1096,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
                 # Convert to list of dicts for linking (excluding already linked)
                 coord_list = []
                 # DEBUG: Show available columns
-                print(f"   📋 Coordinate columns: {list(coords.columns)}")
+                print(f" Coordinate columns: {list(coords.columns)}")
 
                 for _, c in coords.iterrows():
                     try:
@@ -1129,12 +1149,12 @@ class AuditingWindow(QtWidgets.QMainWindow):
                                 'name': 'coordinate'
                             })
                         else:
-                            print(f"   ⚠️ Coord '{text}' missing position: x1={x1}, y1={y1}, x2={x2}, y2={y2}")
+                            print(f"Coord '{text}' missing position: x1={x1}, y1={y1}, x2={x2}, y2={y2}")
                     except Exception as e:
-                        print(f"   ⚠️ Error processing coordinate: {e}")
+                        print(f"Error processing coordinate: {e}")
                         continue
 
-                print(f"   Page {page_num}: {len(coord_list)} unlinked coordinates available")
+                print(f"Page {page_num}: {len(coord_list)} unlinked coordinates available")
 
                 # Link each new detection on this page
                 page_new = new_df[new_df['page'] == page_num]
@@ -1149,15 +1169,15 @@ class AuditingWindow(QtWidgets.QMainWindow):
 
                         # DEBUG: Print symbol definition settings
                         if symbol_def:
-                            print(f"   🔍 Symbol '{symbol_name}': links_to_coordinate={symbol_def.links_to_coordinate}, "
+                            print(f"Symbol '{symbol_name}': links_to_coordinate={symbol_def.links_to_coordinate}, "
                                   f"coord_position={symbol_def.coordinate_position}, max_dist={symbol_def.max_link_distance}")
                         else:
-                            print(f"   ⚠️ No symbol definition found for '{symbol_name}'")
+                            print(f"No symbol definition found for '{symbol_name}'")
 
                         # ONLY link if symbol definition has links_to_coordinate=True
                         # Skip linking entirely for symbols without this setting
                         if not symbol_def or not symbol_def.links_to_coordinate:
-                            print(f"      ⏭️ Skipping coordinate linking (links_to_coordinate=False)")
+                            print(f"Skipping coordinate linking (links_to_coordinate=False)")
                             continue
 
                         max_link_dist = symbol_def.max_link_distance
@@ -1180,11 +1200,11 @@ class AuditingWindow(QtWidgets.QMainWindow):
 
                         # Check for NaN in detection coordinates
                         if pd.isna(det_cx) or pd.isna(det_cy):
-                            print(f"      ⚠️ Symbol has NaN coordinates, skipping")
+                            print(f"Symbol has NaN coordinates, skipping")
                             continue
 
                         # DEBUG: Show what we're looking for
-                        print(f"      Looking for coords within {max_link_dist}px, positions={coord_positions}")
+                        print(f"Looking for coords within {max_link_dist}px, positions={coord_positions}")
 
                         for coord in coord_list:
                             dx = coord['cx'] - det_cx
@@ -1192,7 +1212,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
                             dist = (dx**2 + dy**2) ** 0.5
 
                             if dist > max_link_dist:
-                                print(f"      ❌ Coord '{coord.get('text', '?')}' too far: {dist:.0f}px > {max_link_dist}px")
+                                print(f"Coord '{coord.get('text', '?')}' too far: {dist:.0f}px > {max_link_dist}px")
                                 continue
 
                             # Check position constraint with angle-aware direction
@@ -1239,9 +1259,9 @@ class AuditingWindow(QtWidgets.QMainWindow):
 
                             # DEBUG: Show position check result
                             if not position_ok:
-                                print(f"      ❌ Coord '{coord.get('text', '?')}' wrong position: dx={dx_local:.0f}, dy={dy_local:.0f}, need {coord_positions}")
+                                print(f"Coord '{coord.get('text', '?')}' wrong position: dx={dx_local:.0f}, dy={dy_local:.0f}, need {coord_positions}")
                             else:
-                                print(f"      ✓ Coord '{coord.get('text', '?')}' OK: dist={dist:.0f}px, dx={dx_local:.0f}, dy={dy_local:.0f}")
+                                print(f" Coord '{coord.get('text', '?')}' OK: dist={dist:.0f}px, dx={dx_local:.0f}, dy={dy_local:.0f}")
 
                             if position_ok and dist < best_dist:
                                 best_dist = dist
@@ -1251,27 +1271,27 @@ class AuditingWindow(QtWidgets.QMainWindow):
                             new_df.at[idx, 'coord_text'] = best_coord['text']
                             linked_count += 1
                             pos_info = f", pos={coord_positions}" if symbol_def else ""
-                            print(f"   Linked row {det['row_id']} to coord '{best_coord['text']}' (dist={best_dist:.0f}px{pos_info})")
+                            print(f"Linked row {det['row_id']} to coord '{best_coord['text']}' (dist={best_dist:.0f}px{pos_info})")
                             # Remove this coordinate from available pool so it's not linked again
                             coord_list = [c for c in coord_list if c.get('text') != best_coord.get('text')]
                     except Exception as e:
-                        print(f"   ⚠️ Error linking detection: {e}")
+                        print(f"Error linking detection: {e}")
 
-            print(f"   ✅ Linked {linked_count} symbols to text", flush=True)
+            print(f"Linked {linked_count} symbols to text", flush=True)
 
             # ========================================================================
             # Run OCR for symbols with has_text=True in their definition
             # Uses the same ocr_custom_symbol_text function as the full pipeline
             # ========================================================================
-            print(f"\n📝 Running OCR for symbols with text regions...", flush=True)
+            print(f"\n Running OCR for symbols with text regions...", flush=True)
 
             # DEBUG: Show all loaded symbol definitions
-            print(f"\n🔍 DEBUG: Symbol definitions loaded in detector:")
+            print(f"\nDEBUG: Symbol definitions loaded in detector:")
             for sym_name, sym_def in detector.symbols.items():
                 print(f"  - {sym_name}: has_text={sym_def.has_text}, text_position={sym_def.text_position}, text_region_offset={sym_def.text_region_offset}")
 
             # DEBUG: Show symbols in new_df
-            print(f"\n🔍 DEBUG: Symbols in new_df:")
+            print(f"\nDEBUG: Symbols in new_df:")
             for symbol_name in new_df['cls'].unique():
                 count = len(new_df[new_df['cls'] == symbol_name])
                 print(f"  - {symbol_name}: {count} instances")
@@ -1281,7 +1301,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
             try:
                 from core.ocr_engine import ocr_custom_symbol_text
             except ImportError as e:
-                print(f"   ⚠️ OCR not available: {e}")
+                print(f"OCR not available: {e}")
             else:
                 for idx, det in new_df.iterrows():
                     try:
@@ -1290,10 +1310,10 @@ class AuditingWindow(QtWidgets.QMainWindow):
 
                         # DEBUG: Show why symbols are skipped
                         if not symbol_def:
-                            print(f"   ⚠️ SKIP row {det['row_id']} ({symbol_name}): symbol_def is None")
+                            print(f"SKIP row {det['row_id']} ({symbol_name}): symbol_def is None")
                             continue
                         if not symbol_def.has_text:
-                            print(f"   ⚠️ SKIP row {det['row_id']} ({symbol_name}): has_text=False")
+                            print(f"SKIP row {det['row_id']} ({symbol_name}): has_text=False")
                             continue
 
                         page_num = det['page']
@@ -1316,9 +1336,9 @@ class AuditingWindow(QtWidgets.QMainWindow):
                         }
 
                         # DEBUG: Show what we're about to OCR
-                        print(f"   🔍 Running OCR for row {det['row_id']} ({symbol_name}):")
-                        print(f"      text_position={symbol_def.text_position}")
-                        print(f"      text_region_offset={symbol_def.text_region_offset}")
+                        print(f"Running OCR for row {det['row_id']} ({symbol_name}):")
+                        print(f"text_position={symbol_def.text_position}")
+                        print(f"text_region_offset={symbol_def.text_region_offset}")
 
                         # Use the same OCR function as the full pipeline
                         # This handles rotation properly for all angles (0°, 90°, 180°, 270°)
@@ -1335,7 +1355,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
                         )
 
                         # DEBUG: Show OCR result
-                        print(f"      Result: text='{ocr_text}', ocr_bbox={ocr_bbox}, ocr_position={ocr_position}, ocr_conf={ocr_conf:.2f}")
+                        print(f"Result: text='{ocr_text}', ocr_bbox={ocr_bbox}, ocr_position={ocr_position}, ocr_conf={ocr_conf:.2f}")
 
                         if ocr_text:
                             new_df.at[idx, 'anchor_text'] = ocr_text
@@ -1347,9 +1367,9 @@ class AuditingWindow(QtWidgets.QMainWindow):
                                 new_df.at[idx, 'ocr_x2'] = ocr_bbox[2]
                                 new_df.at[idx, 'ocr_y2'] = ocr_bbox[3]
                                 new_df.at[idx, 'ocr_region_source'] = ocr_position
-                                print(f"      ✅ Stored OCR bbox: ({ocr_bbox[0]:.0f}, {ocr_bbox[1]:.0f}, {ocr_bbox[2]:.0f}, {ocr_bbox[3]:.0f})")
+                                print(f"Stored OCR bbox: ({ocr_bbox[0]:.0f}, {ocr_bbox[1]:.0f}, {ocr_bbox[2]:.0f}, {ocr_bbox[3]:.0f})")
                             ocr_count += 1
-                            print(f"   OCR row {det['row_id']}: '{ocr_text}' (angle={angle:.0f}°, pos={ocr_position}, conf={ocr_conf:.2f})")
+                            print(f"OCR row {det['row_id']}: '{ocr_text}' (angle={angle:.0f}°, pos={ocr_position}, conf={ocr_conf:.2f})")
                         else:
                             # Even if no text found, store bbox if it exists
                             if ocr_bbox:
@@ -1358,20 +1378,20 @@ class AuditingWindow(QtWidgets.QMainWindow):
                                 new_df.at[idx, 'ocr_x2'] = ocr_bbox[2]
                                 new_df.at[idx, 'ocr_y2'] = ocr_bbox[3]
                                 new_df.at[idx, 'ocr_region_source'] = ocr_position
-                                print(f"      ⚠️ No text found but stored OCR bbox: ({ocr_bbox[0]:.0f}, {ocr_bbox[1]:.0f}, {ocr_bbox[2]:.0f}, {ocr_bbox[3]:.0f})")
+                                print(f"No text found but stored OCR bbox: ({ocr_bbox[0]:.0f}, {ocr_bbox[1]:.0f}, {ocr_bbox[2]:.0f}, {ocr_bbox[3]:.0f})")
                             else:
-                                print(f"      ⚠️ No text found and no OCR bbox returned")
+                                print(f"No text found and no OCR bbox returned")
 
                     except Exception as e:
-                        print(f"   ⚠️ OCR error for row {det.get('row_id', '?')}: {e}")
+                        print(f"OCR error for row {det.get('row_id', '?')}: {e}")
 
-            print(f"   ✅ OCR completed for {ocr_count} symbols", flush=True)
+            print(f"OCR completed for {ocr_count} symbols", flush=True)
 
             # ========================================================================
             # Assign fallback names for symbols without text (like YOLO classes do)
             # Format: "{class_name} {counter}" e.g., "Vorsignal 1", "Hauptsignal 2"
             # ========================================================================
-            print(f"\n🏷️ Assigning fallback names for symbols without text...", flush=True)
+            print(f"\n Assigning fallback names for symbols without text...", flush=True)
 
             # First, count existing symbols of each class to get starting counters
             class_counters = {}
@@ -1396,14 +1416,14 @@ class AuditingWindow(QtWidgets.QMainWindow):
                     class_counters[cls_name] = max(max_counter, existing_count) + 1
 
             # Assign fallback names where anchor_text is empty
-            # ⚠️ ONLY for symbols that DON'T need text (has_text=False)
+            #  ONLY for symbols that DON'T need text (has_text=False)
             fallback_count = 0
             for idx, det in new_df.iterrows():
                 anchor_text = det.get('anchor_text', '')
                 if pd.isna(anchor_text) or str(anchor_text).strip() == '':
                     cls_name = det.get('cls', 'Unknown')
 
-                    # ✅ FIX: Only assign fallback name if symbol doesn't need text
+                    #  FIX: Only assign fallback name if symbol doesn't need text
                     # Check if this symbol is defined as NOT needing text
                     symbol_needs_text = False
                     if cls_name in detector.symbols:
@@ -1422,13 +1442,13 @@ class AuditingWindow(QtWidgets.QMainWindow):
                     # else: Leave empty so validation can detect missing text
 
             if fallback_count > 0:
-                print(f"   ✅ Assigned {fallback_count} fallback names", flush=True)
+                print(f"Assigned {fallback_count} fallback names", flush=True)
 
             # ========================================================================
             # Generate detection_ids NOW (after all text fields are finalized)
             # This ensures anchor_text and coord_text are included in the UUID hash
             # ========================================================================
-            print(f"\n🔑 Generating detection_ids for comparison support...", flush=True)
+            print(f"\n Generating detection_ids for comparison support...", flush=True)
             base_layout_name = extract_base_layout_name(workspace.layout_name)
             detection_id_count = 0
             for idx, row in new_df.iterrows():
@@ -1443,7 +1463,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
                 detection_id = generate_deterministic_uuid(element_for_uuid, base_layout_name)
                 new_df.at[idx, 'detection_id'] = detection_id
                 detection_id_count += 1
-            print(f"   ✅ Generated {detection_id_count} detection_ids", flush=True)
+            print(f"Generated {detection_id_count} detection_ids", flush=True)
 
             # Append to workspace data
             if workspace.df_all is None or workspace.df_all.empty:
@@ -1452,7 +1472,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
                 workspace.df_all = pd.concat([workspace.df_all, new_df], ignore_index=True)
 
             # Update page_dfs AND build row_specs for graphics
-            print(f"\n🔧 Updating workspace with {len(new_df)} new detections...", flush=True)
+            print(f"\n Updating workspace with {len(new_df)} new detections...", flush=True)
 
             for page_num in workspace.page_bgr_arrays.keys():
                 page_new = new_df[new_df['page'] == page_num]
@@ -1498,7 +1518,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
 
             # Full refresh of tree and graphics
             try:
-                print(f"\n🔄 Refreshing display...", flush=True)
+                print(f"\n Refreshing display...", flush=True)
                 # 1. Clear tree selection and repopulate
                 workspace.tree.clearSelection()
                 if hasattr(workspace, 'item_details_notes'):
@@ -1519,10 +1539,10 @@ class AuditingWindow(QtWidgets.QMainWindow):
                 if hasattr(workspace.tree, '_update_row_count'):
                     workspace.tree._update_row_count()
 
-                print(f"   ✅ Refresh complete", flush=True)
+                print(f"Refresh complete", flush=True)
             except Exception as refresh_err:
                 import traceback
-                print(f"   ❌ ERROR during refresh: {refresh_err}", flush=True)
+                print(f"ERROR during refresh: {refresh_err}", flush=True)
                 traceback.print_exc()
 
             # Show success message with timing
@@ -1531,7 +1551,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
             else:
                 time_str = f"{int(total_time // 60)}m {int(total_time % 60)}s"
 
-            message = f"✅ {len(new_df)} neue Symbol(e) gefunden!\n\n"
+            message = f" {len(new_df)} neue Symbol(e) gefunden!\n\n"
             message += f"Verarbeitet: {total_tiles} Kacheln in {time_str}"
             if duplicates_removed > 0:
                 message += f"\n({duplicates_removed} Duplikate übersprungen)"
@@ -1604,11 +1624,11 @@ class AuditingWindow(QtWidgets.QMainWindow):
         help_text = """
         <h2>Anleitung für die Datenprüfung</h2>
 
-        <h3>📋 Wofür ist dieses Fenster?</h3>
+        <h3> Wofür ist dieses Fenster?</h3>
         <p>Hier prüfen und korrigieren Sie die erkannten Daten aus den Gleisplänen.<br>
         Das Programm hat automatisch Text und Symbole erkannt - Sie kontrollieren, ob alles richtig ist.</p>
 
-        <h3>🖥️ Die Arbeitsoberfläche</h3>
+        <h3> Die Arbeitsoberfläche</h3>
 
         <h4>Links: Plan mit Markierungen</h4>
         <p>Sie sehen den Gleisplan mit bunten Rahmen um erkannte Objekte.</p>
@@ -1621,7 +1641,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
         <h4>Rechts: Datentabelle</h4>
         <p>Alle erkannten Daten als Tabelle - hier können Sie Änderungen vornehmen.</p>
 
-        <h3>✏️ So korrigieren Sie Fehler</h3>
+        <h3> So korrigieren Sie Fehler</h3>
 
         <h4>Text korrigieren:</h4>
         <ol>
@@ -1639,35 +1659,35 @@ class AuditingWindow(QtWidgets.QMainWindow):
 
         <h4>Fehlende Symbole nachtragen:</h4>
         <ol>
-            <li>Klicken Sie oben auf <b>"➕ Neues Symbol"</b></li>
+            <li>Klicken Sie oben auf <b>" Neues Symbol"</b></li>
             <li>Zeichnen Sie ein Rechteck um das Symbol im Plan</li>
             <li>Geben Sie einen Namen ein (z.B. "Weiche_links")</li>
         </ol>
 
-        <h3>💾 Speichern - SEHR WICHTIG!</h3>
+        <h3> Speichern - SEHR WICHTIG!</h3>
         <p><b style="color: #e53e3e;">Speichern Sie regelmäßig Ihre Änderungen!</b></p>
         <ul>
             <li><b>Strg+S:</b> Speichert den aktuellen Plan</li>
-            <li>Oder klicken Sie oben auf <b>"💾 Speichern"</b></li>
+            <li>Oder klicken Sie oben auf <b>" Speichern"</b></li>
         </ul>
 
-        <h3>📊 Daten als Excel-Datei exportieren</h3>
+        <h3> Daten als Excel-Datei exportieren</h3>
         <p>Wenn Sie fertig sind, können Sie die Daten exportieren:</p>
         <ol>
             <li>Drücken Sie <b>Strg+E</b> auf der Tastatur</li>
-            <li>Oder klicken Sie oben auf <b>"📊 Excel Export"</b></li>
+            <li>Oder klicken Sie oben auf <b>" Excel Export"</b></li>
             <li>Wählen Sie, wo die Datei gespeichert werden soll</li>
             <li>Fertig - jetzt können Sie die Datei in Excel öffnen</li>
         </ol>
 
-        <h3>🔍 Daten suchen und filtern</h3>
+        <h3> Daten suchen und filtern</h3>
         <ul>
-            <li><b>Suchen:</b> Klicken Sie auf <b>"🔍 Suchen"</b> und geben Sie ein Suchwort ein</li>
-            <li><b>Sortieren:</b> Klicken Sie auf <b>"🔀 Sortieren"</b> - z.B. alphabetisch sortieren</li>
-            <li><b>Filtern:</b> Klicken Sie auf <b>"🔍 Filter"</b> - zeigt nur bestimmte Einträge</li>
+            <li><b>Suchen:</b> Klicken Sie auf <b>" Suchen"</b> und geben Sie ein Suchwort ein</li>
+            <li><b>Sortieren:</b> Klicken Sie auf <b>" Sortieren"</b> - z.B. alphabetisch sortieren</li>
+            <li><b>Filtern:</b> Klicken Sie auf <b>" Filter"</b> - zeigt nur bestimmte Einträge</li>
         </ul>
 
-        <h3>⌨️ Die wichtigsten Tasten</h3>
+        <h3>⌨ Die wichtigsten Tasten</h3>
         <table style="width:100%; border-collapse: collapse;">
             <tr style="background: #f7fafc;">
                 <td style="padding: 8px; border: 1px solid #e2e8f0;"><b>Strg+S</b></td>
@@ -1691,7 +1711,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
             </tr>
         </table>
 
-        <h3>💡 Wichtige Tipps</h3>
+        <h3> Wichtige Tipps</h3>
         <ul>
             <li><b>Speichern Sie oft!</b> Am besten nach jeder größeren Änderung</li>
             <li><b>Die Erkennung macht Fehler</b> - Kontrollieren Sie alles genau</li>
@@ -1710,7 +1730,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
         """Show simplified about dialog"""
         about_text = """
         <div style="text-align: center;">
-            <h2>🚂 RailDoc Studio</h2>
+            <h2> RailDoc Studio</h2>
             <h3>Datenprüfung und Korrektur</h3>
             <p><b>Version:</b> 1.0</p>
         </div>
@@ -2013,7 +2033,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
         placeholder_layout.setAlignment(QtCore.Qt.AlignCenter)
         
         # Icon
-        icon_label = QtWidgets.QLabel("📺")
+        icon_label = QtWidgets.QLabel("")
         icon_label.setAlignment(QtCore.Qt.AlignCenter)
         icon_label.setStyleSheet("font-size: 48px;")
         placeholder_layout.addWidget(icon_label)
@@ -2031,14 +2051,14 @@ class AuditingWindow(QtWidgets.QMainWindow):
         placeholder_layout.addWidget(message_label)
         
         # Redock button
-        redock_btn = QtWidgets.QPushButton("⬅️ Zurück ins Hauptfenster")
+        redock_btn = QtWidgets.QPushButton("⬅ Zurück ins Hauptfenster")
         redock_btn.setMaximumWidth(250)
         redock_btn.clicked.connect(lambda: self._redock_workspace(tab_index))
         placeholder_layout.addWidget(redock_btn, alignment=QtCore.Qt.AlignCenter)
         
         # Replace workspace with placeholder in tab
         self.tab_widget.removeTab(tab_index)
-        self.tab_widget.insertTab(tab_index, placeholder, f"🪟 {tab_name}")
+        self.tab_widget.insertTab(tab_index, placeholder, f" {tab_name}")
         
         # Create workspace window
         workspace_window = WorkspaceWindow(self, workspace, tab_index)
@@ -2054,7 +2074,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
             # Position near where it was dragged (slightly offset)
             workspace_window.move(detach_pos - QtCore.QPoint(700, 450))
         else:
-            # ✅ Position relative to main window (not centered on screen)
+            #  Position relative to main window (not centered on screen)
             main_window_pos = self.pos()
             main_window_size = self.size()
             
@@ -2074,7 +2094,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
         workspace_window.activateWindow()
         
         print(f"[AUDITING] Popped out workspace: {workspace.layout_name}")
-        self._set_status(f"🪟 Workspace ausgekoppelt: {os.path.basename(workspace.layout_name)}")
+        self._set_status(f" Workspace ausgekoppelt: {os.path.basename(workspace.layout_name)}")
 
     def _on_workspace_window_closed(self, tab_index: int):
         """
@@ -2100,7 +2120,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
         
         print(f"[AUDITING] Redocking workspace: {workspace.layout_name}")
         
-        # ✅ FIX: Get original tab name from workspace.layout_name (not from tab text)
+        #  FIX: Get original tab name from workspace.layout_name (not from tab text)
         tab_name = os.path.basename(workspace.layout_name)
         
         # Remove placeholder
@@ -2119,7 +2139,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
         # Switch to the redocked tab
         self.tab_widget.setCurrentIndex(tab_index)
         
-        self._set_status(f"✅ Workspace zurückgeholt: {tab_name}")
+        self._set_status(f" Workspace zurückgeholt: {tab_name}")
 
     def _show_tab_context_menu(self, position):
         """Show context menu for tab bar"""
@@ -2143,27 +2163,27 @@ class AuditingWindow(QtWidgets.QMainWindow):
         
         if is_popped_out:
             # Show "Redock" option
-            action_redock = menu.addAction("⬅️ Zurück ins Hauptfenster")
+            action_redock = menu.addAction("⬅ Zurück ins Hauptfenster")
             action_redock.triggered.connect(lambda: self._redock_workspace(tab_index))
             
             # Show "Bring to Front" option
-            action_front = menu.addAction("🔼 Fenster in den Vordergrund")
+            action_front = menu.addAction(" Fenster in den Vordergrund")
             action_front.triggered.connect(lambda: self._bring_workspace_to_front(tab_index))
         else:
             # Show "Pop out" option
-            action_popout = menu.addAction("🪟 In separates Fenster verschieben")
+            action_popout = menu.addAction(" In separates Fenster verschieben")
             action_popout.triggered.connect(lambda: self.pop_out_workspace_tab(tab_index))
         
         menu.addSeparator()
         
         # Save option
-        action_save = menu.addAction("💾 Speichern")
+        action_save = menu.addAction(" Speichern")
         action_save.triggered.connect(lambda: workspace.save_to_db())
         
         menu.addSeparator()
         
         # Close tab option
-        action_close = menu.addAction("❌ Tab schließen")
+        action_close = menu.addAction(" Tab schließen")
         action_close.triggered.connect(lambda: self.on_close_tab(tab_index))
         
         # Show menu at cursor position

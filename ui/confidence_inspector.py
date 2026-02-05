@@ -7,6 +7,7 @@ Highlights low-confidence items and links to UI elements
 from PyQt5 import QtWidgets, QtCore, QtGui
 from typing import Dict, Optional, List, TYPE_CHECKING
 import pandas as pd
+from utils.dpi_utils import get_adaptive_window_size, center_window
 
 if TYPE_CHECKING:
     from ui.workspace_widget import WorkspaceWidget
@@ -25,7 +26,11 @@ class ConfidenceInspectorDialog(QtWidgets.QDialog):
         self.df_all = workspace.df_all.copy()
 
         self.setWindowTitle(f"Confidence Inspector - {workspace.layout_name}")
-        self.resize(1200, 800)
+
+        # Adaptive sizing for different DPI settings
+        w, h = get_adaptive_window_size(1200, 800, max_screen_pct=0.85)
+        self.resize(w, h)
+        center_window(self)
 
         # Set window flags for independent window
         self.setWindowFlags(
@@ -65,7 +70,7 @@ class ConfidenceInspectorDialog(QtWidgets.QDialog):
         # ========================================================================
         # HEADER: Statistics Section
         # ========================================================================
-        stats_group = QtWidgets.QGroupBox("📊 Confidence Statistics")
+        stats_group = QtWidgets.QGroupBox(" Confidence Statistics")
         stats_layout = QtWidgets.QGridLayout(stats_group)
 
         # Calculate statistics
@@ -96,14 +101,14 @@ class ConfidenceInspectorDialog(QtWidgets.QDialog):
         stats_layout.addWidget(med_label, 1, 3)
 
         # Low confidence (<60%)
-        stats_layout.addWidget(QtWidgets.QLabel("⚠ Low (<60%):"), 0, 4)
+        stats_layout.addWidget(QtWidgets.QLabel(" Low (<60%):"), 0, 4)
         low_label = QtWidgets.QLabel(f"{stats['low']} ({stats['low_pct']:.1%})")
         low_label.setStyleSheet("color: #cc0000; font-weight: bold; font-size: 12pt;")
         stats_layout.addWidget(low_label, 0, 5)
 
         # Very low confidence (<40%)
         if stats['very_low'] > 0:
-            stats_layout.addWidget(QtWidgets.QLabel("🚨 Very Low (<40%):"), 1, 4)
+            stats_layout.addWidget(QtWidgets.QLabel(" Very Low (<40%):"), 1, 4)
             vlow_label = QtWidgets.QLabel(f"{stats['very_low']} ({stats['very_low_pct']:.1%})")
             vlow_label.setStyleSheet("color: #ff0000; font-weight: bold; font-size: 12pt;")
             stats_layout.addWidget(vlow_label, 1, 5)
@@ -113,7 +118,7 @@ class ConfidenceInspectorDialog(QtWidgets.QDialog):
         # ========================================================================
         # FILTER CONTROLS
         # ========================================================================
-        filter_group = QtWidgets.QGroupBox("🔍 Filters")
+        filter_group = QtWidgets.QGroupBox(" Filters")
         filter_layout = QtWidgets.QHBoxLayout(filter_group)
 
         # Class filter
@@ -197,7 +202,7 @@ class ConfidenceInspectorDialog(QtWidgets.QDialog):
         button_layout = QtWidgets.QHBoxLayout()
 
         # Export button
-        btn_export = QtWidgets.QPushButton("📄 Export to CSV")
+        btn_export = QtWidgets.QPushButton(" Export to CSV")
         btn_export.clicked.connect(self._export_to_csv)
         button_layout.addWidget(btn_export)
 

@@ -56,7 +56,7 @@ class BBoxContextMenu:
         menu = QtWidgets.QMenu(self.workspace)
 
         # Header with detection info
-        header = menu.addAction(f"🎯 {current_class} ({conf:.0%})")
+        header = menu.addAction(f" {current_class} ({conf:.0%})")
         header.setEnabled(False)
         if current_text:
             text_info = menu.addAction(f"   '{current_text}'")
@@ -65,12 +65,12 @@ class BBoxContextMenu:
         menu.addSeparator()
 
         # Quick actions
-        ocr_menu = menu.addMenu("🔄 OCR erneut ausführen")
-        ocr_horizontal = ocr_menu.addAction("📏 Horizontal")
+        ocr_menu = menu.addMenu(" OCR erneut ausführen")
+        ocr_horizontal = ocr_menu.addAction(" Horizontal")
         ocr_horizontal.triggered.connect(
             lambda: self.workspace.on_rerun_ocr(row_id, 'horizontal')
         )
-        ocr_angular = ocr_menu.addAction("📐 Angular")
+        ocr_angular = ocr_menu.addAction(" Angular")
         ocr_angular.triggered.connect(
             lambda: self.workspace.on_rerun_ocr(row_id, 'angular')
         )
@@ -78,12 +78,12 @@ class BBoxContextMenu:
         menu.addSeparator()
 
         # Change class submenu
-        class_menu = menu.addMenu("🔀 Klasse ändern")
+        class_menu = menu.addMenu(" Klasse ändern")
 
         for cls in self.COMMON_CLASSES:
             if cls == current_class:
                 # Show current class with checkmark
-                action = class_menu.addAction(f"✓ {cls}")
+                action = class_menu.addAction(f" {cls}")
                 action.setEnabled(False)
             else:
                 action = class_menu.addAction(f"   {cls}")
@@ -94,13 +94,13 @@ class BBoxContextMenu:
         menu.addSeparator()
 
         # Jump to in tree
-        jump_action = menu.addAction("📍 In Tabelle anzeigen")
+        jump_action = menu.addAction(" In Tabelle anzeigen")
         jump_action.triggered.connect(lambda: self._jump_to_tree(row_id))
 
         menu.addSeparator()
 
         # Delete
-        delete_action = menu.addAction("🗑️ Erkennung löschen")
+        delete_action = menu.addAction(" Erkennung löschen")
         delete_action.triggered.connect(lambda: self._delete_detection(row_id))
 
         # Show menu
@@ -156,14 +156,14 @@ class BBoxContextMenu:
                 self.workspace.tree.blockSignals(False)
 
             # Re-run OCR with new class
-            print(f"🔄 Class changed: {old_class} → {new_class}, running OCR...")
+            print(f" Class changed: {old_class} → {new_class}, running OCR...")
             self.workspace.on_rerun_ocr(row_id, 'horizontal')
 
             # Refresh graphics
             self.workspace._rebuild_row_specs_for_current_page()
             self.workspace.on_page_changed(self.workspace.current_page)
 
-            self.workspace._set_status(f"✓ Klasse geändert: {old_class} → {new_class}")
+            self.workspace._set_status(f" Klasse geändert: {old_class} → {new_class}")
 
         except Exception as e:
             import traceback
@@ -180,7 +180,7 @@ class BBoxContextMenu:
         if item:
             self.workspace.tree.setCurrentItem(item)
             self.workspace.tree.scrollToItem(item)
-            self.workspace._set_status(f"📍 Zu Row {row_id} gesprungen")
+            self.workspace._set_status(f" Zu Row {row_id} gesprungen")
 
     def _delete_detection(self, row_id: int):
         """Delete a detection"""
@@ -217,7 +217,7 @@ class BBoxContextMenu:
                 # Call the existing delete function
                 self.workspace.on_delete_selected_table_rows()
 
-                self.workspace._set_status(f"🗑️ Erkennung gelöscht: {cls}{display_text}")
+                self.workspace._set_status(f" Erkennung gelöscht: {cls}{display_text}")
             else:
                 QtWidgets.QMessageBox.warning(
                     self.workspace,

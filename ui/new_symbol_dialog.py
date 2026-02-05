@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
 from typing import List, Dict, Optional, Tuple
 import numpy as np
 import cv2
+from utils.dpi_utils import get_adaptive_window_size, center_window, scale_value
 
 
 class ClickableImageView(QGraphicsView):
@@ -78,12 +79,12 @@ class ClickableImageView(QGraphicsView):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            # Check if we clicked on a delete button (✖)
+            # Check if we clicked on a delete button ()
             scene_pos = self.mapToScene(event.pos())
             item = self.scene().itemAt(scene_pos, self.transform())
 
             # Check if clicked item is a text item with delete data
-            if item and hasattr(item, 'toPlainText') and item.toPlainText() == "✖":
+            if item and hasattr(item, 'toPlainText') and item.toPlainText() == "":
                 index = item.data(0)
                 if index is not None:
                     self.delete_clicked.emit(index)
@@ -174,7 +175,11 @@ class NewSymbolDialog(QDialog):
     def __init__(self, image: np.ndarray, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Neues Symbol definieren")
-        self.setMinimumSize(1200, 800)
+
+        # Adaptive sizing for different DPI settings
+        w, h = get_adaptive_window_size(1200, 800, max_screen_pct=0.85)
+        self.setMinimumSize(w, h)
+        center_window(self)
 
         # Enable maximize/minimize buttons
         self.setWindowFlags(
@@ -226,7 +231,7 @@ class NewSymbolDialog(QDialog):
 
         # Toolbar Row 1: Drawing tools
         toolbar = QHBoxLayout()
-        self.btn_draw = QPushButton("✏️ Beispiel markieren")
+        self.btn_draw = QPushButton(" Beispiel markieren")
         self.btn_draw.setCheckable(True)
         self.btn_draw.setChecked(True)
         self.btn_draw.toggled.connect(self._on_draw_toggled)
@@ -236,14 +241,14 @@ class NewSymbolDialog(QDialog):
         self.btn_undo.clicked.connect(self._undo_last)
         toolbar.addWidget(self.btn_undo)
 
-        self.btn_clear = QPushButton("🗑️ Alle löschen")
+        self.btn_clear = QPushButton(" Alle löschen")
         self.btn_clear.clicked.connect(self._clear_all)
         toolbar.addWidget(self.btn_clear)
 
         toolbar.addWidget(QLabel("|"))
 
         # Button to load another image (for collecting examples from multiple plans)
-        self.btn_load_image = QPushButton("📂 Weiteres Bild laden")
+        self.btn_load_image = QPushButton(" Weiteres Bild laden")
         self.btn_load_image.setToolTip("Laden Sie ein weiteres Bild, um mehr Beispiele zu sammeln")
         self.btn_load_image.clicked.connect(self._load_another_image)
         toolbar.addWidget(self.btn_load_image)
@@ -268,12 +273,12 @@ class NewSymbolDialog(QDialog):
         self.btn_zoom_100.clicked.connect(self._zoom_100)
         zoom_toolbar.addWidget(self.btn_zoom_100)
 
-        self.btn_zoom_in = QPushButton("🔍+")
+        self.btn_zoom_in = QPushButton("+")
         self.btn_zoom_in.setToolTip("Vergrößern")
         self.btn_zoom_in.clicked.connect(self._zoom_in)
         zoom_toolbar.addWidget(self.btn_zoom_in)
 
-        self.btn_zoom_out = QPushButton("🔍−")
+        self.btn_zoom_out = QPushButton("−")
         self.btn_zoom_out.setToolTip("Verkleinern")
         self.btn_zoom_out.clicked.connect(self._zoom_out)
         zoom_toolbar.addWidget(self.btn_zoom_out)
@@ -288,7 +293,7 @@ class NewSymbolDialog(QDialog):
         zoom_toolbar.addWidget(QLabel("|"))
 
         # Pop-out button (Auskoppeln)
-        self.btn_pop_out = QPushButton("🗗 Auskoppeln")
+        self.btn_pop_out = QPushButton(" Auskoppeln")
         self.btn_pop_out.setToolTip("Bild in separatem Fenster öffnen")
         self.btn_pop_out.clicked.connect(self._pop_out_graphics)
         zoom_toolbar.addWidget(self.btn_pop_out)
@@ -304,7 +309,7 @@ class NewSymbolDialog(QDialog):
 
         # Help text for navigation (same as auditing window)
         nav_help = QLabel(
-            "<small>🖱️ Mausrad=Scrollen | Strg+Mausrad=Zoom | "
+            "<small> Mausrad=Scrollen | Strg+Mausrad=Zoom | "
             "Shift+Mausrad=Horizontal scrollen</small>"
         )
         nav_help.setStyleSheet("color: gray;")
@@ -417,7 +422,7 @@ class NewSymbolDialog(QDialog):
 
         # Button to draw text region (more precise than direction)
         text_region_btn_layout = QHBoxLayout()
-        self.btn_draw_text_region = QPushButton("📐 Text-Bereich markieren")
+        self.btn_draw_text_region = QPushButton(" Text-Bereich markieren")
         self.btn_draw_text_region.setToolTip(
             "Zeichnen Sie ein Rechteck um den Text-Bereich.\n"
             "Dies ist genauer als nur die Richtung anzugeben."
@@ -427,7 +432,7 @@ class NewSymbolDialog(QDialog):
         text_region_btn_layout.addWidget(self.btn_draw_text_region)
 
         # Delete text region button
-        self.btn_delete_text_region = QPushButton("🗑️")
+        self.btn_delete_text_region = QPushButton("")
         self.btn_delete_text_region.setFixedWidth(30)
         self.btn_delete_text_region.setToolTip("Text-Bereich löschen und neu zeichnen")
         self.btn_delete_text_region.setEnabled(False)
@@ -600,7 +605,7 @@ class NewSymbolDialog(QDialog):
         self.btn_cancel.clicked.connect(self.reject)
         button_layout.addWidget(self.btn_cancel)
 
-        self.btn_save = QPushButton("💾 Speichern")
+        self.btn_save = QPushButton(" Speichern")
         self.btn_save.setEnabled(False)
         self.btn_save.clicked.connect(self._save_symbol)
         button_layout.addWidget(self.btn_save)
@@ -694,7 +699,7 @@ class NewSymbolDialog(QDialog):
         num_text.setFont(font)
 
         # Add delete button (X) at top-right corner
-        delete_btn = self.scene.addText("✖")
+        delete_btn = self.scene.addText("")
         delete_btn.setPos(x2 - 20, y1 - 25)
         delete_btn.setDefaultTextColor(Qt.red)
         delete_font = delete_btn.font()
@@ -816,7 +821,7 @@ class NewSymbolDialog(QDialog):
         # Show size warning if any
         if hasattr(self, 'size_warning_label'):
             if warnings:
-                self.size_warning_label.setText("⚠️ " + "; ".join(warnings))
+                self.size_warning_label.setText(" " + "; ".join(warnings))
                 self.size_warning_label.setStyleSheet("color: orange;")
                 self.size_warning_label.show()
             else:
@@ -1008,14 +1013,15 @@ class NewSymbolDialog(QDialog):
         # Create a new window for the graphics view
         self.graphics_window = QMainWindow(self)  # Parent to dialog so it stays accessible
         self.graphics_window.setWindowTitle("Symbol-Bild (Auskoppeln)")
-        self.graphics_window.setMinimumSize(800, 600)
+        w, h = get_adaptive_window_size(800, 600, max_screen_pct=0.70)
+        self.graphics_window.setMinimumSize(w, h)
 
         # Create central widget with layout
         central = QWidget()
         win_layout = QVBoxLayout(central)
 
         # Create placeholder in original location - match the view's size exactly
-        self.graphics_placeholder = QLabel("🖼️ Bild wurde ausgekoppelt\n\nKlicken Sie auf 'Einkoppeln' im separaten Fenster")
+        self.graphics_placeholder = QLabel(" Bild wurde ausgekoppelt\n\nKlicken Sie auf 'Einkoppeln' im separaten Fenster")
         self.graphics_placeholder.setAlignment(Qt.AlignCenter)
         self.graphics_placeholder.setStyleSheet("background-color: #f0f0f0; border: 2px dashed #aaa; padding: 20px;")
         # Use same size policy as view to prevent layout shift
@@ -1032,7 +1038,7 @@ class NewSymbolDialog(QDialog):
         win_layout.addWidget(self.view)
 
         # Add redock button
-        redock_btn = QPushButton("⬅️ Einkoppeln (zurück ins Hauptfenster)")
+        redock_btn = QPushButton("⬅ Einkoppeln (zurück ins Hauptfenster)")
         redock_btn.clicked.connect(self._redock_graphics)
         win_layout.addWidget(redock_btn)
 
@@ -1040,7 +1046,7 @@ class NewSymbolDialog(QDialog):
         self.graphics_window.show()
 
         # Update button text
-        self.btn_pop_out.setText("🗗 Ausgekoppelt")
+        self.btn_pop_out.setText(" Ausgekoppelt")
         self.btn_pop_out.setEnabled(False)
 
         # Handle window close
@@ -1071,7 +1077,7 @@ class NewSymbolDialog(QDialog):
         self.graphics_window = None
 
         # Update button
-        self.btn_pop_out.setText("🗗 Auskoppeln")
+        self.btn_pop_out.setText(" Auskoppeln")
         self.btn_pop_out.setEnabled(True)
 
         event.accept()
@@ -1104,7 +1110,7 @@ class NewSymbolDialog(QDialog):
         self._drawing_text_region = True
         self.btn_draw.setChecked(False)  # Disable symbol drawing
         self.view.set_drawing_mode(True)
-        self.btn_draw_text_region.setText("📐 Zeichnen... (Klicken + Ziehen)")
+        self.btn_draw_text_region.setText(" Zeichnen... (Klicken + Ziehen)")
         self.btn_draw_text_region.setStyleSheet("background-color: #4CAF50; color: white;")
 
         QMessageBox.information(
@@ -1155,16 +1161,16 @@ class NewSymbolDialog(QDialog):
             th = int(y2 - y1)
 
             self.text_region_label.setText(
-                f"✅ Text-Bereich: Offset ({dx:+d}, {dy:+d}), Größe {tw}x{th}px"
+                f" Text-Bereich: Offset ({dx:+d}, {dy:+d}), Größe {tw}x{th}px"
             )
             self.text_region_label.setStyleSheet("color: green; font-weight: bold;")
         else:
-            self.text_region_label.setText(f"✅ Text-Bereich: {int(x2-x1)}x{int(y2-y1)}px")
+            self.text_region_label.setText(f" Text-Bereich: {int(x2-x1)}x{int(y2-y1)}px")
             self.text_region_label.setStyleSheet("color: green;")
 
         # Reset drawing mode
         self._drawing_text_region = False
-        self.btn_draw_text_region.setText("📐 Text-Bereich markieren")
+        self.btn_draw_text_region.setText(" Text-Bereich markieren")
         self.btn_draw_text_region.setStyleSheet("")
         self.btn_draw.setChecked(True)  # Re-enable symbol drawing
         self.btn_delete_text_region.setEnabled(True)  # Enable delete button
@@ -1416,7 +1422,9 @@ class UnknownSymbolsDialog(QDialog):
     def __init__(self, unknown_clusters: List[Dict], image: np.ndarray, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Unbekannte Symbole gefunden")
-        self.setMinimumSize(800, 600)
+        w, h = get_adaptive_window_size(800, 600, max_screen_pct=0.70)
+        self.setMinimumSize(w, h)
+        center_window(self)
 
         self.clusters = unknown_clusters
         self.image = image
@@ -1428,7 +1436,7 @@ class UnknownSymbolsDialog(QDialog):
 
         # Header
         header = QLabel(
-            f"<b>⚠️ {len(self.clusters)} mögliche unbekannte Symbol-Typen gefunden!</b><br><br>"
+            f"<b> {len(self.clusters)} mögliche unbekannte Symbol-Typen gefunden!</b><br><br>"
             "Das System hat Objekte gefunden, die wie Symbole aussehen, "
             "aber von YOLO nicht erkannt wurden."
         )
@@ -1537,7 +1545,9 @@ class RetrainingDialog(QDialog):
     def __init__(self, model_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("YOLO Fine-Tuning")
-        self.setMinimumSize(500, 400)
+        w, h = get_adaptive_window_size(500, 400, max_screen_pct=0.50)
+        self.setMinimumSize(w, h)
+        center_window(self)
 
         self.model_path = model_path
 
@@ -1551,7 +1561,7 @@ class RetrainingDialog(QDialog):
         info = QLabel(
             "<b>YOLO Fine-Tuning</b><br><br>"
             "Trainieren Sie das YOLO-Modell mit neuen Symbolen für höhere Genauigkeit.<br>"
-            "⚠️ CPU-Training ist langsam (2-4 Stunden), aber funktioniert!"
+            " CPU-Training ist langsam (2-4 Stunden), aber funktioniert!"
         )
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -1606,7 +1616,7 @@ class RetrainingDialog(QDialog):
         btn_cancel.clicked.connect(self.reject)
         button_layout.addWidget(btn_cancel)
 
-        self.btn_start = QPushButton("🚀 Training starten")
+        self.btn_start = QPushButton(" Training starten")
         self.btn_start.clicked.connect(self._start_training)
         button_layout.addWidget(self.btn_start)
 

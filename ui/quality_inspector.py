@@ -8,6 +8,24 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 from typing import Dict, Optional, List, TYPE_CHECKING
 import pandas as pd
 import numpy as np
+from utils.dpi_utils import get_adaptive_window_size, center_window
+
+# Import shared validation config
+from validation_config import (
+    CLASSES_REQUIRING_COORDINATES,
+    CLASSES_REQUIRING_TEXT,
+    CLASSES_EXCLUDED,
+    RISK_WEIGHTS,
+    RISK_THRESHOLDS,
+    RISK_LABELS,
+    RISK_FACTOR_LABELS,
+    get_confidence_threshold,
+    needs_coordinate,
+    needs_text,
+    is_excluded,
+    get_risk_level,
+    get_risk_label,
+)
 
 if TYPE_CHECKING:
     from ui.workspace_widget import WorkspaceWidget
@@ -29,7 +47,7 @@ class QualityInspectorDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.workspace = workspace
 
-        # ✅ FILTER: Exclude unlinked coordinates and weichen_block (per user request)
+        #  FILTER: Exclude unlinked coordinates and weichen_block (per user request)
         df_filtered = workspace.df_all.copy()
         if 'cls' in df_filtered.columns:
             df_filtered = df_filtered[
@@ -38,11 +56,15 @@ class QualityInspectorDialog(QtWidgets.QDialog):
             ]
         self.df_all = df_filtered
 
-        # ✅ Load custom symbol configurations for proper risk assessment
+        #  Load custom symbol configurations for proper risk assessment
         self.custom_symbol_config = self._load_custom_symbol_config()
 
         self.setWindowTitle(f"Erkennungsqualität prüfen - {workspace.layout_name}")
-        self.resize(1400, 900)
+
+        # Adaptive sizing for different DPI settings - large dialog
+        w, h = get_adaptive_window_size(1400, 900, max_screen_pct=0.90)
+        self.resize(w, h)
+        center_window(self)
 
         # Set window flags for independent window
         self.setWindowFlags(
@@ -71,14 +93,40 @@ class QualityInspectorDialog(QtWidgets.QDialog):
                     'text_position': symbol.text_position
                 }
         except Exception as e:
-            print(f"⚠️ Could not load custom symbol config: {e}")
+            print(f" Could not load custom symbol config: {e}")
         return config
+
+    def _extract_signal_from_haltepunkt(self, anchor_text: str) -> Optional[str]:
+        """
+        Extract signal name from haltepunkt anchor_text.
+        Format: "haltepunkt {counter} ({signal_name})"
+        Example: "haltepunkt 1 (AHR313)" → "AHR313"
+        """
+        import re
+        if not anchor_text:
+            return None
+        match = re.search(r'\(([^)]+)\)\s*$', str(anchor_text))
+        if match:
+            return match.group(1).strip()
+        return None
+
+    def _check_signal_exists(self, signal_name: str, page: int) -> bool:
+        """Check if a signal with given name exists on the page."""
+        if not signal_name:
+            return True  # No signal name = nothing to validate
+
+        mask = (
+            (self.df_all['cls'] == 'signal') &
+            (self.df_all['page'] == page) &
+            (self.df_all['anchor_text'].fillna('').str.strip() == signal_name)
+        )
+        return mask.any()
 
     def _calculate_risk_scores(self):
         """
-        Calculate risk score for each detection.
+        Calculate risk score for each detection using shared validation config.
 
-        Risk = Confidence Risk (40%) + Missing Data (30%) + Duplicates (15%) + Size (15%)
+        Uses weights from validation_config.py for consistency across all systems.
         """
         self.df_all['risk_score'] = 0.0
         self.df_all['risk_factors'] = ''
@@ -87,47 +135,42 @@ class QualityInspectorDialog(QtWidgets.QDialog):
             risk = 0.0
             factors = []
 
-            # Factor 1: Confidence Risk (40% weight)
-            conf = row.get('conf', 1.0)
-            if pd.notna(conf):
-                conf_risk = (1.0 - conf) * 0.4
-                risk += conf_risk
-                if conf < 0.6:
-                    factors.append('Unsichere Texterkennung')
-
-            # Factor 2: Missing Required Data (30% weight)
             cls = row.get('cls', '')
-            is_custom = row.get('is_custom_symbol', False) == True
+            is_custom = row.get('is_custom_symbol', False) == True or row.get('is_new_symbol', False) == True
 
-            # Determine if this symbol should have coordinate/text based on type
-            needs_coordinate = False
-            needs_text = False
-
+            # Determine requirements based on symbol type
             if is_custom and cls in self.custom_symbol_config:
                 # Custom symbol - check configuration
                 sym_config = self.custom_symbol_config[cls]
-                needs_coordinate = sym_config.get('links_to_coordinate', False)
-                needs_text = sym_config.get('has_text', False)
+                requires_coord = sym_config.get('links_to_coordinate', False)
+                requires_text = sym_config.get('has_text', False)
             else:
-                # YOLO symbol - use hardcoded lists
-                needs_coordinate = cls in ['signal', 'gks_gesteuert', 'gks_festkodiert',
-                                           'prellblock', 'haltepunkt', 'sverbinder']
-                needs_text = cls in ['signal', 'gks_gesteuert', 'gks_festkodiert']
+                # YOLO symbol - use shared config
+                requires_coord = needs_coordinate(cls)
+                requires_text = needs_text(cls)
 
-            # Check for missing coordinate link
-            if needs_coordinate:
+            # Factor 1: Confidence Risk (uses per-class thresholds from shared config)
+            conf = row.get('conf', 1.0)
+            if pd.notna(conf):
+                threshold = get_confidence_threshold(cls)
+                if conf < threshold:
+                    conf_risk = (1.0 - conf) * RISK_WEIGHTS['low_confidence']
+                    risk += conf_risk
+                    factors.append(RISK_FACTOR_LABELS['low_confidence'])
+
+            # Factor 2: Missing Required Coordinate
+            if requires_coord:
                 if pd.isna(row.get('coord_text')) or not str(row.get('coord_text', '')).strip():
-                    risk += 0.3
-                    factors.append('Koordinate fehlt')
+                    risk += RISK_WEIGHTS['missing_coordinate']
+                    factors.append(RISK_FACTOR_LABELS['missing_coordinate'])
 
-            # Check for missing text
-            if needs_text:
+            # Factor 3: Missing Required Text
+            if requires_text:
                 if pd.isna(row.get('anchor_text')) or not str(row.get('anchor_text', '')).strip():
-                    risk += 0.15
-                    factors.append('Bezeichnung fehlt')
+                    risk += RISK_WEIGHTS['missing_text']
+                    factors.append(RISK_FACTOR_LABELS['missing_text'])
 
-            # Factor 3: Potential Duplicate (15% weight)
-            # Check if there are nearby detections of same class
+            # Factor 4: Potential Duplicate
             if 'xc' in row and 'yc' in row and pd.notna(row.get('xc')) and pd.notna(row.get('yc')):
                 same_class = self.df_all[
                     (self.df_all['cls'] == cls) &
@@ -139,44 +182,50 @@ class QualityInspectorDialog(QtWidgets.QDialog):
                     if pd.notna(other.get('xc')) and pd.notna(other.get('yc')):
                         dist = np.sqrt((row['xc'] - other['xc'])**2 + (row['yc'] - other['yc'])**2)
                         if dist < 50:  # Within 50 pixels
-                            risk += 0.15
-                            factors.append('Evtl. doppelt erkannt')
+                            risk += RISK_WEIGHTS['duplicate_nearby']
+                            factors.append(RISK_FACTOR_LABELS['duplicate_nearby'])
                             break
 
-            # Factor 4: Size Anomaly (10% weight) - very basic check
+            # Factor 5: Size Anomaly
             if 'w' in row and 'h' in row and pd.notna(row.get('w')) and pd.notna(row.get('h')):
                 area = row['w'] * row['h']
                 if area < 100 or area > 50000:  # Very small or very large
-                    risk += 0.10
-                    factors.append('Auffällige Größe')
+                    risk += RISK_WEIGHTS['size_anomaly']
+                    factors.append(RISK_FACTOR_LABELS['size_anomaly'])
 
-            # ✅ NEW Factor 5: Invalid Coordinate Start (20% weight)
-            # Only check linked coordinates (cls != 'coordinate')
+            # Factor 6: Invalid Coordinate Start (doesn't start with digit or -)
             if cls != 'coordinate' and pd.notna(row.get('coord_text')):
-                coord_text = str(row.get('coord_text', '')).strip()
-                if coord_text and not (coord_text[0].isdigit() or coord_text[0] == '-'):
-                    risk += 0.20
-                    factors.append('Ungültige Koordinate')
+                coord_text_val = str(row.get('coord_text', '')).strip()
+                if coord_text_val and not (coord_text_val[0].isdigit() or coord_text_val[0] == '-'):
+                    risk += RISK_WEIGHTS['invalid_coordinate']
+                    factors.append(RISK_FACTOR_LABELS['invalid_coordinate'])
 
-            # ✅ NEW Factor 6: GKS Contains Letters (15% weight)
+            # Factor 7: GKS Contains Letters (should be numbers only)
             if cls in ['gks_gesteuert', 'gks_festkodiert']:
                 gks_text = str(row.get('anchor_text', '')).strip()
                 if gks_text:
-                    # Remove common formatting
                     cleaned = gks_text.replace(' ', '').replace('-', '')
-                    if not cleaned.isdigit():
-                        risk += 0.15
-                        factors.append('GKS enthält Buchstaben')
+                    if cleaned and not cleaned.isdigit():
+                        risk += RISK_WEIGHTS['gks_letters']
+                        factors.append(RISK_FACTOR_LABELS['gks_letters'])
 
-            # ✅ NEW Factor 7: Multiple Spaces (5% weight)
+            # Factor 8: Formatting Errors (multiple spaces)
             anchor_text = str(row.get('anchor_text', ''))
-            # Only check coord_text for linked coordinates
-            coord_text = str(row.get('coord_text', '')) if cls != 'coordinate' else ''
-            if '  ' in coord_text or '  ' in anchor_text:  # Two or more spaces
-                risk += 0.05
-                factors.append('Formatierungsfehler')
+            coord_text_val = str(row.get('coord_text', '')) if cls != 'coordinate' else ''
+            if '  ' in coord_text_val or '  ' in anchor_text:
+                risk += RISK_WEIGHTS['formatting_error']
+                factors.append(RISK_FACTOR_LABELS['formatting_error'])
 
-            self.df_all.at[idx, 'risk_score'] = min(risk, 1.0)  # Cap at 100%
+            # Factor 9: Haltepunkt references unknown signal
+            if cls == 'haltepunkt':
+                signal_name = self._extract_signal_from_haltepunkt(row.get('anchor_text', ''))
+                if signal_name:
+                    page = row.get('page', 0)
+                    if not self._check_signal_exists(signal_name, page):
+                        risk += RISK_WEIGHTS['haltepunkt_signal_mismatch']
+                        factors.append(RISK_FACTOR_LABELS['haltepunkt_signal_mismatch'])
+
+            self.df_all.at[idx, 'risk_score'] = min(risk, 1.0)
             self.df_all.at[idx, 'risk_factors'] = ', '.join(factors) if factors else 'OK'
 
     def _apply_theme(self):
@@ -193,7 +242,7 @@ class QualityInspectorDialog(QtWidgets.QDialog):
                 palette.setColor(QtGui.QPalette.Text, text_color)
                 palette.setColor(QtGui.QPalette.AlternateBase, bg_color)
 
-                # ✅ FIX: Set inactive selection colors to match active ones
+                #  FIX: Set inactive selection colors to match active ones
                 # This prevents the green color when clicking outside the dialog
                 palette.setColor(QtGui.QPalette.Inactive, QtGui.QPalette.Highlight,
                                 palette.color(QtGui.QPalette.Active, QtGui.QPalette.Highlight))
@@ -213,7 +262,7 @@ class QualityInspectorDialog(QtWidgets.QDialog):
         # ========================================================================
         # HEADER: Enhanced Statistics Section
         # ========================================================================
-        stats_group = QtWidgets.QGroupBox("📊 Erkennungsqualität - Übersicht")
+        stats_group = QtWidgets.QGroupBox(" Erkennungsqualität - Übersicht")
         stats_layout = QtWidgets.QGridLayout(stats_group)
 
         # Calculate statistics
@@ -235,24 +284,24 @@ class QualityInspectorDialog(QtWidgets.QDialog):
         stats_layout.setColumnMinimumWidth(1, 120)
 
         # Priority explanation header
-        priority_header = QtWidgets.QLabel("🔍 Prüfbedarf:")
+        priority_header = QtWidgets.QLabel(" Prüfbedarf:")
         priority_header.setStyleSheet("font-weight: bold; font-size: 11pt;")
         stats_layout.addWidget(priority_header, 0, 2, 1, 4)
 
         # Risk Statistics (Right side) - with clearer labels
-        stats_layout.addWidget(QtWidgets.QLabel("❌ Sofort prüfen:"), 1, 2)
+        stats_layout.addWidget(QtWidgets.QLabel(" Sofort prüfen:"), 1, 2)
         high_risk_label = QtWidgets.QLabel(f"{stats['high_risk']} Elemente ({stats['high_risk_pct']:.1%})")
         high_risk_label.setStyleSheet("color: #ff0000; font-weight: bold; font-size: 11pt;")
         high_risk_label.setToolTip("Elemente mit niedriger Erkennungsqualität oder fehlenden Daten - dringend überprüfen!")
         stats_layout.addWidget(high_risk_label, 1, 3)
 
-        stats_layout.addWidget(QtWidgets.QLabel("⚠️ Bald prüfen:"), 2, 2)
+        stats_layout.addWidget(QtWidgets.QLabel(" Bald prüfen:"), 2, 2)
         med_risk_label = QtWidgets.QLabel(f"{stats['medium_risk']} Elemente ({stats['medium_risk_pct']:.1%})")
         med_risk_label.setStyleSheet("color: #ff8800; font-weight: bold;")
         med_risk_label.setToolTip("Elemente mit mittlerer Qualität - bei Gelegenheit kontrollieren")
         stats_layout.addWidget(med_risk_label, 2, 3)
 
-        stats_layout.addWidget(QtWidgets.QLabel("✅ Gut erkannt:"), 3, 2)
+        stats_layout.addWidget(QtWidgets.QLabel(" Gut erkannt:"), 3, 2)
         low_risk_label = QtWidgets.QLabel(f"{stats['low_risk']} Elemente ({stats['low_risk_pct']:.1%})")
         low_risk_label.setStyleSheet("color: #44ff44; font-weight: bold;")
         low_risk_label.setToolTip("Elemente mit hoher Erkennungsqualität - keine Prüfung nötig")
@@ -263,13 +312,13 @@ class QualityInspectorDialog(QtWidgets.QDialog):
         # ========================================================================
         # HELP INFO BOX
         # ========================================================================
-        help_box = QtWidgets.QGroupBox("ℹ️ Was macht diese Prüfung?")
+        help_box = QtWidgets.QGroupBox(" Was macht diese Prüfung?")
         help_layout = QtWidgets.QVBoxLayout(help_box)
         help_text = QtWidgets.QLabel(
             "<b>Diese Ansicht zeigt, welche Elemente Sie kontrollieren sollten:</b><br>"
-            "• <b style='color: #ff0000;'>❌ Sofort prüfen</b> = Texterkennung unsicher oder Daten fehlen → Jetzt korrigieren<br>"
-            "• <b style='color: #ff8800;'>⚠️ Bald prüfen</b> = Mittlere Qualität → Bei Gelegenheit kontrollieren<br>"
-            "• <b style='color: #44ff44;'>✅ Gut erkannt</b> = Hohe Qualität → Normalerweise OK<br><br>"
+            "• <b style='color: #ff0000;'> Sofort prüfen</b> = Texterkennung unsicher oder Daten fehlen → Jetzt korrigieren<br>"
+            "• <b style='color: #ff8800;'> Bald prüfen</b> = Mittlere Qualität → Bei Gelegenheit kontrollieren<br>"
+            "• <b style='color: #44ff44;'> Gut erkannt</b> = Hohe Qualität → Normalerweise OK<br><br>"
             "<i>Tipp: Doppelklick auf eine Zeile → Springt direkt zum Element im Gleisplan</i>"
         )
         help_text.setWordWrap(True)
@@ -280,7 +329,7 @@ class QualityInspectorDialog(QtWidgets.QDialog):
         # ========================================================================
         # FILTER CONTROLS
         # ========================================================================
-        filter_group = QtWidgets.QGroupBox("🔍 Filter")
+        filter_group = QtWidgets.QGroupBox(" Filter")
         filter_layout = QtWidgets.QHBoxLayout(filter_group)
 
         # Class filter
@@ -297,9 +346,9 @@ class QualityInspectorDialog(QtWidgets.QDialog):
         self.risk_filter = QtWidgets.QComboBox()
         self.risk_filter.addItems([
             "Alle",
-            "❌ Sofort prüfen (>20%)",
-            "⚠️ Bald prüfen (10-20%)",
-            "✅ Gut erkannt (<10%)"
+            " Sofort prüfen (>20%)",
+            " Bald prüfen (10-20%)",
+            " Gut erkannt (<10%)"
         ])
         self.risk_filter.setToolTip("Filter nach Dringlichkeit der Überprüfung")
         self.risk_filter.currentTextChanged.connect(self._apply_filters)
@@ -390,7 +439,7 @@ class QualityInspectorDialog(QtWidgets.QDialog):
         button_layout.addStretch()
 
         # Export button
-        btn_export = QtWidgets.QPushButton("📄 Bericht exportieren")
+        btn_export = QtWidgets.QPushButton(" Bericht exportieren")
         btn_export.setToolTip("Exportiert die aktuelle Ansicht als CSV-Datei für Excel")
         btn_export.clicked.connect(self._export_to_csv)
         button_layout.addWidget(btn_export)
@@ -429,7 +478,7 @@ class QualityInspectorDialog(QtWidgets.QDialog):
 
         # Debug: Check if risk_score column exists and has valid values
         if 'risk_score' not in df.columns:
-            print("⚠️ WARNING: risk_score column does not exist!")
+            print(" WARNING: risk_score column does not exist!")
             return {
                 'total': total, 'avg_confidence': avg_confidence,
                 'high_risk': 0, 'high_risk_pct': 0.0,
@@ -439,20 +488,23 @@ class QualityInspectorDialog(QtWidgets.QDialog):
 
         # Filter out rows with null/NaN risk_score
         df_with_risk = df[df['risk_score'].notna()]
-        print(f"📊 Statistics debug:")
-        print(f"   Total rows: {total}")
-        print(f"   Rows with risk_score: {len(df_with_risk)}")
-        print(f"   Risk score range: {df_with_risk['risk_score'].min():.3f} - {df_with_risk['risk_score'].max():.3f}")
-        print(f"   Risk score mean: {df_with_risk['risk_score'].mean():.3f}")
+        print(f"Statistics debug:")
+        print(f"Total rows: {total}")
+        print(f"Rows with risk_score: {len(df_with_risk)}")
+        print(f"Risk score range: {df_with_risk['risk_score'].min():.3f} - {df_with_risk['risk_score'].max():.3f}")
+        print(f"Risk score mean: {df_with_risk['risk_score'].mean():.3f}")
 
-        # Adjusted thresholds for high-confidence datasets
-        high_risk = len(df_with_risk[df_with_risk['risk_score'] > 0.20])
-        medium_risk = len(df_with_risk[(df_with_risk['risk_score'] >= 0.10) & (df_with_risk['risk_score'] <= 0.20)])
-        low_risk = len(df_with_risk[df_with_risk['risk_score'] < 0.10])
+        # Use shared thresholds from validation_config
+        high_risk = len(df_with_risk[df_with_risk['risk_score'] > RISK_THRESHOLDS['high']])
+        medium_risk = len(df_with_risk[
+            (df_with_risk['risk_score'] >= RISK_THRESHOLDS['medium']) &
+            (df_with_risk['risk_score'] <= RISK_THRESHOLDS['high'])
+        ])
+        low_risk = len(df_with_risk[df_with_risk['risk_score'] < RISK_THRESHOLDS['medium']])
 
-        print(f"   High risk (>0.20): {high_risk}")
-        print(f"   Medium risk (0.10-0.20): {medium_risk}")
-        print(f"   Low risk (<0.10): {low_risk}")
+        print(f"High risk (>0.20): {high_risk}")
+        print(f"Medium risk (0.10-0.20): {medium_risk}")
+        print(f"Low risk (<0.10): {low_risk}")
 
         return {
             'total': total,
@@ -488,7 +540,7 @@ class QualityInspectorDialog(QtWidgets.QDialog):
             cls_name = str(row.get('cls', ''))
             is_custom = row.get('is_custom_symbol', False) == True
             if is_custom:
-                cls_display = f"📦 {cls_name}"
+                cls_display = f" {cls_name}"
             else:
                 cls_display = cls_name
             cls_item = QtWidgets.QTableWidgetItem(cls_display)
@@ -517,34 +569,40 @@ class QualityInspectorDialog(QtWidgets.QDialog):
 
             self.table.setItem(row_idx, 3, conf_item)
 
-            # Risk Score (color-coded and sortable) - Adjusted thresholds
+            # Risk Score (color-coded and sortable) - uses shared thresholds
             risk = float(row['risk_score'])
             risk_item = QtWidgets.QTableWidgetItem(f"{risk:.0%}")
             risk_item.setData(QtCore.Qt.UserRole, risk)
 
-            if risk > 0.20:  # High priority (>20%)
+            risk_level = get_risk_level(risk)
+            if risk_level == 'high_risk':
                 risk_item.setBackground(QtGui.QColor(255, 100, 100))
                 risk_item.setForeground(QtGui.QColor(255, 255, 255))
                 risk_item.setFont(QtGui.QFont("Arial", 9, QtGui.QFont.Bold))
-            elif risk >= 0.10:  # Medium priority (10-20%)
+            elif risk_level == 'medium_risk':
                 risk_item.setBackground(QtGui.QColor(255, 200, 100))
                 risk_item.setForeground(QtGui.QColor(0, 0, 0))
-            else:  # Low priority (<10%)
+            else:  # low_risk
                 risk_item.setForeground(QtGui.QColor(100, 200, 100))
 
             self.table.setItem(row_idx, 4, risk_item)
 
-            # Status Icon - Adjusted thresholds
+            # Status Icon - uses shared risk level
             risk_factors = str(row.get('risk_factors', 'OK'))
-            if risk > 0.20:
-                status = "❌"
-            elif risk >= 0.10:
-                status = "⚠️"
+            if risk_level == 'high_risk':
+                status = "!"
+                status_color = QtGui.QColor('#ff4444')
+            elif risk_level == 'medium_risk':
+                status = "?"
+                status_color = QtGui.QColor('#ff8800')
             else:
-                status = "✅"
+                status = "OK"
+                status_color = QtGui.QColor('#44ff44')
 
             status_item = QtWidgets.QTableWidgetItem(status)
             status_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            status_item.setForeground(status_color)
+            status_item.setFont(QtGui.QFont("Arial", 10, QtGui.QFont.Bold))
             self.table.setItem(row_idx, 5, status_item)
 
             # Problems/Risk Factors
@@ -587,16 +645,16 @@ class QualityInspectorDialog(QtWidgets.QDialog):
                 if not cls_item or cls_item.text() != class_filter:
                     show = False
 
-            # Risk filter - Adjusted thresholds
+            # Risk filter - uses shared thresholds from validation_config
             if show and risk_filter != "Alle":
                 risk_item = self.table.item(row, 4)
                 if risk_item:
                     risk = risk_item.data(QtCore.Qt.UserRole)
-                    if risk_filter == "❌ Sofort prüfen (>20%)" and risk <= 0.20:
+                    if risk_filter == " Sofort prüfen (>20%)" and risk <= RISK_THRESHOLDS['high']:
                         show = False
-                    elif risk_filter == "⚠️ Bald prüfen (10-20%)" and (risk < 0.10 or risk > 0.20):
+                    elif risk_filter == " Bald prüfen (10-20%)" and (risk < RISK_THRESHOLDS['medium'] or risk > RISK_THRESHOLDS['high']):
                         show = False
-                    elif risk_filter == "✅ Gut erkannt (<10%)" and risk >= 0.10:
+                    elif risk_filter == " Gut erkannt (<10%)" and risk >= RISK_THRESHOLDS['medium']:
                         show = False
 
             # Confidence filter

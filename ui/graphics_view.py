@@ -110,8 +110,12 @@ class InteractiveGraphicsView(QtWidgets.QGraphicsView):
                     self.scene().removeItem(item)
             self.temp_line_items.clear()
 
-    def _distance_to_edge(self, point: QtCore.QPointF, rect: QtCore.QRectF) -> float:
-        """Calculate minimum distance from point to any edge of the rectangle."""
+    def _distance_to_edge_with_info(self, point: QtCore.QPointF, rect: QtCore.QRectF) -> tuple:
+        """
+        Calculate minimum distance from point to any edge of the rectangle.
+        Returns (distance, is_on_edge) where is_on_edge means the point is within
+        the horizontal/vertical extent of that edge (not just close to a corner).
+        """
         x, y = point.x(), point.y()
         x1, y1, x2, y2 = rect.left(), rect.top(), rect.right(), rect.bottom()
 
@@ -121,80 +125,118 @@ class InteractiveGraphicsView(QtWidgets.QGraphicsView):
         dist_top = abs(y - y1)
         dist_bottom = abs(y - y2)
 
-        return min(dist_left, dist_right, dist_top, dist_bottom)
+        min_dist = min(dist_left, dist_right, dist_top, dist_bottom)
 
-    def _select_bbox_by_closest_edge(self, scene_pos: QtCore.QPointF) -> bool:
+        # Check if point is "on" an edge (within the edge's extent)
+        # For top/bottom edges: x must be between x1 and x2
+        # For left/right edges: y must be between y1 and y2
+        is_on_edge = False
+        edge_threshold = 20  # pixels - how close to be considered "on edge"
+
+        if min_dist == dist_top and x1 <= x <= x2 and dist_top < edge_threshold:
+            is_on_edge = True
+        elif min_dist == dist_bottom and x1 <= x <= x2 and dist_bottom < edge_threshold:
+            is_on_edge = True
+        elif min_dist == dist_left and y1 <= y <= y2 and dist_left < edge_threshold:
+            is_on_edge = True
+        elif min_dist == dist_right and y1 <= y <= y2 and dist_right < edge_threshold:
+            is_on_edge = True
+
+        return (min_dist, is_on_edge)
+
+    def _get_bbox_by_closest_edge(self, scene_pos: QtCore.QPointF):
         """
-        When multiple bboxes overlap at click point, select the one whose edge is closest.
-        Returns True if custom selection was applied, False otherwise.
+        When multiple bboxes overlap at click point, find the one whose edge is closest.
+        Prioritizes bboxes where the click is directly ON an edge (within threshold).
+        Returns the target item, or None if Qt should handle normally.
         """
         from ui.resizable_bbox import ResizableBBoxItem, ResizableOCRBBoxItem, ResizablePolygonBBoxItem, ResizeHandle
 
         # Get all items at click position
         items_at_pos = self.scene().items(scene_pos)
 
-        # If a resize handle is being clicked, let Qt handle it normally
+        # Collect all resize handles and their parent bboxes at click position
+        handles_at_pos = []
         for item in items_at_pos:
             if isinstance(item, ResizeHandle):
-                return False
+                handles_at_pos.append(item)
 
-        # Filter for bbox items only
+        # Collect all bbox items at click position
         bbox_items = []
         for item in items_at_pos:
             if isinstance(item, (ResizableBBoxItem, ResizableOCRBBoxItem, ResizablePolygonBBoxItem)):
                 bbox_items.append(item)
 
-        # If 0 or 1 bbox, let Qt handle it normally
-        if len(bbox_items) <= 1:
-            return False
+        # Also add parent bboxes of any handles (they might not be directly at click pos)
+        for handle in handles_at_pos:
+            parent = handle.parent_bbox if hasattr(handle, 'parent_bbox') else handle.parentItem()
+            if parent and parent not in bbox_items:
+                if isinstance(parent, (ResizableBBoxItem, ResizableOCRBBoxItem, ResizablePolygonBBoxItem)):
+                    bbox_items.append(parent)
 
-        # Multiple overlapping bboxes - select by closest edge
-        closest_item = None
-        min_distance = float('inf')
+        # If 0 or 1 bbox total, let Qt handle it normally
+        if len(bbox_items) <= 1:
+            return None
+
+        # Multiple overlapping bboxes - collect distance info for each
+        items_with_info = []
 
         for item in bbox_items:
             if isinstance(item, ResizablePolygonBBoxItem):
-                # For polygons, use bounding rect
                 rect = item.boundingRect()
                 rect = item.mapRectToScene(rect)
             else:
                 rect = item.sceneBoundingRect()
 
-            dist = self._distance_to_edge(scene_pos, rect)
-            if dist < min_distance:
-                min_distance = dist
-                closest_item = item
+            dist, is_on_edge = self._distance_to_edge_with_info(scene_pos, rect)
+            items_with_info.append((item, dist, is_on_edge))
 
-        if closest_item:
-            # Clear current selection and select the closest-edge item
-            self.scene().clearSelection()
-            closest_item.setSelected(True)
-            return True
+        # First priority: items where click is directly ON an edge
+        on_edge_items = [(item, dist) for item, dist, is_on_edge in items_with_info if is_on_edge]
 
-        return False
+        if on_edge_items:
+            # Among items where click is on edge, pick the one with smallest distance
+            return min(on_edge_items, key=lambda x: x[1])[0]
+        else:
+            # Fallback: pick item with closest edge overall
+            return min(items_with_info, key=lambda x: x[1])[0]
 
     def mousePressEvent(self, event: QtGui.QMouseEvent):
-        # ✅ CHECK: Manual linking mode
+        #  CHECK: Manual linking mode
         if hasattr(self.parent_widget, 'is_manual_linking_mode') and self.parent_widget.is_manual_linking_mode:
             if event.button() == QtCore.Qt.LeftButton:
                 self.parent_widget.on_linking_click(self.mapToScene(event.pos()))
                 event.accept()
                 return
 
-        # ✅ CHECK: Overlapping bbox selection (select by closest edge)
+        #  CHECK: Overlapping bbox selection (select by closest edge)
+        # Temporarily boost z-order of target item AND its handles so Qt picks it
+        target_item = None
+        old_z_values = {}  # Store original z-values to restore later
         if event.button() == QtCore.Qt.LeftButton and not self.is_drawing_mode:
             scene_pos = self.mapToScene(event.pos())
-            if self._select_bbox_by_closest_edge(scene_pos):
-                event.accept()
-                return
+            target_item = self._get_bbox_by_closest_edge(scene_pos)
+            if target_item:
+                # Temporarily make this item and its handles topmost
+                old_z_values['bbox'] = target_item.zValue()
+                target_item.setZValue(99999)
 
-        # ✅ CHECK: Drawing mode (existing)
+                # Also boost all resize handles of this bbox
+                if hasattr(target_item, 'handles'):
+                    for handle_name, handle in target_item.handles.items():
+                        old_z_values[handle_name] = handle.zValue()
+                        handle.setZValue(100000)  # Even higher than bbox
+
+        #  CHECK: Drawing mode (existing)
         if not self.is_drawing_mode:
             super().mousePressEvent(event)
+            # Restore z-order after Qt processes the event
+            if target_item and old_z_values:
+                target_item.setZValue(old_z_values.get('bbox', 0))
+                if hasattr(target_item, 'handles'):
+                    for handle_name, handle in target_item.handles.items():
+                        handle.setZValue(old_z_values.get(handle_name, 1000))
             return
-            if not self.is_drawing_mode:
-                super().mousePressEvent(event)
-                return
 
         if event.button() == QtCore.Qt.LeftButton:
             pos = self.mapToScene(event.pos())
@@ -294,7 +336,7 @@ class InteractiveGraphicsView(QtWidgets.QGraphicsView):
         signed_distance = ((diagonal_dy * (mouse_pos.x() - self.start_pos.x()) - 
                             diagonal_dx * (mouse_pos.y() - self.start_pos.y())) / diagonal_length)
         
-        # ✅ FIX: Use signed distance directly (don't take absolute value yet)
+        #  FIX: Use signed distance directly (don't take absolute value yet)
         # This preserves the direction information
         height = signed_distance
         if abs(height) < 20:
@@ -463,13 +505,14 @@ class InteractiveGraphicsView(QtWidgets.QGraphicsView):
             return
         
         df = self.parent_widget.df_all
-        
-        # Find the row with this row_id
-        if row_id not in df.index:
+
+        # Find the row with this row_id (using row_id column, not index)
+        row_data = df[df['row_id'] == row_id]
+        if row_data.empty:
             print(f"[GRAPHICS] Row ID {row_id} not found in dataframe")
             return
-        
-        row = df.loc[row_id]
+
+        row = row_data.iloc[0]
         
         # Get bounding box coordinates
         # Try anchor bbox first (for most elements)

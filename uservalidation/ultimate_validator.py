@@ -17,10 +17,23 @@ from typing import List, Dict
 from uservalidation.data_validator2 import EnhancedDataValidator, ValidationIssue
 from uservalidation.missing_detection_analyzer import MissingDetectionAnalyzer, MissingDetectionRegion
 
+# Import shared validation config (single source of truth)
+from validation_config import (
+    CLASSES_REQUIRING_COORDINATES,
+    CLASSES_REQUIRING_TEXT,
+    CLASSES_EXCLUDED,
+    CONFIDENCE_THRESHOLDS,
+    DEFAULT_CONFIDENCE_THRESHOLD,
+    get_confidence_threshold,
+    needs_coordinate,
+    needs_text,
+    is_excluded,
+)
+
 class UltimateValidator:
     """
     Combined OCR + YOLO validator with all features.
-    
+
     Includes:
     - All your existing OCR checks (format, duplicates, etc.)
     - YOLO quality checks (confidence, duplicates, sizes)
@@ -28,72 +41,33 @@ class UltimateValidator:
     - Jump-to-detection support
     - Auto-correction for OCR format errors
     """
-    
-    # ✅ Your actual class names from config.py
-    # weichen_block excluded per user request
-    CLASSES_NEEDING_COORDS = [
-        'signal',
-        'gks_gesteuert',
-        'gks_festkodiert',
-        'isolierstoß',
-        'prellblock',
-        'haltepunkt',
-        'sverbinder',
-        'gm_block',
-        'haltetafel',
-        'weichenende',
-        'weichengruppeende',
-    ]
 
-    # ✅ Classes that should have text/numbers (anchor_text)
-    # Note: 'coordinate' is excluded - it uses coord_text, not anchor_text
-    # weichen_block excluded per user request
-    CLASSES_NEEDING_TEXT = [
-        'signal',
-        'gks_gesteuert',
-        'gks_festkodiert',
-    ]
-    
-    # ✅ Expected confidence thresholds (from your config)
-    CONFIDENCE_THRESHOLDS = {
-        "signal": 0.8,
-        "gm_block": 0.8,
-        "gks_festkodiert": 0.7,
-        "gks_gesteuert": 0.7,
-        "weichen_block": 0.90,
-        "isolierstoß": 0.7,
-        "haltepunkt": 0.8,
-        "sverbinder": 0.80,
-        "coordinate": 0.65,
-        "weichenende": 0.8,
-        "prellblock": 0.8,
-        "haltetafel": 0.70,
-        "weichengruppeende": 0.8
-    }
+    #  Use shared configuration from validation_config.py
+    CLASSES_NEEDING_COORDS = CLASSES_REQUIRING_COORDINATES
+    CLASSES_NEEDING_TEXT = CLASSES_REQUIRING_TEXT
+    CONFIDENCE_THRESHOLDS = CONFIDENCE_THRESHOLDS
     
     def __init__(self, df: pd.DataFrame):
-        # ✅ FILTER: Exclude unlinked coordinates and weichen_block (per user request)
+        #  FILTER: Exclude classes defined in shared validation config
         if 'cls' in df.columns:
-            df_filtered = df[
-                (df['cls'] != 'coordinate') &  # Exclude unlinked standalone coordinates
-                (df['cls'] != 'weichen_block')  # Exclude weichen_block
-            ].copy()
+            # Use is_excluded() from shared config
+            df_filtered = df[~df['cls'].apply(lambda x: is_excluded(str(x)))].copy()
         else:
             df_filtered = df.copy()
 
-        # ✅ ENSURE REQUIRED COLUMNS EXIST FIRST
+        #  ENSURE REQUIRED COLUMNS EXIST FIRST
         self.df = self._ensure_columns(df_filtered)
 
         # Your existing OCR validator
         self.ocr_validator = EnhancedDataValidator(self.df)
 
-        # ✅ Load NewSymbolDetector ONCE for template validation (performance fix)
+        #  Load NewSymbolDetector ONCE for template validation (performance fix)
         self.symbol_detector = None
         try:
             from core.symbol_detector import NewSymbolDetector
             self.symbol_detector = NewSymbolDetector()
         except Exception as e:
-            print(f"⚠️ Could not load NewSymbolDetector: {e}")
+            print(f"Could not load NewSymbolDetector: {e}")
     
     def _ensure_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -102,7 +76,7 @@ class UltimateValidator:
         """
         df = df.copy()
         if 'page' not in df.columns:
-            print("⚠️ Warning: 'page' column missing, adding default value 1")
+            print("Warning: 'page' column missing, adding default value 1")
             df['page'] = 1
         # Add center coordinates (xc, yc) if missing
         if 'xc' not in df.columns:
@@ -150,77 +124,88 @@ class UltimateValidator:
         Returns:
             ValidationResult with all issues
         """
-        # ✅ Safety check
+        #  Safety check
         if self.df is None or self.df.empty:
-            print("⚠️ Warning: Empty DataFrame, skipping validation")
+            print("Warning: Empty DataFrame, skipping validation")
             from uservalidation.data_validator2 import ValidationResult
             return ValidationResult()
         
-        print(f"🔵 Validating {len(self.df)} rows...")
+        print(f"Validating {len(self.df)} rows...")
         
         # ========================================
         # PART 1: Your Existing OCR Validation
         # ========================================
-        print(f"🔵 Running OCR validation...")
+        print(f"Running OCR validation...")
         result = self.ocr_validator.validate_all(auto_correct=auto_correct)
-        print(f"🔵 OCR validation found {len(result.issues)} issues")
+        print(f"OCR validation found {len(result.issues)} issues")
         
         # ========================================
         # PART 2: Enhanced YOLO Checks
         # ========================================
-        print(f"🔵 Running YOLO quality checks...")
+        print(f"Running YOLO quality checks...")
         yolo_issues = []
 
         # YOLO Quality
         yolo_issues.extend(self._check_low_confidence())
         yolo_issues.extend(self._check_yolo_duplicates())
-        # ✅ Very sensitive - detect even slight overlaps (5%)
+        #  Very sensitive - detect even slight overlaps (5%)
         yolo_issues.extend(self._check_bbox_overlaps(same_class_iou=0.05, cross_class_iou=0.05))
-        # ✅ DISABLED: Size outliers (user doesn't want "ungewöhnliche Größe" warnings)
+        #  DISABLED: Size outliers (user doesn't want "ungewöhnliche Größe" warnings)
         # yolo_issues.extend(self._check_size_outliers())
 
-        # ✅ DISABLED: Class relationships check (user doesn't want "ohne nahe Koordinaten")
+        #  DISABLED: Class relationships check (user doesn't want "ohne nahe Koordinaten")
         # yolo_issues.extend(self._check_class_relationships())
 
         # False Positive Detection
-        yolo_issues.extend(self._check_false_positives())  # ✅ NEW: Detect likely false positives
+        yolo_issues.extend(self._check_false_positives())  #  NEW: Detect likely false positives
 
-        # ✅ DISABLED: Cross-references (contains unwanted coordinate_sequence_gap)
+        #  DISABLED: Cross-references (contains unwanted coordinate_sequence_gap)
         # yolo_issues.extend(self._check_cross_references())
 
         # Missing Data Detection
         yolo_issues.extend(self._check_missing_coordinates_spatial())
         yolo_issues.extend(self._check_missing_text())
-        # ✅ DISABLED: Isolated detections (user doesn't want "weit von anderen entfernt")
+        #  DISABLED: Isolated detections (user doesn't want "weit von anderen entfernt")
         # yolo_issues.extend(self._check_isolated_detections())
         yolo_issues.extend(self._check_expected_ratios())
-        
-        print(f"🔵 YOLO checks found {len(yolo_issues)} issues")
+        yolo_issues.extend(self._check_link_distance_outliers())
+
+        # Haltepunkt-Signal Reference Check
+        print(f"Running haltepunkt-signal reference check...")
+        yolo_issues.extend(self._check_haltepunkt_signal_reference())
+
+        print(f"YOLO checks found {len(yolo_issues)} issues")
 
         # ========================================
         # PART 3: Coordinate Pattern Validation
         # ========================================
-        # ✅ DISABLED: Gap detection (too aggressive, flags blank spaces)
+        #  DISABLED: Gap detection (too aggressive, flags blank spaces)
         # Instead: Check if coordinates match the majority pattern
-        print(f"🔵 Running coordinate pattern validation...")
+        print(f"Running coordinate pattern validation...")
         yolo_issues.extend(self._check_coordinate_patterns())
+
+        # ========================================
+        # PART 3b: OCR Text Outlier Detection
+        # ========================================
+        print(f"Running OCR text outlier detection...")
+        yolo_issues.extend(self._check_ocr_text_outliers())
 
         # ========================================
         # PART 4: Template Matching Validation
         # ========================================
-        print(f"🔵 Running template matching validation...")
+        print(f"Running template matching validation...")
 
         # Debug: Check how many template symbols we have
         template_count = 0
         if 'is_new_symbol' in self.df.columns:
             template_count = self.df['is_new_symbol'].sum() if self.df['is_new_symbol'].dtype == bool else (self.df['is_new_symbol'] == True).sum()
-        print(f"   📊 Found {template_count} template symbols in DataFrame")
+        print(f"Found {template_count} template symbols in DataFrame")
 
         # Debug: Check what columns exist and sample some template symbols
         if template_count > 0:
             template_mask = self.df['is_new_symbol'] == True
             sample_templates = self.df[template_mask].head(5)
-            print(f"   🔍 Sample template symbols:")
+            print(f"Sample template symbols:")
             for idx, row in sample_templates.iterrows():
                 cls_val = row.get('cls', 'MISSING')
                 det_method = row.get('detection_method', 'MISSING')
@@ -230,35 +215,35 @@ class UltimateValidator:
                 # Check if this is actually a YOLO class
                 is_yolo_class = cls_val in self.CONFIDENCE_THRESHOLDS
 
-                print(f"      - cls: '{cls_val}' {'⚠️ YOLO CLASS!' if is_yolo_class else '✓ Template'}")
-                print(f"        detection_method: {det_method}")
-                print(f"        anchor_text: {anchor_text}")
-                print(f"        coord_value: {coord_val}")
+                print(f"- cls: '{cls_val}' {'YOLO CLASS!' if is_yolo_class else 'Template'}")
+                print(f"detection_method: {det_method}")
+                print(f"anchor_text: {anchor_text}")
+                print(f"coord_value: {coord_val}")
 
         # Debug: Check symbol_detector and show name matching
         if self.symbol_detector:
-            print(f"   🔍 Symbol detector loaded with {len(self.symbol_detector.symbols)} symbols:")
+            print(f"Symbol detector loaded with {len(self.symbol_detector.symbols)} symbols:")
             for sym_name in self.symbol_detector.symbols.keys():
                 sym_def = self.symbol_detector.symbols[sym_name]
-                print(f"      - '{sym_name}': has_text={sym_def.has_text}, links_to_coordinate={sym_def.links_to_coordinate}")
+                print(f"- '{sym_name}': has_text={sym_def.has_text}, links_to_coordinate={sym_def.links_to_coordinate}")
 
             # Check if any DataFrame cls values match detector symbols
             if template_count > 0:
                 template_cls_values = self.df[self.df['is_new_symbol'] == True]['cls'].unique()
-                print(f"   🔍 Template cls values in DataFrame: {list(template_cls_values)}")
-                print(f"   🔍 Name matching check:")
+                print(f"Template cls values in DataFrame: {list(template_cls_values)}")
+                print(f"Name matching check:")
                 for cls_val in template_cls_values:
                     if cls_val in self.symbol_detector.symbols:
-                        print(f"      - '{cls_val}': ✓ EXACT MATCH in detector")
+                        print(f"- '{cls_val}':  EXACT MATCH in detector")
                     else:
                         # Check for partial matches
                         partial_matches = [s for s in self.symbol_detector.symbols.keys() if cls_val.startswith(s) or s.startswith(cls_val)]
                         if partial_matches:
-                            print(f"      - '{cls_val}': ⚠️ NO EXACT MATCH, but found partial: {partial_matches}")
+                            print(f"- '{cls_val}': NO EXACT MATCH, but found partial: {partial_matches}")
                         else:
-                            print(f"      - '{cls_val}': ❌ NO MATCH in detector")
+                            print(f"- '{cls_val}': NO MATCH in detector")
         else:
-            print(f"   ⚠️ Symbol detector is None - cannot check symbol requirements!")
+            print(f"Symbol detector is None - cannot check symbol requirements!")
 
         template_issues = []
 
@@ -273,7 +258,7 @@ class UltimateValidator:
         template_issues.extend(self._check_template_link_distance_large())  # I - Link distance
         template_issues.extend(self._check_template_text_pattern())  # F - Text pattern
 
-        print(f"🔵 Template validation found {len(template_issues)} issues")
+        print(f"Template validation found {len(template_issues)} issues")
 
         # ========================================
         # Combine All Issues (OCR + YOLO + Template)
@@ -282,7 +267,7 @@ class UltimateValidator:
         result.issues.extend(template_issues)
         result.total_issues = len(result.issues)
         
-        print(f"🔵 Total validation issues: {result.total_issues}")
+        print(f"Total validation issues: {result.total_issues}")
         
         # Update category stats
         from collections import Counter
@@ -299,7 +284,7 @@ class UltimateValidator:
         """Flag YOLO detections with low confidence (using your thresholds)"""
         issues = []
 
-        # ✅ Safety checks
+        #  Safety checks
         if 'conf' not in self.df.columns:
             return issues
 
@@ -307,14 +292,14 @@ class UltimateValidator:
             return issues
 
         for _, row in self.df.iterrows():
-            # ✅ Skip if position is missing
+            #  Skip if position is missing
             if pd.isna(row.get('xc')) or pd.isna(row.get('yc')):
                 continue
 
             cls = row['cls']
             conf = row['conf']
 
-            # ✅ Use YOUR class-specific thresholds
+            #  Use YOUR class-specific thresholds
             expected_threshold = self.CONFIDENCE_THRESHOLDS.get(cls, 0.5)
             
             if conf < expected_threshold:
@@ -340,7 +325,7 @@ class UltimateValidator:
                         'expected_threshold': expected_threshold,
                         'suggestion': f'YOLO war unsicher (Konfidenz {conf:.0%} < {expected_threshold:.0%}). Überprüfen und ggf. löschen.',
                         'can_jump': True,
-                        # ✅ Low confidence suggests deletion or review
+                        #  Low confidence suggests deletion or review
                         'suggested_action': 'delete',
                         'alternative_actions': ['review', 'bbox_resize'],
                         'action_description': f'Niedrige YOLO-Konfidenz ({conf:.0%}). Möglicherweise Falscherkennung - löschen oder überprüfen.',
@@ -361,7 +346,7 @@ class UltimateValidator:
         if not all(col in self.df.columns for col in ['xc', 'yc', 'cls']):
             return issues
 
-        # ✅ Class-specific duplicate detection thresholds
+        #  Class-specific duplicate detection thresholds
         # None = skip duplicate detection for this class (rare duplicates, often close together)
         class_thresholds = {
             'signal': 50,
@@ -378,14 +363,14 @@ class UltimateValidator:
         }
 
         for cls in self.df['cls'].unique():
-            # ✅ Skip classes that don't need duplicate detection
+            #  Skip classes that don't need duplicate detection
             threshold = class_thresholds.get(cls, distance)
             if threshold is None:
                 continue
 
             cls_df = self.df[self.df['cls'] == cls].copy()
 
-            # ✅ Filter out rows with missing positions
+            #  Filter out rows with missing positions
             cls_df = cls_df[cls_df['xc'].notna() & cls_df['yc'].notna()]
 
             if len(cls_df) < 2:
@@ -393,12 +378,12 @@ class UltimateValidator:
 
             positions = cls_df[['xc', 'yc']].values
 
-            # ✅ Track which pairs we've already reported
+            #  Track which pairs we've already reported
             reported_pairs = set()
 
             for i in range(len(positions)):
                 for j in range(i + 1, len(positions)):
-                    # ✅ Skip if we've already reported this pair
+                    #  Skip if we've already reported this pair
                     pair_key = tuple(sorted([i, j]))
                     if pair_key in reported_pairs:
                         continue
@@ -412,7 +397,7 @@ class UltimateValidator:
                         conf_i = row_i.get('conf', 1.0)
                         conf_j = row_j.get('conf', 1.0)
                         
-                        # ✅ Keep higher confidence, delete lower
+                        #  Keep higher confidence, delete lower
                         if conf_i >= conf_j:
                             keep, delete = row_i, row_j
                         else:
@@ -433,7 +418,7 @@ class UltimateValidator:
                                 'keep_row': int(keep['row_id']),
                                 'suggestion': f"YOLO Duplikat erkannt. Löschen Sie Zeile {delete['row_id']} (Konfidenz {delete.get('conf', 1.0):.0%}), behalten Sie Zeile {keep['row_id']} (Konfidenz {keep.get('conf', 1.0):.0%}).",
                                 'can_jump': True,
-                                # ✅ Duplicate detection - delete lower confidence
+                                #  Duplicate detection - delete lower confidence
                                 'suggested_action': 'delete',
                                 'alternative_actions': ['review'],
                                 'action_description': f'Duplikat erkannt ({dist:.0f}px entfernt). Löschen Sie das Element mit niedrigerer Konfidenz.',
@@ -446,7 +431,7 @@ class UltimateValidator:
 
     def _check_bbox_overlaps(self, same_class_iou: float = 0.5, cross_class_iou: float = 0.3) -> List[ValidationIssue]:
         """
-        ✅ NEW: Check for bbox overlaps using IoU (Intersection over Union).
+         NEW: Check for bbox overlaps using IoU (Intersection over Union).
 
         Detects:
         - Same-class overlaps (likely duplicates)
@@ -488,6 +473,44 @@ class UltimateValidator:
 
             return inter_area / union_area if union_area > 0 else 0.0
 
+        def calculate_containment(bbox1, bbox2):
+            """
+            Calculate max containment ratio between two bboxes.
+            Returns (containment_ratio, smaller_bbox_index)
+            where smaller_bbox_index is 0 if bbox1 is smaller, 1 if bbox2 is smaller.
+
+            Containment = intersection_area / smaller_box_area
+            This is better than IoU for detecting when one box is inside another.
+            """
+            # Skip if any bbox coordinate is None/NaN
+            if any(pd.isna(c) or c is None for c in bbox1 + bbox2):
+                return 0.0, 0
+
+            # Calculate intersection
+            x1_inter = max(bbox1[0], bbox2[0])
+            y1_inter = max(bbox1[1], bbox2[1])
+            x2_inter = min(bbox1[2], bbox2[2])
+            y2_inter = min(bbox1[3], bbox2[3])
+
+            if x2_inter <= x1_inter or y2_inter <= y1_inter:
+                return 0.0, 0
+
+            inter_area = (x2_inter - x1_inter) * (y2_inter - y1_inter)
+
+            # Calculate both box areas
+            bbox1_area = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
+            bbox2_area = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
+
+            if bbox1_area <= 0 or bbox2_area <= 0:
+                return 0.0, 0
+
+            # Containment = intersection / smaller_box_area
+            smaller_area = min(bbox1_area, bbox2_area)
+            containment = inter_area / smaller_area
+            smaller_idx = 0 if bbox1_area <= bbox2_area else 1
+
+            return containment, smaller_idx
+
         def get_bbox(row):
             """Get bbox coordinates for a row (tries anchor first, then coord)"""
             # Try anchor bbox
@@ -508,17 +531,96 @@ class UltimateValidator:
             if bbox:
                 valid_rows.append((idx, row, bbox))
 
-        print(f"🔵 Bbox overlap check: Found {len(valid_rows)} rows with valid bboxes out of {len(self.df)}")
+        print(f"Bbox overlap check: Found {len(valid_rows)} rows with valid bboxes out of {len(self.df)}")
 
         if len(valid_rows) < 2:
-            print(f"⚠️ Not enough valid bboxes to check overlaps (need at least 2)")
+            print(f"Not enough valid bboxes to check overlaps (need at least 2)")
             return issues
 
         # Track reported pairs
         reported_pairs = set()
         overlaps_found = 0
 
-        # ✅ NEW: Build overlap graph to find clusters of 3+ overlapping bboxes
+        # =====================================================================
+        # CHECK 1: High-containment pairwise overlaps (one box inside another)
+        # =====================================================================
+        HIGH_CONTAINMENT_THRESHOLD = 0.95
+        reported_containment_pairs = set()
+
+        for i in range(len(valid_rows)):
+            for j in range(i + 1, len(valid_rows)):  # Only check each pair once (j > i)
+                idx_i, row_i, bbox_i = valid_rows[i]
+                idx_j, row_j, bbox_j = valid_rows[j]
+
+                row_id_i = int(row_i['row_id'])
+                row_id_j = int(row_j['row_id'])
+
+                # Skip if already reported
+                pair_key = tuple(sorted([row_id_i, row_id_j]))
+                if pair_key in reported_containment_pairs:
+                    continue
+
+                containment, smaller_idx = calculate_containment(bbox_i, bbox_j)
+
+                if containment >= HIGH_CONTAINMENT_THRESHOLD:
+                    reported_containment_pairs.add(pair_key)
+
+                    # Identify which box is smaller/larger (for info only - don't assume which is wrong)
+                    if smaller_idx == 0:
+                        smaller_row, larger_row = row_i, row_j
+                        smaller_bbox, larger_bbox = bbox_i, bbox_j
+                    else:
+                        smaller_row, larger_row = row_j, row_i
+                        smaller_bbox, larger_bbox = bbox_j, bbox_i
+
+                    smaller_row_id = int(smaller_row['row_id'])
+                    larger_row_id = int(larger_row['row_id'])
+                    cls_smaller = smaller_row['cls']
+                    cls_larger = larger_row['cls']
+
+                    # Calculate areas for message
+                    smaller_area = (smaller_bbox[2] - smaller_bbox[0]) * (smaller_bbox[3] - smaller_bbox[1])
+                    larger_area = (larger_bbox[2] - larger_bbox[0]) * (larger_bbox[3] - larger_bbox[1])
+
+                    # Report on the FIRST row (row_i) - neutral, user decides which to delete
+                    report_row_id = row_id_i
+                    report_row = row_i
+
+                    issues.append(ValidationIssue(
+                        row_id=report_row_id,
+                        severity='warning',
+                        category='bbox_high_containment',
+                        field='bbox',
+                        message=f"Bbox-Überlappung {containment:.0%}: {cls_smaller} (Zeile {smaller_row_id}) in {cls_larger} (Zeile {larger_row_id})",
+                        current_value=f"{containment:.0%} Überlappung",
+                        suggested_value=f"Eine der Zeilen {smaller_row_id} oder {larger_row_id} prüfen/löschen",
+                        auto_correctable=False,
+                        confidence=containment,
+                        context={
+                            'position': (float(report_row['xc']), float(report_row['yc'])),
+                            'containment': float(containment),
+                            'smaller_row_id': smaller_row_id,
+                            'larger_row_id': larger_row_id,
+                            'smaller_class': cls_smaller,
+                            'larger_class': cls_larger,
+                            'smaller_area': float(smaller_area),
+                            'larger_area': float(larger_area),
+                            'overlapping_rows': [smaller_row_id, larger_row_id],
+                            'suggestion': f"'{cls_smaller}' (Zeile {smaller_row_id}, {smaller_area:.0f}px²) ist zu {containment:.0%} innerhalb von '{cls_larger}' (Zeile {larger_row_id}, {larger_area:.0f}px²). Eine der beiden Erkennungen ist wahrscheinlich falsch - prüfen Sie welche.",
+                            'can_jump': True,
+                            'suggested_action': 'review',
+                            'alternative_actions': ['delete'],
+                            'action_description': f'Zwei Erkennungen überlappen stark ({containment:.0%}).\n\n• Kleinere: {cls_smaller} (Zeile {smaller_row_id}, {smaller_area:.0f}px²)\n• Größere: {cls_larger} (Zeile {larger_row_id}, {larger_area:.0f}px²)\n\nPrüfen Sie welche korrekt ist und löschen Sie die andere.',
+                        }
+                    ))
+
+                    print(f"High containment: {cls_smaller} (row {smaller_row_id}) is {containment:.0%} inside {cls_larger} (row {larger_row_id})")
+
+        print(f"High containment check: Found {len(reported_containment_pairs)} pairs with ≥95% containment")
+
+        # =====================================================================
+        # CHECK 2: Build overlap graph to find clusters of 3+ overlapping bboxes
+        # =====================================================================
         # First, find all pairwise overlaps
         overlap_graph = {}  # row_id -> list of (other_row_id, iou, bbox_data)
 
@@ -552,20 +654,20 @@ class UltimateValidator:
                         'same_class': same_class
                     })
 
-        # ✅ Filter: Only include boxes that DIRECTLY overlap with 2+ others
+        #  Filter: Only include boxes that DIRECTLY overlap with 2+ others
         # This excludes chains (A→B→C) and only finds true clusters
         multi_overlap_boxes = {}
         for row_id, neighbors in overlap_graph.items():
             if len(neighbors) >= 2:  # Must overlap with 2+ boxes directly
                 multi_overlap_boxes[row_id] = neighbors
 
-        print(f"🔵 Found {len(multi_overlap_boxes)} boxes with 2+ direct overlaps")
+        print(f"Found {len(multi_overlap_boxes)} boxes with 2+ direct overlaps")
 
         if len(multi_overlap_boxes) < 3:
-            print(f"⚠️ Not enough boxes with multiple overlaps to form clusters")
+            print(f"Not enough boxes with multiple overlaps to form clusters")
             return issues
 
-        # ✅ Find unique clusters among boxes with 2+ overlaps
+        #  Find unique clusters among boxes with 2+ overlaps
         visited = set()
         clusters = []
 
@@ -598,7 +700,7 @@ class UltimateValidator:
                     clusters.append(cluster)
                     visited.update(cluster)
 
-        print(f"🔵 Found {len(clusters)} unique clusters of 3+ overlapping bboxes")
+        print(f"Found {len(clusters)} unique clusters of 3+ overlapping bboxes")
 
         # Create ONE warning per cluster
         for cluster in clusters:
@@ -626,7 +728,7 @@ class UltimateValidator:
             avg_iou = total_iou / pair_count if pair_count > 0 else 0
 
             overlaps_found += 1
-            print(f"🔵 Cluster of {len(cluster)} boxes: {', '.join(set(cluster_classes))} (rows: {cluster_row_ids})")
+            print(f"Cluster of {len(cluster)} boxes: {', '.join(set(cluster_classes))} (rows: {cluster_row_ids})")
 
             severity = 'error' if avg_iou > 0.5 else 'warning'
             msg = f"YOLO Bbox-Cluster: {len(cluster)} Bboxen überlappen ({', '.join(set(cluster_classes))})"
@@ -650,19 +752,19 @@ class UltimateValidator:
                     'overlapping_classes': cluster_classes,
                     'suggestion': suggestion,
                     'can_jump': True,
-                    # ✅ Overlapping bboxes - review or delete
+                    #  Overlapping bboxes - review or delete
                     'suggested_action': 'review',
                     'alternative_actions': ['delete'],
                     'action_description': f'{len(cluster)} überlappende Erkennungen (Avg IoU: {avg_iou:.0%}). Überprüfen und ggf. löschen.',
                 }
             ))
 
-        print(f"🔵 Bbox overlap check complete: Found {overlaps_found} bboxes in 3+ clusters, created {len(issues)} validation issues")
+        print(f"Bbox overlap check complete: Found {overlaps_found} bboxes in 3+ clusters, created {len(issues)} validation issues")
         return issues
 
     def _check_class_relationships(self) -> List[ValidationIssue]:
         """
-        ✅ NEW: Validate expected class co-occurrences and relationships.
+         NEW: Validate expected class co-occurrences and relationships.
 
         Rules (all classes that need coordinates EXCEPT weichen_block):
         - signal → must have coordinate within 200px (error)
@@ -708,7 +810,7 @@ class UltimateValidator:
                         context={
                             'suggestion': f"Es wurden {count} {cls}-Objekte erkannt, aber keine Koordinaten. Überprüfen Sie die YOLO-Erkennung für Koordinaten.",
                             'can_jump': False,
-                            # ✅ Global issue - review entire document
+                            #  Global issue - review entire document
                             'suggested_action': 'review',
                             'alternative_actions': [],
                             'action_description': 'Globales Problem: Keine Koordinaten erkannt. Überprüfen Sie die YOLO-Erkennung.',
@@ -776,7 +878,7 @@ class UltimateValidator:
 
     def _check_false_positives(self) -> List[ValidationIssue]:
         """
-        ✅ NEW: Detect likely false positive YOLO detections.
+         NEW: Detect likely false positive YOLO detections.
 
         Flags detections with multiple red flags:
         - Low confidence (<0.4) + missing OCR text
@@ -855,7 +957,7 @@ class UltimateValidator:
                     severity=severity,
                     category='likely_false_positive',
                     field='detection',
-                    message=f"⚠️ Wahrscheinlich Fehl-Erkennung: {', '.join(red_flags)}",
+                    message=f"Wahrscheinlich Fehl-Erkennung: {', '.join(red_flags)}",
                     current_value=f"{cls} (conf={conf:.2f})",
                     suggested_value="Überprüfen und ggf. löschen",
                     auto_correctable=False,
@@ -866,7 +968,7 @@ class UltimateValidator:
                         'flag_score': flag_score,
                         'suggestion': f"Diese {cls}-Erkennung hat mehrere verdächtige Merkmale: {', '.join(red_flags)}. Überprüfen Sie, ob dies eine Fehl-Erkennung ist.",
                         'can_jump': True,
-                        # ✅ False positive detection - delete
+                        #  False positive detection - delete
                         'suggested_action': 'delete',
                         'alternative_actions': ['review'],
                         'action_description': f'Wahrscheinliche Fehl-Erkennung: {", ".join(red_flags)}. Überprüfen und ggf. löschen.',
@@ -877,7 +979,7 @@ class UltimateValidator:
 
     def _check_coordinate_patterns(self) -> List[ValidationIssue]:
         """
-        ✅ NEW: Check if coordinates match the majority pattern.
+         NEW: Check if coordinates match the majority pattern.
 
         Instead of flagging coordinate gaps (too aggressive), this checks
         if coordinate values follow the same format as the majority.
@@ -957,13 +1059,223 @@ class UltimateValidator:
                         'expected_pattern': majority_pattern,
                         'suggestion': f"Koordinate '{coord_val}' hat Format '{pattern}', aber {majority_count}/{len(valid_coords)} Koordinaten haben Format '{majority_pattern}'. Überprüfen Sie ob OCR korrekt ist.",
                         'can_jump': True,
-                        # ✅ Pattern mismatch - OCR issue
+                        #  Pattern mismatch - OCR issue
                         'suggested_action': 'bbox_resize',
                         'alternative_actions': ['manual_ocr_horizontal', 'manual_edit'],
                         'action_description': f'Koordinatenformat weicht ab. Passen Sie die Erkennungsfläche an oder korrigieren Sie manuell.',
                     }
                 ))
 
+        return issues
+
+    def _check_ocr_text_outliers(self) -> List[ValidationIssue]:
+        """
+        Detect OCR text that doesn't fit the pattern of others in the same class.
+
+        Checks:
+        - signal: anchor_text should be letter(s) + number (e.g., "A1", "N12", "AA5")
+        - gks_gesteuert/gks_festkodiert: anchor_text should be numbers only (e.g., "12 34")
+
+        Flags texts that deviate significantly from the majority pattern in their class.
+        """
+        issues = []
+
+        import re
+        from collections import Counter
+
+        if 'anchor_text' not in self.df.columns:
+            return issues
+
+        # =====================================================================
+        # CHECK 1: Signal text pattern outliers
+        # =====================================================================
+        signals = self.df[self.df['cls'] == 'signal'].copy()
+        signals = signals[signals['anchor_text'].notna() & (signals['anchor_text'] != '')]
+
+        if len(signals) >= 3:
+            def classify_signal_text(text):
+                """Classify signal text pattern"""
+                text = str(text).strip()
+                if not text:
+                    return 'empty'
+                # Common patterns: A1, N12, AA5, P1, etc.
+                if re.match(r'^[A-ZÄÖÜ]{1,3}\d{1,3}$', text):
+                    return 'letter_number'  # Standard: A1, N12, AA5
+                elif re.match(r'^\d{1,3}[A-ZÄÖÜ]{1,3}$', text):
+                    return 'number_letter'  # Reversed: 1A, 12N
+                elif re.match(r'^[A-ZÄÖÜ]+$', text):
+                    return 'letters_only'
+                elif re.match(r'^\d+$', text):
+                    return 'numbers_only'
+                elif re.match(r'^[A-ZÄÖÜ]{1,3}\d{1,3}[A-ZÄÖÜ]$', text):
+                    return 'letter_number_letter'  # A1a, N12b
+                else:
+                    return 'other'
+
+            # Find majority pattern
+            signal_patterns = signals['anchor_text'].apply(classify_signal_text)
+            pattern_counts = Counter(signal_patterns)
+
+            if pattern_counts:
+                majority_pattern, majority_count = pattern_counts.most_common(1)[0]
+
+                # Only flag if majority is clear (>50% of signals)
+                if majority_count >= len(signals) * 0.5:
+                    for _, row in signals.iterrows():
+                        text = str(row['anchor_text']).strip()
+                        pattern = classify_signal_text(text)
+
+                        if pattern != majority_pattern and pattern != 'empty':
+                            issues.append(ValidationIssue(
+                                row_id=row['row_id'],
+                                severity='warning',
+                                category='ocr_text_outlier',
+                                field='anchor_text',
+                                message=f"Signal-Text weicht ab: '{text}' (Format: {pattern}, Mehrheit: {majority_pattern})",
+                                current_value=text,
+                                suggested_value=None,
+                                auto_correctable=False,
+                                confidence=0.7,
+                                context={
+                                    'position': (float(row['xc']), float(row['yc'])) if pd.notna(row.get('xc')) and pd.notna(row.get('yc')) else None,
+                                    'pattern': pattern,
+                                    'expected_pattern': majority_pattern,
+                                    'class': 'signal',
+                                    'suggestion': f"Signal-Text '{text}' hat Format '{pattern}', aber {majority_count}/{len(signals)} Signale haben Format '{majority_pattern}'. Möglicherweise OCR-Fehler.",
+                                    'can_jump': True,
+                                    'suggested_action': 'review',
+                                    'alternative_actions': ['manual_edit', 'bbox_resize'],
+                                    'action_description': f'Text weicht vom Mehrheitsmuster ab. Prüfen Sie ob OCR korrekt ist.',
+                                }
+                            ))
+
+        # =====================================================================
+        # CHECK 2: GKS text pattern outliers (should be numbers only)
+        # =====================================================================
+        for gks_class in ['gks_gesteuert', 'gks_festkodiert']:
+            gks_df = self.df[self.df['cls'] == gks_class].copy()
+            gks_df = gks_df[gks_df['anchor_text'].notna() & (gks_df['anchor_text'] != '')]
+
+            if len(gks_df) >= 3:
+                def classify_gks_text(text):
+                    """Classify GKS text pattern"""
+                    text = str(text).strip()
+                    if not text:
+                        return 'empty'
+                    # Remove spaces and dashes for analysis
+                    cleaned = text.replace(' ', '').replace('-', '')
+                    if cleaned.isdigit():
+                        return 'numbers_only'
+                    elif any(c.isalpha() for c in cleaned):
+                        return 'contains_letters'
+                    else:
+                        return 'other'
+
+                # Find majority pattern
+                gks_patterns = gks_df['anchor_text'].apply(classify_gks_text)
+                pattern_counts = Counter(gks_patterns)
+
+                if pattern_counts:
+                    majority_pattern, majority_count = pattern_counts.most_common(1)[0]
+
+                    # GKS should always be numbers - flag any with letters
+                    for _, row in gks_df.iterrows():
+                        text = str(row['anchor_text']).strip()
+                        pattern = classify_gks_text(text)
+
+                        # Flag if contains letters (always wrong for GKS)
+                        if pattern == 'contains_letters':
+                            issues.append(ValidationIssue(
+                                row_id=row['row_id'],
+                                severity='warning',
+                                category='ocr_text_outlier',
+                                field='anchor_text',
+                                message=f"{gks_class}-Text enthält Buchstaben: '{text}' (sollte nur Zahlen sein)",
+                                current_value=text,
+                                suggested_value=None,
+                                auto_correctable=False,
+                                confidence=0.8,
+                                context={
+                                    'position': (float(row['xc']), float(row['yc'])) if pd.notna(row.get('xc')) and pd.notna(row.get('yc')) else None,
+                                    'pattern': pattern,
+                                    'expected_pattern': 'numbers_only',
+                                    'class': gks_class,
+                                    'suggestion': f"GKS-Text '{text}' enthält Buchstaben, sollte aber nur Zahlen enthalten. Wahrscheinlich OCR-Fehler (z.B. O statt 0, I statt 1).",
+                                    'can_jump': True,
+                                    'suggested_action': 'manual_edit',
+                                    'alternative_actions': ['bbox_resize', 'manual_ocr_horizontal'],
+                                    'action_description': f'GKS-Text sollte nur Zahlen enthalten. Korrigieren Sie den Text (z.B. O→0, I→1, S→5).',
+                                }
+                            ))
+                        # Also flag if pattern differs from majority (and majority is numbers)
+                        elif pattern != majority_pattern and majority_pattern == 'numbers_only':
+                            issues.append(ValidationIssue(
+                                row_id=row['row_id'],
+                                severity='warning',
+                                category='ocr_text_outlier',
+                                field='anchor_text',
+                                message=f"{gks_class}-Text weicht ab: '{text}' (Format: {pattern})",
+                                current_value=text,
+                                suggested_value=None,
+                                auto_correctable=False,
+                                confidence=0.6,
+                                context={
+                                    'position': (float(row['xc']), float(row['yc'])) if pd.notna(row.get('xc')) and pd.notna(row.get('yc')) else None,
+                                    'pattern': pattern,
+                                    'expected_pattern': majority_pattern,
+                                    'class': gks_class,
+                                    'suggestion': f"GKS-Text '{text}' hat Format '{pattern}', aber {majority_count}/{len(gks_df)} haben Format '{majority_pattern}'.",
+                                    'can_jump': True,
+                                    'suggested_action': 'review',
+                                    'alternative_actions': ['manual_edit'],
+                                    'action_description': f'Text weicht vom Mehrheitsmuster ab.',
+                                }
+                            ))
+
+        # =====================================================================
+        # CHECK 3: Text length outliers (unusually long or short)
+        # =====================================================================
+        for cls in ['signal', 'gks_gesteuert', 'gks_festkodiert']:
+            cls_df = self.df[self.df['cls'] == cls].copy()
+            cls_df = cls_df[cls_df['anchor_text'].notna() & (cls_df['anchor_text'] != '')]
+
+            if len(cls_df) >= 5:
+                # Calculate text lengths
+                lengths = cls_df['anchor_text'].apply(lambda x: len(str(x).strip()))
+                median_len = lengths.median()
+
+                # Flag texts that are significantly longer or shorter than median
+                for _, row in cls_df.iterrows():
+                    text = str(row['anchor_text']).strip()
+                    text_len = len(text)
+
+                    # Flag if >3x median length or <0.3x median length (and median is reasonable)
+                    if median_len >= 2:
+                        if text_len > median_len * 3 and text_len > 10:
+                            issues.append(ValidationIssue(
+                                row_id=row['row_id'],
+                                severity='warning',
+                                category='ocr_text_length_outlier',
+                                field='anchor_text',
+                                message=f"{cls}-Text ungewöhnlich lang: '{text[:20]}...' ({text_len} Zeichen, Median: {median_len:.0f})",
+                                current_value=text,
+                                suggested_value=None,
+                                auto_correctable=False,
+                                confidence=0.6,
+                                context={
+                                    'position': (float(row['xc']), float(row['yc'])) if pd.notna(row.get('xc')) and pd.notna(row.get('yc')) else None,
+                                    'text_length': text_len,
+                                    'median_length': float(median_len),
+                                    'class': cls,
+                                    'suggestion': f"Text ist {text_len} Zeichen lang, aber Median ist {median_len:.0f}. Möglicherweise wurde mehr Text erkannt als nötig.",
+                                    'can_jump': True,
+                                    'suggested_action': 'bbox_resize',
+                                    'alternative_actions': ['manual_edit'],
+                                    'action_description': f'Ungewöhnlich langer Text. Verkleinern Sie die Bbox oder korrigieren Sie manuell.',
+                                }
+                            ))
+
+        print(f"OCR text outlier check: Found {len(issues)} text pattern issues")
         return issues
 
     def _check_size_outliers(self, std_threshold: float = 2.5) -> List[ValidationIssue]:
@@ -976,7 +1288,7 @@ class UltimateValidator:
         for cls in self.df['cls'].unique():
             cls_df = self.df[self.df['cls'] == cls].copy()
             
-            # ✅ Filter out rows with missing data
+            #  Filter out rows with missing data
             cls_df = cls_df[cls_df['w'].notna() & cls_df['h'].notna() & 
                            cls_df['xc'].notna() & cls_df['yc'].notna()]
             
@@ -1042,10 +1354,10 @@ class UltimateValidator:
         if coords.empty:
             return issues
         
-        # ✅ Use existing columns (already created in __init__)
+        #  Use existing columns (already created in __init__)
         coord_positions = coords[['xc', 'yc']].values
         
-        # ✅ Use YOUR class list (excluding weichen_block)
+        #  Use YOUR class list (excluding weichen_block)
         for cls in self.CLASSES_NEEDING_COORDS:
             # Skip weichen_block from missing coordinate check
             if cls == 'weichen_block':
@@ -1054,7 +1366,7 @@ class UltimateValidator:
             cls_df = self.df[self.df['cls'] == cls]
             
             for _, row in cls_df.iterrows():
-                # ✅ Skip if position is missing
+                #  Skip if position is missing
                 if pd.isna(row.get('xc')) or pd.isna(row.get('yc')):
                     continue
                 
@@ -1063,7 +1375,7 @@ class UltimateValidator:
                 distances = np.linalg.norm(coord_positions - obj_pos, axis=1)
                 min_dist = distances.min() if len(distances) > 0 else float('inf')
 
-                # ✅ Default threshold for all classes (weichen_block is filtered out)
+                #  Default threshold for all classes (weichen_block is filtered out)
                 threshold = 500
                 
                 if min_dist > threshold:
@@ -1083,7 +1395,7 @@ class UltimateValidator:
                             'threshold': threshold,
                             'suggestion': f'YOLO hat möglicherweise eine Koordinate übersehen. Überprüfen Sie den Bereich um ({row["xc"]:.0f}, {row["yc"]:.0f}).',
                             'can_jump': True,
-                            # ✅ Add manual correction actions
+                            #  Add manual correction actions
                             'suggested_action': 'manual_link',
                             'alternative_actions': ['manual_ocr_horizontal', 'review'],
                             'action_description': 'Koordinate manuell verknüpfen. Verwenden Sie den Button "Koordinate manuell verknüpfen".',
@@ -1105,9 +1417,9 @@ class UltimateValidator:
             for _, row in cls_df.iterrows():
                 anchor_text = row.get('anchor_text', '')
                 
-                # ✅ Check if text is missing or empty
+                #  Check if text is missing or empty
                 if pd.isna(anchor_text) or not str(anchor_text).strip():
-                    # ✅ Skip if position is missing
+                    #  Skip if position is missing
                     if pd.isna(row.get('xc')) or pd.isna(row.get('yc')):
                         continue
                     
@@ -1125,7 +1437,7 @@ class UltimateValidator:
                             'position': (float(row['xc']), float(row['yc'])),
                             'suggestion': f'OCR konnte keinen Text erkennen. Vergrößern Sie die Erkennungsfläche durch Bbox-Anpassung.',
                             'can_jump': True,
-                            # ✅ Bbox resize as primary action (faster and more intuitive)
+                            #  Bbox resize as primary action (faster and more intuitive)
                             'suggested_action': 'bbox_resize',
                             'alternative_actions': ['manual_ocr_horizontal', 'delete'],
                             'action_description': f'{cls}-Text wurde nicht erkannt. Passen Sie die Erkennungsfläche an (Bbox-Kanten ziehen).',
@@ -1144,7 +1456,7 @@ class UltimateValidator:
         for cls in self.df['cls'].unique():
             cls_df = self.df[self.df['cls'] == cls].copy()
             
-            # ✅ Filter out rows with missing positions
+            #  Filter out rows with missing positions
             cls_df = cls_df[cls_df['xc'].notna() & cls_df['yc'].notna()]
             
             if len(cls_df) < 3:  # Need at least 3 to detect isolation
@@ -1183,17 +1495,17 @@ class UltimateValidator:
         """Check for unusual object count ratios"""
         issues = []
 
-        # ✅ Count LINKED coordinates (elements with coord_text filled) not standalone coordinates
+        #  Count LINKED coordinates (elements with coord_text filled) not standalone coordinates
         # Since we filter out cls='coordinate', we count elements that HAVE coordinates
         coord_count = len(self.df[self.df['coord_text'].notna() & (self.df['coord_text'] != '')])
 
         signal_count = len(self.df[self.df['cls'] == 'signal'])
         gks_count = len(self.df[self.df['cls'].isin(['gks_gesteuert', 'gks_festkodiert'])])
-        # ✅ weichen_block filtered out, so always 0 - removed from calculation
+        #  weichen_block filtered out, so always 0 - removed from calculation
 
         total_objects = signal_count + gks_count
 
-        # ✅ Too few coordinates - check if most objects are missing coordinates
+        #  Too few coordinates - check if most objects are missing coordinates
         if total_objects > 5 and coord_count < total_objects * 0.3:
             issues.append(ValidationIssue(
                 row_id=-1,
@@ -1211,14 +1523,14 @@ class UltimateValidator:
                     'gks_count': gks_count,
                     'coord_count': coord_count,
                     'can_jump': False,  # Global check, no specific row
-                    # ✅ Global review action
+                    #  Global review action
                     'suggested_action': 'review',
                     'alternative_actions': [],
                     'action_description': 'Globale Prüfung: Zu viele Objekte ohne Koordinaten. Überprüfen Sie das gesamte Dokument.',
                 }
             ))
         
-        # ✅ Unusually few signals
+        #  Unusually few signals
         if gks_count > 10 and signal_count < gks_count * 0.3:
             issues.append(ValidationIssue(
                 row_id=-1,
@@ -1235,7 +1547,7 @@ class UltimateValidator:
                     'signal_count': signal_count,
                     'gks_count': gks_count,
                     'can_jump': False,  # Global check
-                    # ✅ Global review action
+                    #  Global review action
                     'suggested_action': 'review',
                     'alternative_actions': [],
                     'action_description': 'Globale Prüfung: Ungewöhnlich wenig Signale für die Anzahl GKS. Überprüfen Sie das Dokument.',
@@ -1246,7 +1558,7 @@ class UltimateValidator:
 
     def _check_cross_references(self) -> List[ValidationIssue]:
         """
-        ✅ NEW: Cross-reference validation for data consistency.
+         NEW: Cross-reference validation for data consistency.
 
         Checks:
         - Coordinate sequence gaps (e.g., 10.5, 10.7, 11.0 → 10.6 missing?)
@@ -1317,7 +1629,7 @@ class UltimateValidator:
 
     def compute_quality_metrics(self) -> Dict:
         """
-        ✅ NEW: Compute comprehensive quality metrics for YOLO and OCR.
+         NEW: Compute comprehensive quality metrics for YOLO and OCR.
 
         Returns dict with metrics suitable for database storage.
         """
@@ -1478,18 +1790,18 @@ class UltimateValidator:
         score = 0
         reasons = []
 
-        # ✅ FIX: Template symbols use 'cls' field, not 'name'
+        #  FIX: Template symbols use 'cls' field, not 'name'
         symbol_name = row.get('cls', '')
 
         # Check 1: Missing required coordinate (50 points)
-        # ✅ FIX: Template symbols use 'coord_value', not 'linked_coordinate'
+        #  FIX: Template symbols use 'coord_value', not 'linked_coordinate'
         if self._symbol_needs_coordinate(symbol_name) and not row.get('coord_value'):
             score += 50
             reasons.append("Keine Koordinate verknüpft (+50)")
 
         # Check 2: Missing required text (40 points)
         if self._symbol_needs_text(symbol_name):
-            # ✅ FIX: Template symbols use 'anchor_text', not 'text'
+            #  FIX: Template symbols use 'anchor_text', not 'text'
             text = row.get('anchor_text', '')
             if not text or len(str(text)) < 2:
                 score += 40
@@ -1498,7 +1810,7 @@ class UltimateValidator:
         # Check 3: Text pattern mismatch (35 points)
         text_pattern = self._get_template_text_pattern(symbol_name)
         if text_pattern:
-            # ✅ FIX: Template symbols use 'anchor_text', not 'text'
+            #  FIX: Template symbols use 'anchor_text', not 'text'
             text = row.get('anchor_text', '')
             if text and not self._matches_text_pattern(str(text), text_pattern):
                 score += 35
@@ -1548,7 +1860,7 @@ class UltimateValidator:
             if not row.get('is_new_symbol', False):
                 continue
 
-            # ⚠️ FILTER: Skip if this is actually a YOLO class (incorrectly marked as template)
+            #  FILTER: Skip if this is actually a YOLO class (incorrectly marked as template)
             symbol_name = row.get('cls', '')
             if symbol_name in self.CONFIDENCE_THRESHOLDS:
                 continue
@@ -1562,7 +1874,7 @@ class UltimateValidator:
                     severity='error',
                     category='template_false_positive_high',
                     field='detection',
-                    # ✅ FIX: Template symbols use 'cls' field, not 'name'
+                    #  FIX: Template symbols use 'cls' field, not 'name'
                     message=f"Template '{row.get('cls', '')}': Wahrscheinlich Fehlerkennung (Score: {score})",
                     current_value=f"Score: {score}/100",
                     suggested_value=None,
@@ -1587,7 +1899,7 @@ class UltimateValidator:
                     severity='warning',
                     category='template_false_positive_medium',
                     field='detection',
-                    # ✅ FIX: Template symbols use 'cls' field, not 'name'
+                    #  FIX: Template symbols use 'cls' field, not 'name'
                     message=f"Template '{row.get('cls', '')}': Möglicherweise Fehlerkennung (Score: {score})",
                     current_value=f"Score: {score}/100",
                     suggested_value=None,
@@ -1620,10 +1932,10 @@ class UltimateValidator:
             if not row.get('is_new_symbol', False):
                 continue
 
-            # ✅ FIX: Template symbols use 'cls' field, not 'name'
+            #  FIX: Template symbols use 'cls' field, not 'name'
             symbol_name = row.get('cls', '')
 
-            # ⚠️ FILTER: Skip if this is actually a YOLO class (incorrectly marked as template)
+            #  FILTER: Skip if this is actually a YOLO class (incorrectly marked as template)
             if symbol_name in self.CONFIDENCE_THRESHOLDS:
                 continue
 
@@ -1634,11 +1946,11 @@ class UltimateValidator:
 
             if self._symbol_needs_coordinate(symbol_name):
                 needs_coord_count += 1
-                # ✅ FIX: Template symbols use 'coord_value', not 'linked_coordinate'
+                #  FIX: Template symbols use 'coord_value', not 'linked_coordinate'
                 linked_coord = row.get('coord_value')
-                print(f"   🔍 Template '{symbol_name}' coordinate check: coord_value='{linked_coord}', needs_coord=True")
+                print(f"Template '{symbol_name}' coordinate check: coord_value='{linked_coord}', needs_coord=True")
                 if not linked_coord:
-                    print(f"      ❌ Missing coordinate for '{symbol_name}' (row_id={row.get('row_id')})")
+                    print(f"Missing coordinate for '{symbol_name}' (row_id={row.get('row_id')})")
                     issues.append(ValidationIssue(
                         row_id=row['row_id'],
                         severity='error',
@@ -1659,7 +1971,7 @@ class UltimateValidator:
                         }
                     ))
 
-        print(f"   📊 Checked {checked_count} template symbols (sample names: {symbol_names_seen}), {needs_coord_count} need coordinates, found {len(issues)} missing coordinate issues")
+        print(f"Checked {checked_count} template symbols (sample names: {symbol_names_seen}), {needs_coord_count} need coordinates, found {len(issues)} missing coordinate issues")
         return issues
 
     def _check_template_missing_text(self) -> List[ValidationIssue]:
@@ -1675,10 +1987,10 @@ class UltimateValidator:
             if not row.get('is_new_symbol', False):
                 continue
 
-            # ✅ FIX: Template symbols use 'cls' field, not 'name'
+            #  FIX: Template symbols use 'cls' field, not 'name'
             symbol_name = row.get('cls', '')
 
-            # ⚠️ FILTER: Skip if this is actually a YOLO class (incorrectly marked as template)
+            #  FILTER: Skip if this is actually a YOLO class (incorrectly marked as template)
             if symbol_name in self.CONFIDENCE_THRESHOLDS:
                 continue
 
@@ -1689,11 +2001,11 @@ class UltimateValidator:
 
             if self._symbol_needs_text(symbol_name):
                 needs_text_count += 1
-                # ✅ FIX: Template symbols use 'anchor_text', not 'text'
+                #  FIX: Template symbols use 'anchor_text', not 'text'
                 text = row.get('anchor_text', '')
-                print(f"   🔍 Template '{symbol_name}' text check: anchor_text='{text}', needs_text=True")
+                print(f"Template '{symbol_name}' text check: anchor_text='{text}', needs_text=True")
                 if not text or len(str(text)) < 2:
-                    print(f"      ❌ Missing text for '{symbol_name}' (row_id={row.get('row_id')})")
+                    print(f"Missing text for '{symbol_name}' (row_id={row.get('row_id')})")
                     issues.append(ValidationIssue(
                         row_id=row['row_id'],
                         severity='error',
@@ -1718,7 +2030,7 @@ class UltimateValidator:
                         }
                     ))
 
-        print(f"   📊 Checked {checked_count} template symbols (sample names: {symbol_names_seen}), {needs_text_count} need text, found {len(issues)} missing text issues")
+        print(f"Checked {checked_count} template symbols (sample names: {symbol_names_seen}), {needs_text_count} need text, found {len(issues)} missing text issues")
         return issues
 
     def _check_template_low_confidence(self) -> List[ValidationIssue]:
@@ -1729,10 +2041,10 @@ class UltimateValidator:
             if not row.get('is_new_symbol', False):
                 continue
 
-            # ✅ FIX: Template symbols use 'cls' field, not 'name'
+            #  FIX: Template symbols use 'cls' field, not 'name'
             symbol_name = row.get('cls', '')
 
-            # ⚠️ FILTER: Skip if this is actually a YOLO class (incorrectly marked as template)
+            #  FILTER: Skip if this is actually a YOLO class (incorrectly marked as template)
             if symbol_name in self.CONFIDENCE_THRESHOLDS:
                 continue
 
@@ -1759,7 +2071,7 @@ class UltimateValidator:
                         'alternative_actions': ['delete', 'bbox_resize'],
                         'action_description': (
                             'Niedrige Konfidenz deutet oft auf Fehlerkennung hin.\n\n'
-                            '✓ Empfohlen: Visuell prüfen, dann entscheiden:\n'
+                            ' Empfohlen: Visuell prüfen, dann entscheiden:\n'
                             '  • Falls falsch erkannt → Löschen\n'
                             '  • Falls korrekt aber schwache Qualität → Behalten\n'
                             '  • Falls teilweise sichtbar → Bbox anpassen'
@@ -1781,9 +2093,9 @@ class UltimateValidator:
         if template_df.empty:
             return issues
 
-        # ✅ FIX: Template symbols use 'cls' field, not 'name'
+        #  FIX: Template symbols use 'cls' field, not 'name'
         if 'cls' not in template_df.columns:
-            print("⚠️ Template symbols found but 'cls' column missing")
+            print("Template symbols found but 'cls' column missing")
             return issues
 
         # Filter out YOLO classes that are incorrectly marked as templates
@@ -1843,10 +2155,10 @@ class UltimateValidator:
             if not row.get('is_new_symbol', False):
                 continue
 
-            # ✅ FIX: Template symbols use 'cls' field, not 'name'
+            #  FIX: Template symbols use 'cls' field, not 'name'
             symbol_name = row.get('cls', '')
 
-            # ⚠️ FILTER: Skip if this is actually a YOLO class (incorrectly marked as template)
+            #  FILTER: Skip if this is actually a YOLO class (incorrectly marked as template)
             if symbol_name in self.CONFIDENCE_THRESHOLDS:
                 continue
 
@@ -1885,17 +2197,17 @@ class UltimateValidator:
             if not row.get('is_new_symbol', False):
                 continue
 
-            # ✅ FIX: Template symbols use 'cls' field, not 'name'
+            #  FIX: Template symbols use 'cls' field, not 'name'
             symbol_name = row.get('cls', '')
 
-            # ⚠️ FILTER: Skip if this is actually a YOLO class (incorrectly marked as template)
+            #  FILTER: Skip if this is actually a YOLO class (incorrectly marked as template)
             if symbol_name in self.CONFIDENCE_THRESHOLDS:
                 continue
 
             text_pattern = self._get_template_text_pattern(symbol_name)
 
             if text_pattern:
-                # ✅ FIX: Template symbols use 'anchor_text', not 'text'
+                #  FIX: Template symbols use 'anchor_text', not 'text'
                 text = row.get('anchor_text', '')
 
                 if text and not self._matches_text_pattern(str(text), text_pattern):
@@ -1927,13 +2239,210 @@ class UltimateValidator:
                     ))
         return issues
 
+    def _check_link_distance_outliers(self) -> List[ValidationIssue]:
+        """
+        Detect symbols with unusually large link distances compared to class median.
+        Flags potential missed coordinate detections.
+        """
+        from collections import defaultdict
+        import numpy as np
+        import math
+
+        print(f"\n{'='*60}")
+        print(f"[LinkDistanceOutliers] === STARTING CHECK ===")
+        print(f"[LinkDistanceOutliers] DataFrame rows: {len(self.df)}")
+        print(f"[LinkDistanceOutliers] Columns available: {list(self.df.columns)}")
+
+        issues = []
+
+        # Check required columns
+        required = ['cls', 'ax1', 'ay1', 'ax2', 'ay2', 'cx1', 'cy1', 'cx2', 'cy2', 'row_id']
+        missing = [c for c in required if c not in self.df.columns]
+        if missing:
+            print(f"[LinkDistanceOutliers] MISSING COLUMNS: {missing}")
+            return issues
+
+        # Collect link distances by class
+        class_distances = defaultdict(list)
+        class_rows = defaultdict(list)
+
+        # Classes that should have close coordinate links
+        link_classes = {'gks_gesteuert', 'gks_festkodiert', 'signal'}
+
+        # Count classes
+        cls_counts = self.df['cls'].value_counts()
+        for cls in link_classes:
+            print(f"[LinkDistanceOutliers] Class '{cls}': {cls_counts.get(cls, 0)} total rows")
+
+        for idx, row in self.df.iterrows():
+            cls = row.get('cls', '')
+            if cls not in link_classes:
+                continue
+
+            # Calculate link distance from position data
+            # ax1/ay1/ax2/ay2 = anchor (symbol) bbox
+            # cx1/cy1/cx2/cy2 = coordinate bbox
+            ax1 = row.get('ax1')
+            ay1 = row.get('ay1')
+            ax2 = row.get('ax2')
+            ay2 = row.get('ay2')
+            cx1 = row.get('cx1')
+            cy1 = row.get('cy1')
+            cx2 = row.get('cx2')
+            cy2 = row.get('cy2')
+
+            # Skip if no coordinate linked (check for None and NaN)
+            if ax1 is None or cx1 is None:
+                continue
+            if pd.isna(ax1) or pd.isna(cx1):
+                continue
+
+            # Calculate center-to-center distance
+            anchor_cx = (ax1 + ax2) / 2
+            anchor_cy = (ay1 + ay2) / 2
+            coord_cx = (cx1 + cx2) / 2
+            coord_cy = (cy1 + cy2) / 2
+            link_dist = math.sqrt((anchor_cx - coord_cx)**2 + (anchor_cy - coord_cy)**2)
+
+            if link_dist > 0:
+                class_distances[cls].append(link_dist)
+                class_rows[cls].append((row['row_id'], row, link_dist))
+
+        # Debug output
+        print(f"[LinkDistanceOutliers] Found distances by class:")
+        for cls, distances in class_distances.items():
+            print(f"  {cls}: {len(distances)} samples, median={np.median(distances):.1f}px" if distances else f"  {cls}: 0 samples")
+
+        # Check each class for outliers
+        for cls, distances in class_distances.items():
+            if len(distances) < 3:  # Need enough samples
+                print(f"  {cls}: Skipping - need at least 3 samples")
+                continue
+
+            median_dist = float(np.median(distances))
+            # Threshold: 1.5x median or 100px minimum, whichever is larger
+            threshold = max(median_dist * 1.5, 100)
+            print(f"  {cls}: median={median_dist:.1f}px, threshold={threshold:.1f}px")
+
+            for row_id, row, dist in class_rows[cls]:
+                if dist > threshold:
+                    ratio = dist / median_dist if median_dist > 0 else 0
+
+                    anchor_text = row.get('anchor_text', row.get('id', ''))
+                    coord_text = row.get('coord_text', 'unknown')
+
+                    print(f"  → OUTLIER: {cls} '{anchor_text}' dist={dist:.0f}px (>{threshold:.0f}px)")
+
+                    issues.append(ValidationIssue(
+                        row_id=row_id,
+                        severity='warning',
+                        category='link_distance_outlier',
+                        field='coord_text',
+                        message=(
+                            f"{cls} '{anchor_text}': Koordinaten-Link ungewöhnlich weit "
+                            f"({dist:.0f}px vs. Median {median_dist:.0f}px, {ratio:.1f}x). "
+                            f"Möglicherweise fehlt eine nähere Koordinate."
+                        ),
+                        current_value=f"{coord_text} @ {dist:.0f}px",
+                        suggested_value=None,
+                        auto_correctable=False,
+                        confidence=0.0,
+                        context={
+                            'position': (float(row.get('ax1', 0)), float(row.get('ay1', 0))),
+                            'can_jump': True,
+                            'class': cls,
+                            'link_distance': dist,
+                            'median_distance': median_dist,
+                            'threshold': threshold,
+                            'ratio': ratio,
+                            'suggested_action': 'manual_link',
+                            'alternative_actions': ['manual_ocr_horizontal', 'manual_edit', 'review'],
+                            'action_description': (
+                                'Option 1: Mit "Verknüpfen" eine andere Koordinate auswählen.\n'
+                                'Option 2: Mit "OCR Horizontal" eine fehlende Koordinate einlesen.\n'
+                                'Option 3: Koordinate direkt in der Tabelle bearbeiten.'
+                            )
+                        }
+                    ))
+
+        print(f"[LinkDistanceOutliers] Found {len(issues)} outliers")
+        return issues
+
+    def _check_haltepunkt_signal_reference(self) -> List[ValidationIssue]:
+        """
+        Check that signal names referenced in haltepunkt brackets exist as actual signals.
+
+        Haltepunkt anchor_text format: "haltepunkt {counter} ({signal_name})"
+        Example: "haltepunkt 1 (AHR313)" references signal "AHR313"
+
+        This validates that the referenced signal actually exists on the same page.
+        """
+        import re
+        issues = []
+
+        if 'cls' not in self.df.columns:
+            return issues
+
+        haltepunkt_mask = self.df['cls'] == 'haltepunkt'
+        haltepunkt_count = haltepunkt_mask.sum()
+        print(f"[HaltepunktSignalRef] Checking {haltepunkt_count} haltepunkt elements...")
+
+        for idx, row in self.df[haltepunkt_mask].iterrows():
+            anchor = str(row.get('anchor_text', ''))
+
+            # Extract signal name from brackets: "haltepunkt 1 (AHR313)" → "AHR313"
+            match = re.search(r'\(([^)]+)\)\s*$', anchor)
+            if not match:
+                continue
+
+            signal_name = match.group(1).strip()
+            page = row.get('page', 0)
+
+            # Check if signal exists on same page
+            signal_mask = (
+                (self.df['cls'] == 'signal') &
+                (self.df['page'] == page) &
+                (self.df['anchor_text'].fillna('').str.strip() == signal_name)
+            )
+
+            if not signal_mask.any():
+                # Signal not found - create validation issue
+                xc = row.get('xc', 0)
+                yc = row.get('yc', 0)
+                if pd.isna(xc):
+                    xc = (row.get('ax1', 0) + row.get('ax2', 0)) / 2
+                if pd.isna(yc):
+                    yc = (row.get('ay1', 0) + row.get('ay2', 0)) / 2
+
+                issues.append(ValidationIssue(
+                    row_id=row.get('row_id', -1),
+                    category='Referenzfehler',
+                    severity='warning',
+                    field='anchor_text',
+                    message=f'Haltepunkt referenziert Signal "{signal_name}", aber kein Signal mit diesem Namen auf Seite {page+1} gefunden',
+                    current_value=anchor,
+                    suggested_value=None,
+                    auto_correctable=False,
+                    confidence=0.0,
+                    context={
+                        'position': (float(xc), float(yc)),
+                        'can_jump': True,
+                        'class': 'haltepunkt',
+                        'referenced_signal': signal_name,
+                        'page': page,
+                    }
+                ))
+
+        print(f"[HaltepunktSignalRef] Found {len(issues)} issues")
+        return issues
+
 # ============================================================================
 # DATABASE INTEGRATION HELPERS
 # ============================================================================
 
 def save_validation_to_db(layout_name: str, validation_result):
     """
-    ✅ NEW: Save validation results to PostgreSQL database.
+     NEW: Save validation results to PostgreSQL database.
 
     Saves to validation_log table.
     """
@@ -1959,15 +2468,15 @@ def save_validation_to_db(layout_name: str, validation_result):
             })
 
         save_validation_results(layout_name, validation_data)
-        print(f"✅ Saved {len(validation_data)} validation issues to database")
+        print(f"Saved {len(validation_data)} validation issues to database")
 
     except Exception as e:
-        print(f"⚠️ Failed to save validation results to database: {e}")
+        print(f"Failed to save validation results to database: {e}")
 
 
 def save_quality_metrics_to_db(layout_name: str, metrics: Dict):
     """
-    ✅ NEW: Save quality metrics to PostgreSQL database.
+     NEW: Save quality metrics to PostgreSQL database.
 
     Saves to quality_metrics table.
     """
@@ -1975,10 +2484,10 @@ def save_quality_metrics_to_db(layout_name: str, metrics: Dict):
         from database_sqlite import save_quality_metrics
 
         save_quality_metrics(layout_name, metrics)
-        print(f"✅ Saved {len(metrics)} quality metrics to database")
+        print(f"Saved {len(metrics)} quality metrics to database")
 
     except Exception as e:
-        print(f"⚠️ Failed to save quality metrics to database: {e}")
+        print(f"Failed to save quality metrics to database: {e}")
 
 
 # ============================================================================
@@ -2016,9 +2525,9 @@ def validate_everything(df: pd.DataFrame, auto_correct: bool = False, layout_nam
     result = validator.validate_all(auto_correct=auto_correct)
 
     # Compute quality metrics
-    print(f"🔵 Computing quality metrics...")
+    print(f"Computing quality metrics...")
     metrics = validator.compute_quality_metrics()
-    print(f"🔵 Computed {len(metrics)} quality metrics")
+    print(f"Computed {len(metrics)} quality metrics")
 
     # Add metrics to result (for GUI display)
     if not hasattr(result, 'metrics'):
@@ -2026,10 +2535,10 @@ def validate_everything(df: pd.DataFrame, auto_correct: bool = False, layout_nam
 
     # Save to database if requested
     if save_to_db and layout_name:
-        print(f"🔵 Saving validation results to database...")
+        print(f"Saving validation results to database...")
         save_validation_to_db(layout_name, result)
         save_quality_metrics_to_db(layout_name, metrics)
     elif save_to_db and not layout_name:
-        print(f"⚠️ Warning: save_to_db=True but layout_name not provided. Skipping database save.")
+        print(f"Warning: save_to_db=True but layout_name not provided. Skipping database save.")
 
     return result

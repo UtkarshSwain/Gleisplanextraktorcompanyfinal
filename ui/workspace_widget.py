@@ -1,9 +1,10 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
 from typing import List, Dict, Tuple, Optional, Any
-import pandas as pd 
+import pandas as pd
 from ui.themes import LIGHT_QSS, DARK_QSS
-from core.linking import parse_coord
-import os 
+from utils.dpi_utils import scale_value, get_scaled_font
+from core.linking import parse_coord, detect_fahrtrichtung, detect_fahrtrichtung_gks_relaxed, detect_fahrtrichtung_gks_nearest
+import os
 import numpy as np
 from uservalidation.ultimate_validator import validate_everything
 from uservalidation.validation_dialog_helper import ValidationDialogWithJump
@@ -12,7 +13,7 @@ from uservalidation.validation_dialog2 import EnhancedDataValidator
 from ui.quality_inspector import QualityInspectorDialog
 import json
 from core.pipelineworker import NO_OCR_CLASSES
-import math 
+import math
 import re
 from core.ocr_engine import manual_angular_ocr, ocr_coordinate_horizontal, ocr_coordinate_angular, ocr_signal_name
 import cv2
@@ -25,6 +26,23 @@ from utils.helpers import _is_deleted
 from core.image_processing import qpolygonf_from_pts
 from PIL import Image, ImageFile
 from typing import TYPE_CHECKING
+
+# Import shared validation config for consistent risk calculation
+from validation_config import (
+    CLASSES_REQUIRING_COORDINATES,
+    CLASSES_REQUIRING_TEXT,
+    CLASSES_EXCLUDED,
+    RISK_WEIGHTS,
+    RISK_THRESHOLDS,
+    RISK_LABELS,
+    RISK_FACTOR_LABELS,
+    get_confidence_threshold,
+    needs_coordinate as config_needs_coordinate,
+    needs_text as config_needs_text,
+    is_excluded as config_is_excluded,
+    get_risk_level,
+    get_risk_label,
+)
 if TYPE_CHECKING:
     from ui.auditing_window import AuditingWindow
 
@@ -70,6 +88,191 @@ def bbox_to_rotated_poly(x1, y1, x2, y2, angle_deg):
     rotated[:, 1] += cy
 
     return rotated.astype(np.float32)
+
+# ============================================================================
+# RISK SCORE HELPERS - Using shared validation_config.py
+# ============================================================================
+def calculate_row_risk_score(row: pd.Series, custom_symbol_config: dict = None) -> tuple:
+    """
+    Calculate risk score for a single row using shared validation config.
+
+    Uses weights and thresholds from validation_config.py for consistency
+    across all validation systems (Erkennungsqualität, Datenvalidierung, Counter Bar).
+
+    Args:
+        row: DataFrame row
+        custom_symbol_config: Optional dict of custom symbol configurations
+
+    Returns:
+        tuple of (risk_score, risk_factors_list)
+    """
+    risk = 0.0
+    factors = []
+
+    if custom_symbol_config is None:
+        custom_symbol_config = {}
+
+    cls = row.get('cls', '')
+    is_custom = row.get('is_custom_symbol', False) == True or row.get('is_new_symbol', False) == True
+
+    # Determine requirements based on symbol type
+    if is_custom and cls in custom_symbol_config:
+        sym_config = custom_symbol_config[cls]
+        requires_coord = sym_config.get('links_to_coordinate', False)
+        requires_text = sym_config.get('has_text', False)
+    else:
+        # Use shared config
+        requires_coord = config_needs_coordinate(cls)
+        requires_text = config_needs_text(cls)
+
+    # Factor 1: Confidence Risk (uses per-class thresholds from shared config)
+    conf = row.get('conf', 1.0)
+    if pd.notna(conf):
+        threshold = get_confidence_threshold(cls)
+        if float(conf) < threshold:
+            conf_risk = (1.0 - float(conf)) * RISK_WEIGHTS['low_confidence']
+            risk += conf_risk
+            factors.append(RISK_FACTOR_LABELS['low_confidence'])
+
+    # Factor 2: Missing Required Coordinate
+    if requires_coord:
+        if pd.isna(row.get('coord_text')) or not str(row.get('coord_text', '')).strip():
+            risk += RISK_WEIGHTS['missing_coordinate']
+            factors.append(RISK_FACTOR_LABELS['missing_coordinate'])
+
+    # Factor 3: Missing Required Text
+    if requires_text:
+        if pd.isna(row.get('anchor_text')) or not str(row.get('anchor_text', '')).strip():
+            risk += RISK_WEIGHTS['missing_text']
+            factors.append(RISK_FACTOR_LABELS['missing_text'])
+
+    # Factor 4: Invalid Coordinate Start
+    if cls != 'coordinate' and pd.notna(row.get('coord_text')):
+        coord_text_val = str(row.get('coord_text', '')).strip()
+        if coord_text_val and not (coord_text_val[0].isdigit() or coord_text_val[0] == '-'):
+            risk += RISK_WEIGHTS['invalid_coordinate']
+            factors.append(RISK_FACTOR_LABELS['invalid_coordinate'])
+
+    # Factor 5: GKS Contains Letters
+    if cls in ['gks_gesteuert', 'gks_festkodiert']:
+        gks_text = str(row.get('anchor_text', '')).strip()
+        if gks_text:
+            cleaned = gks_text.replace(' ', '').replace('-', '')
+            if cleaned and not cleaned.isdigit():
+                risk += RISK_WEIGHTS['gks_letters']
+                factors.append(RISK_FACTOR_LABELS['gks_letters'])
+
+    # Factor 6: Size Anomaly
+    if 'w' in row.index and 'h' in row.index:
+        w, h = row.get('w'), row.get('h')
+        if pd.notna(w) and pd.notna(h):
+            area = float(w) * float(h)
+            if area < 100 or area > 50000:
+                risk += RISK_WEIGHTS['size_anomaly']
+                factors.append(RISK_FACTOR_LABELS['size_anomaly'])
+
+    # Factor 7: Formatting Errors (multiple spaces)
+    anchor_text = str(row.get('anchor_text', ''))
+    coord_text_val = str(row.get('coord_text', '')) if cls != 'coordinate' else ''
+    if '  ' in coord_text_val or '  ' in anchor_text:
+        risk += RISK_WEIGHTS['formatting_error']
+        factors.append(RISK_FACTOR_LABELS['formatting_error'])
+
+    return (min(risk, 1.0), factors)
+
+
+def get_risk_status(risk_score: float) -> dict:
+    """
+    Get user-friendly risk status using shared validation config thresholds.
+
+    Args:
+        risk_score: Risk score (0.0 to 1.0)
+
+    Returns:
+        dict with 'label', 'color', 'bg_color', 'icon', 'priority', 'category'
+    """
+    risk_level = get_risk_level(risk_score)
+
+    if risk_level == 'high_risk':
+        return {
+            'label': RISK_LABELS['high_risk'],
+            'color': '#ff6b6b',
+            'bg_color': '#5c1a1a',
+            'icon': '',
+            'priority': 2,
+            'category': 'high_risk'
+        }
+    elif risk_level == 'medium_risk':
+        return {
+            'label': RISK_LABELS['medium_risk'],
+            'color': '#ffd93d',
+            'bg_color': '#4a4020',
+            'icon': '',
+            'priority': 1,
+            'category': 'medium_risk'
+        }
+    else:
+        return {
+            'label': RISK_LABELS['low_risk'],
+            'color': '#6bcf6b',
+            'bg_color': '#1a4a1a',
+            'icon': '',
+            'priority': 0,
+            'category': 'low_risk'
+        }
+
+
+def count_risk_categories(df: pd.DataFrame, custom_symbol_config: dict = None) -> dict:
+    """
+    Count items in each risk category using shared validation config.
+
+    Args:
+        df: DataFrame with detection data
+        custom_symbol_config: Optional dict of custom symbol configurations
+
+    Returns:
+        dict with counts for 'high_risk', 'medium_risk', 'low_risk', 'total'
+    """
+    if df is None or df.empty:
+        return {'high_risk': 0, 'medium_risk': 0, 'low_risk': 0, 'total': 0}
+
+    # Filter out hidden rows and excluded classes (using shared config)
+    df_filtered = df.copy()
+    if '_hidden' in df_filtered.columns:
+        df_filtered = df_filtered[~df_filtered['_hidden'].fillna(False)]
+
+    # Use shared config for excluded classes
+    if 'cls' in df_filtered.columns:
+        df_filtered = df_filtered[~df_filtered['cls'].apply(lambda x: config_is_excluded(str(x)))]
+
+    high_risk = 0
+    medium_risk = 0
+    low_risk = 0
+
+    for _, row in df_filtered.iterrows():
+        risk_score, _ = calculate_row_risk_score(row, custom_symbol_config)
+        risk_level = get_risk_level(risk_score)
+        if risk_level == 'high_risk':
+            high_risk += 1
+        elif risk_level == 'medium_risk':
+            medium_risk += 1
+        else:
+            low_risk += 1
+
+    return {
+        'high_risk': high_risk,
+        'medium_risk': medium_risk,
+        'low_risk': low_risk,
+        'total': high_risk + medium_risk + low_risk
+    }
+
+
+# Keep old function for backwards compatibility (used in tree population)
+def get_confidence_status(conf: float) -> dict:
+    """Legacy function - converts confidence to risk and returns status."""
+    # Simple approximation: conf -> risk_score
+    risk_score = (1.0 - conf) * RISK_WEIGHTS['low_confidence']
+    return get_risk_status(risk_score)
 
 # ============================================================================
 # WORKSPACE WIDGET - Single PDF workspace
@@ -129,13 +332,19 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self.track_overlay_items = []
         # Add missing detection overlay storage
         self.missing_detection_overlays = []
-        # ✅ NEW: Confidence visualization flag
+        #  NEW: Confidence visualization flag
         self.show_confidence_colors = False
-        # ✅ NEW: Error rows storage
+        #  NEW: Error rows storage
         self.error_rows = set()
         self.show_missing_detections = False  # Toggle state
 
-        # ✅ NEW: Delayed OCR adjustment dialog timer
+        # Storage for uncertain (low-confidence) detections for user review
+        self.uncertain_detections = []
+
+        # OCR engine for processing confirmed uncertain detections
+        self.ocr_engine = "paddleocr"
+
+        #  NEW: Delayed OCR adjustment dialog timer
         # Waits 1.5s after last resize before showing dialog
         self._ocr_resize_timer = QtCore.QTimer()
         self._ocr_resize_timer.setSingleShot(True)
@@ -227,18 +436,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 elif total_risk >= 0.3:  # Medium risk (30-50%)
                     medium_risk_count += 1
 
-            # Show warning banner if significant issues found
+            # Log warning if significant issues found
             if high_risk_count > 0 or medium_risk_count > 5:
                 total_issues = high_risk_count + medium_risk_count
-                warning_msg = f"Qualitätsprüfung: {high_risk_count} hochriskante, {medium_risk_count} mittelriskante Erkennungen gefunden ({total_issues} gesamt)"
-                self.warning_text.setText(warning_msg)
-                self.warning_banner.setVisible(True)
-                print(f"⚠️ {warning_msg}")
-            else:
-                self.warning_banner.setVisible(False)
+                print(f"Qualitätsprüfung: {high_risk_count} hochriskante, {medium_risk_count} mittelriskante Erkennungen gefunden ({total_issues} gesamt)")
 
         except Exception as e:
-            print(f"⚠️ Error in auto quality check: {e}")
+            print(f"Error in auto quality check: {e}")
 
     def _build_ui(self):
         from ui.tree_widget import AuditingTreeWidget
@@ -253,7 +457,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
         # ADD UNDO/REDO BUTTONS with enhanced styling
         self.btn_undo = QtWidgets.QPushButton("↶ Rückgängig")
-        self.btn_undo.setMinimumHeight(35)
+        self.btn_undo.setMinimumHeight(scale_value(35))
         self.btn_undo.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         self.btn_undo.setStyleSheet("""
             QPushButton {
@@ -281,12 +485,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 border: 1px solid #95a5a6;
             }
         """)
-        self.btn_undo.setToolTip("↶ Rückgängig\n\nMacht die letzte Änderung rückgängig\n\n💡 Tipp: Sie können bis zu 50 Schritte\n    rückgängig machen\n\nTastenkürzel: Strg+Z")
+        self.btn_undo.setToolTip("↶ Rückgängig\n\nMacht die letzte Änderung rückgängig\n\n Tipp: Sie können bis zu 50 Schritte\n    rückgängig machen\n\nTastenkürzel: Strg+Z")
         self.btn_undo.clicked.connect(self.undo)
         top_layout.addWidget(self.btn_undo)
 
         self.btn_redo = QtWidgets.QPushButton("↷ Wiederholen")
-        self.btn_redo.setMinimumHeight(35)
+        self.btn_redo.setMinimumHeight(scale_value(35))
         self.btn_redo.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         self.btn_redo.setStyleSheet("""
             QPushButton {
@@ -322,7 +526,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
         # Layout name label with icon
         short_name = os.path.basename(self.layout_name)
-        self.layout_label = QtWidgets.QLabel(f"📄 {short_name}")
+        self.layout_label = QtWidgets.QLabel(f" {short_name}")
         self.layout_label.setStyleSheet("""
             font-weight: bold;
             color: #2980b9;
@@ -337,142 +541,233 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
         layout.addLayout(top_layout)
 
-        # Quality warning banner with modern styling (hidden by default)
-        self.warning_banner = QtWidgets.QFrame()
-        self.warning_banner.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.warning_banner.setStyleSheet("""
+        # ====================================================================
+        # RISK COUNTER BAR - Matching Erkennungsqualität criteria
+        # ====================================================================
+        self.problem_counter_bar = QtWidgets.QFrame()
+        self.problem_counter_bar.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.problem_counter_bar.setStyleSheet("""
             QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                           stop:0 #fff3cd, stop:1 #ffe5a3);
-                border: 2px solid #ffc107;
-                border-left: 5px solid #ffc107;
+                background-color: #2b2b2b;
+                border: 1px solid #3d3d3d;
                 border-radius: 6px;
-                padding: 12px;
             }
         """)
-        self.warning_banner.setVisible(False)
 
-        warning_layout = QtWidgets.QHBoxLayout(self.warning_banner)
-        warning_layout.setContentsMargins(10, 8, 10, 8)
-        warning_layout.setSpacing(12)
+        counter_layout = QtWidgets.QHBoxLayout(self.problem_counter_bar)
+        counter_layout.setContentsMargins(10, 6, 10, 6)
+        counter_layout.setSpacing(12)
 
-        self.warning_icon = QtWidgets.QLabel("⚠️")
-        self.warning_icon.setStyleSheet("font-size: 24px; padding-right: 5px;")
-        warning_layout.addWidget(self.warning_icon)
-
-        self.warning_text = QtWidgets.QLabel("")
-        self.warning_text.setWordWrap(True)
-        self.warning_text.setStyleSheet("""
-            color: #856404;
-            font-weight: 600;
-            font-size: 10pt;
-        """)
-        warning_layout.addWidget(self.warning_text, 1)
-
-        self.warning_btn_details = QtWidgets.QPushButton("📊 Details anzeigen")
-        self.warning_btn_details.setMinimumHeight(32)
-        self.warning_btn_details.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
-        self.warning_btn_details.setStyleSheet("""
+        # High risk (red) - "Sofort prüfen" - dark theme
+        self.high_risk_btn = QtWidgets.QPushButton("0 Sofort prüfen")
+        self.high_risk_btn.setStyleSheet("""
             QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                          stop:0 #ffc107, stop:1 #e0a800);
-                color: #000;
-                border: 1px solid #d39e00;
-                border-radius: 5px;
-                padding: 6px 15px;
+                background-color: #5c1a1a;
+                color: #ff6b6b;
+                border: 2px solid #ff6b6b;
+                border-radius: 4px;
+                padding: 6px 14px;
                 font-size: 10pt;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                          stop:0 #ffca28, stop:1 #ffc107);
-                border: 1px solid #c68400;
-            }
-            QPushButton:pressed {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                          stop:0 #d39e00, stop:1 #b38600);
-            }
-        """)
-        self.warning_btn_details.clicked.connect(lambda: self.btn_quality_inspector.setChecked(True))
-        warning_layout.addWidget(self.warning_btn_details)
-
-        self.warning_btn_dismiss = QtWidgets.QPushButton("×")
-        self.warning_btn_dismiss.setFixedSize(28, 28)
-        self.warning_btn_dismiss.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
-        self.warning_btn_dismiss.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #856404;
-                border: none;
-                font-size: 20px;
                 font-weight: bold;
-                border-radius: 14px;
             }
             QPushButton:hover {
-                background-color: rgba(0, 0, 0, 0.1);
-                color: #000;
+                background-color: #7a2020;
+                border-color: #ff8585;
+            }
+            QPushButton:checked {
+                background-color: #ff6b6b;
+                color: #1a1a1a;
             }
         """)
-        self.warning_btn_dismiss.setToolTip("Warnung ausblenden")
-        self.warning_btn_dismiss.clicked.connect(lambda: self.warning_banner.setVisible(False))
-        warning_layout.addWidget(self.warning_btn_dismiss)
+        self.high_risk_btn.setCheckable(True)
+        self.high_risk_btn.setToolTip("Elemente mit hohem Risiko (>20%)\nTexterkennung unsicher oder Daten fehlen")
+        self.high_risk_btn.clicked.connect(lambda: self._filter_by_risk('high_risk'))
+        counter_layout.addWidget(self.high_risk_btn)
 
-        layout.addWidget(self.warning_banner)
+        # Medium risk (yellow) - "Bald prüfen" - dark theme
+        self.medium_risk_btn = QtWidgets.QPushButton("0 Bald prüfen")
+        self.medium_risk_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4a4020;
+                color: #ffd93d;
+                border: 2px solid #ffd93d;
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #5a5030;
+                border-color: #ffe066;
+            }
+            QPushButton:checked {
+                background-color: #ffd93d;
+                color: #1a1a1a;
+            }
+        """)
+        self.medium_risk_btn.setCheckable(True)
+        self.medium_risk_btn.setToolTip("Elemente mit mittlerem Risiko (10-20%)\nBei Gelegenheit kontrollieren")
+        self.medium_risk_btn.clicked.connect(lambda: self._filter_by_risk('medium_risk'))
+        counter_layout.addWidget(self.medium_risk_btn)
+
+        # Low risk (green) - "Gut erkannt" - dark theme
+        self.low_risk_btn = QtWidgets.QPushButton("0 Gut erkannt")
+        self.low_risk_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1a4a1a;
+                color: #6bcf6b;
+                border: 2px solid #6bcf6b;
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2a5a2a;
+                border-color: #85e085;
+            }
+            QPushButton:checked {
+                background-color: #6bcf6b;
+                color: #1a1a1a;
+            }
+        """)
+        self.low_risk_btn.setCheckable(True)
+        self.low_risk_btn.setToolTip("Elemente mit niedrigem Risiko (<10%)\nHohe Qualität - normalerweise OK")
+        self.low_risk_btn.clicked.connect(lambda: self._filter_by_risk('low_risk'))
+        counter_layout.addWidget(self.low_risk_btn)
+
+        counter_layout.addStretch(1)
+
+        # Show all button - dark theme
+        self.show_all_btn = QtWidgets.QPushButton("Alle anzeigen")
+        self.show_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3d3d3d;
+                color: #cccccc;
+                border: 1px solid #555555;
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-size: 10pt;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+                color: white;
+            }
+        """)
+        self.show_all_btn.setToolTip("Alle Elemente anzeigen (Filter zurücksetzen)")
+        self.show_all_btn.clicked.connect(self._clear_risk_filter)
+        counter_layout.addWidget(self.show_all_btn)
+
+        # Next problem button - dark theme
+        self.next_problem_btn = QtWidgets.QPushButton("→ Nächstes")
+        self.next_problem_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #8b0000;
+                color: #ff6b6b;
+                border: 2px solid #ff6b6b;
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #a52a2a;
+                color: white;
+            }
+            QPushButton:disabled {
+                background-color: #3d3d3d;
+                color: #666666;
+                border-color: #555555;
+            }
+        """)
+        self.next_problem_btn.setToolTip("Springt zum nächsten Element mit hohem Risiko")
+        self.next_problem_btn.clicked.connect(self._jump_to_next_risk_item)
+        counter_layout.addWidget(self.next_problem_btn)
+
+        layout.addWidget(self.problem_counter_bar)
+
+        # Track current risk filter
+        self._current_risk_filter = None
+
+        # Warning banner removed for cleaner UI
 
         # Confidence controls
         conf = QtWidgets.QHBoxLayout()
-        conf.addWidget(QtWidgets.QLabel("Klasse auswählen:"))
+        class_label = QtWidgets.QLabel("Klasse auswählen:")
+        class_label.setStyleSheet("font-size: 11pt;")
+        conf.addWidget(class_label)
         self.class_selector_combo = QtWidgets.QComboBox()
-
-        # --- ADD THIS LINE ---
+        self.class_selector_combo.setStyleSheet("""
+            QComboBox {
+                font-size: 11pt;
+                padding: 4px 8px;
+                min-height: 26px;
+            }
+        """)
         self.class_selector_combo.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
 
         self.class_selector_combo.currentTextChanged.connect(self.on_class_selector_changed)
         conf.addWidget(self.class_selector_combo)
         conf.addStretch(1)
 
-        # Validation button (YOLO validation always included)
-        self.btn_validate = QtWidgets.QPushButton("✓ Daten validieren")
-        self.btn_validate.setToolTip("Führt umfassende Datenvalidierung durch")
+        # Common toolbar button style - larger font and padding
+        toolbar_btn_style = """
+            QPushButton {
+                font-size: 11pt;
+                padding: 6px 12px;
+                min-height: 28px;
+            }
+        """
+
+        # Validation button - clearer label
+        self.btn_validate = QtWidgets.QPushButton(" Daten prüfen")
+        self.btn_validate.setToolTip("Automatische Prüfung aller Daten\n\nFindet fehlende oder fehlerhafte Einträge")
+        self.btn_validate.setStyleSheet(toolbar_btn_style)
         self.btn_validate.clicked.connect(self._run_validation)
         conf.addWidget(self.btn_validate)
 
-        # Quality Inspector button (with color toggle)
-        self.btn_quality_inspector = QtWidgets.QPushButton("📊 Erkennungsqualität prüfen")
+        # Quality Inspector button - clearer label
+        self.btn_quality_inspector = QtWidgets.QPushButton(" Qualität anzeigen")
         self.btn_quality_inspector.setCheckable(True)
         self.btn_quality_inspector.setChecked(False)
+        self.btn_quality_inspector.setStyleSheet(toolbar_btn_style)
         self.btn_quality_inspector.setToolTip(
-            "Zeigt welche Elemente Sie kontrollieren sollten:\n"
-            "• ❌ Sofort prüfen = Unsichere Erkennung\n"
-            "• ⚠️ Bald prüfen = Mittlere Qualität\n"
-            "• ✅ Gut erkannt = Hohe Qualität\n"
-            "• Farbcodierte Anzeige im Gleisplan"
+            "Zeigt die Erkennungsqualität im Gleisplan:\n\n"
+            " Grün = Sicher erkannt (OK)\n"
+            " Gelb = Bitte überprüfen\n"
+            " Rot = Problem - bitte korrigieren"
         )
         self.btn_quality_inspector.toggled.connect(self.on_toggle_quality_inspector)
         conf.addWidget(self.btn_quality_inspector)
 
-        # Manual linking button
-        self.btn_manual_link = QtWidgets.QPushButton("📌 Koordinate manuell verknüpfen")
+        # Manual linking button - clearer label
+        self.btn_manual_link = QtWidgets.QPushButton(" Koordinate zuweisen")
         self.btn_manual_link.setCheckable(True)
-        self.btn_manual_link.setToolTip("Klicken Sie auf ein Ankerelement, dann auf eine Koordinate")
+        self.btn_manual_link.setStyleSheet(toolbar_btn_style)
+        self.btn_manual_link.setToolTip("Koordinate manuell einem Element zuweisen\n\n1. Klicken Sie auf ein Element\n2. Dann auf die zugehörige Koordinate")
         self.btn_manual_link.toggled.connect(self.on_manual_link_toggled)
         conf.addWidget(self.btn_manual_link)
-        
-        # Manual OCR buttons
-        self.btn_manual_ocr = QtWidgets.QPushButton("Manuelles OCR (Horizontal)")
+
+        # Manual OCR buttons - clearer German labels
+        self.btn_manual_ocr = QtWidgets.QPushButton(" Text erkennen")
         self.btn_manual_ocr.setCheckable(True)
+        self.btn_manual_ocr.setStyleSheet(toolbar_btn_style)
+        self.btn_manual_ocr.setToolTip("Text manuell erkennen (für horizontale Texte)\n\nZeichnen Sie ein Rechteck um den Text")
         self.btn_manual_ocr.toggled.connect(lambda checked: self.on_manual_ocr_toggled(checked, 'horizontal'))
         conf.addWidget(self.btn_manual_ocr)
-        
-        self.btn_manual_ocr_angular = QtWidgets.QPushButton("Manuelles OCR (Angular)")
+
+        self.btn_manual_ocr_angular = QtWidgets.QPushButton(" Schräger Text")
         self.btn_manual_ocr_angular.setCheckable(True)
+        self.btn_manual_ocr_angular.setStyleSheet(toolbar_btn_style)
+        self.btn_manual_ocr_angular.setToolTip("Schrägen/gedrehten Text erkennen\n\nFür Texte die nicht horizontal sind")
         self.btn_manual_ocr_angular.toggled.connect(lambda checked: self.on_manual_ocr_toggled(checked, 'angular'))
         conf.addWidget(self.btn_manual_ocr_angular)
 
         # Track overlay toggle button
-        self.btn_toggle_tracks = QtWidgets.QPushButton("🛤️ Gleise anzeigen")
+        self.btn_toggle_tracks = QtWidgets.QPushButton(" Gleise anzeigen")
         self.btn_toggle_tracks.setCheckable(True)
         self.btn_toggle_tracks.setEnabled(False)
+        self.btn_toggle_tracks.setStyleSheet(toolbar_btn_style)
         self.btn_toggle_tracks.setToolTip("Zeigt die erkannten Hauptgleise als rote Linie")
         self.btn_toggle_tracks.toggled.connect(self.on_toggle_track_overlay)
         conf.addWidget(self.btn_toggle_tracks)
@@ -499,18 +794,41 @@ class WorkspaceWidget(QtWidgets.QWidget):
         table_filter.addWidget(self.filter_class_input)
         table_filter.addWidget(self.filter_text_input)
         
-        # Tree widget
+        # Tree widget - bigger font and row height for better readability
         self.tree = AuditingTreeWidget(self)
         self.tree.setHeaderLabels(["Text/Nummer", "Koordinatentext", "Fahrtrichtung", "Seite"])
         self.tree.setSortingEnabled(True)
+
+        # Make tree bigger with larger font (DPI-aware)
+        tree_font = get_scaled_font(12)
+        self.tree.setFont(tree_font)
+        self.tree.header().setFont(tree_font)
+
+        # Increase row height for better readability
+        self.tree.setStyleSheet("""
+            QTreeWidget {
+                font-size: 12pt;
+            }
+            QTreeWidget::item {
+                padding: 6px 4px;
+                min-height: 28px;
+            }
+            QHeaderView::section {
+                font-size: 12pt;
+                font-weight: bold;
+                padding: 8px 4px;
+            }
+        """)
+
         self.tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.Interactive)
         self.tree.header().setSectionResizeMode(1, QtWidgets.QHeaderView.Interactive)
         self.tree.header().setSectionResizeMode(2, QtWidgets.QHeaderView.Interactive)
         self.tree.header().setSectionResizeMode(3, QtWidgets.QHeaderView.Interactive)
-        self.tree.header().resizeSection(0, 200)
-        self.tree.header().resizeSection(1, 150)
-        self.tree.header().resizeSection(2, 100)
-        self.tree.header().resizeSection(3, 80)
+        # DPI-aware column widths
+        self.tree.header().resizeSection(0, scale_value(220))
+        self.tree.header().resizeSection(1, scale_value(170))
+        self.tree.header().resizeSection(2, scale_value(120))
+        self.tree.header().resizeSection(3, scale_value(90))
         self.tree.header().setStretchLastSection(True)
         self.tree.setMouseTracking(True)
         self.tree.itemEntered.connect(self.on_tree_item_hovered)
@@ -528,8 +846,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
         
         right_widget = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right_widget)
-        right_layout.addWidget(QtWidgets.QLabel("Item Details / Notes:"))
-        right_layout.addWidget(self.item_details_notes)
+
+        # Quick Correction Panel removed - edit directly in tree
+
         right_layout.addLayout(table_filter)
         self.tree_original_layout = right_layout
         right_layout.addWidget(self.tree)
@@ -598,7 +917,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         if self.graphics_window is not None:
             return
         
-        # ✅ CREATE PLACEHOLDER before removing view
+        #  CREATE PLACEHOLDER before removing view
         self.graphics_placeholder = QtWidgets.QWidget()
         self.graphics_placeholder.setMinimumSize(self.view.size())
         
@@ -633,7 +952,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         if self.graphics_window is None:
             return
         
-        # ✅ REPLACE PLACEHOLDER with view
+        #  REPLACE PLACEHOLDER with view
         if self.graphics_placeholder:
             placeholder_index = self.graphics_original_layout.indexOf(self.graphics_placeholder)
             
@@ -665,7 +984,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         if self.tree_window is None:
             return
         
-        # ✅ REPLACE PLACEHOLDER with tree
+        #  REPLACE PLACEHOLDER with tree
         if self.tree_placeholder:
             placeholder_index = self.tree_original_layout.indexOf(self.tree_placeholder)
             
@@ -732,7 +1051,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.tree.blockSignals(False)
             return
         
-        # ✅ SAVE STATE WITH SPECIAL DELETION MARKER
+        #  SAVE STATE WITH SPECIAL DELETION MARKER
         self._save_deletion_state(row_ids_to_delete)
 
         try:
@@ -771,7 +1090,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.tree._update_row_count()
             self.tree._update_selection_count()
             
-            # ✅ Update button states
+            #  Update button states
             self._update_undo_redo_buttons()
             
         except Exception as e:
@@ -783,19 +1102,26 @@ class WorkspaceWidget(QtWidgets.QWidget):
     def load_data(self, df_all: pd.DataFrame, page_base_pix: Dict,
                 page_dfs: Dict, page_bgr_arrays: Dict,
                 track_skeleton: Optional[np.ndarray] = None,
-                from_database: bool = False):
+                from_database: bool = False,
+                uncertain_detections: list = None):
         """Load data into workspace - with database check
 
         Args:
             from_database: If True, skip database check (data already loaded from DB)
+            uncertain_detections: List of low-confidence detections for user review
         """
 
-        # ✅ SET FLAG TO PREVENT STATE SAVING DURING LOAD
+        #  SET FLAG TO PREVENT STATE SAVING DURING LOAD
         self._is_loading_data = True
 
+        # Store uncertain detections for validation dialog
+        self.uncertain_detections = uncertain_detections or []
+        if self.uncertain_detections:
+            print(f"  Received {len(self.uncertain_detections)} uncertain detections for review")
+
         try:
-            # ✅ VERIFY DATA ISOLATION
-            print(f"📂 Loading data for workspace: {self.layout_name}")
+            #  VERIFY DATA ISOLATION
+            print(f" Loading data for workspace: {self.layout_name}")
             print(f"  Incoming df_all: {len(df_all)} rows")
             print(f"  from_database: {from_database}")
             
@@ -803,9 +1129,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
             if 'row_id' in df_all.columns:
                 duplicate_check = df_all['row_id'].duplicated().sum()
                 if duplicate_check > 0:
-                    print(f"  ⚠️ WARNING: Incoming data has {duplicate_check} duplicate row_ids!")
+                    print(f"WARNING: Incoming data has {duplicate_check} duplicate row_ids!")
                     df_all = df_all.drop_duplicates(subset='row_id', keep='first')
-                    print(f"  🧹 After deduplication: {len(df_all)} rows")
+                    print(f"   After deduplication: {len(df_all)} rows")
 
             # Skip database check if data already came from database
             saved_result = None
@@ -818,15 +1144,15 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     try:
                         saved_data, saved_track_skeleton, saved_dimensions = saved_result
                     except ValueError as e:
-                        print(f"⚠️ Error unpacking saved result: {e}")
-                        print(f"   Result type: {type(saved_result)}")
-                        print(f"   Result length: {len(saved_result) if isinstance(saved_result, (list, tuple)) else 'N/A'}")
+                        print(f" Error unpacking saved result: {e}")
+                        print(f"Result type: {type(saved_result)}")
+                        print(f"Result length: {len(saved_result) if isinstance(saved_result, (list, tuple)) else 'N/A'}")
                         saved_result = None
             else:
-                print("  ℹ️ Skipping database check (data already from database)")
+                print(f"Skipping database check (data already from database)")
 
             if saved_result:
-                # ✅ Build current dimensions from incoming data (with safety checks)
+                #  Build current dimensions from incoming data (with safety checks)
                 current_dimensions = {}
                 try:
                     for page_num, pix in page_base_pix.items():
@@ -836,10 +1162,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                                 'height': int(pix.height())
                             }
                 except Exception as e:
-                    print(f"⚠️ Error building current dimensions: {e}")
+                    print(f" Error building current dimensions: {e}")
                     current_dimensions = {}
                 
-                # ✅ Validate image dimensions match
+                #  Validate image dimensions match
                 dimensions_match = True
                 dimension_mismatch_details = []
                 
@@ -860,19 +1186,19 @@ class WorkspaceWidget(QtWidgets.QWidget):
                                     f"  Gespeichert: {saved_dims['width']}x{saved_dims['height']}\n"
                                     f"  Aktuell: {current_dims['width']}x{current_dims['height']}"
                                 )
-                                print(f"⚠️ Page {page_num_int} dimension mismatch:")
-                                print(f"   Saved: {saved_dims['width']}x{saved_dims['height']}")
-                                print(f"   Current: {current_dims['width']}x{current_dims['height']}")
+                                print(f" Page {page_num_int} dimension mismatch:")
+                                print(f"Saved: {saved_dims['width']}x{saved_dims['height']}")
+                                print(f"Current: {current_dims['width']}x{current_dims['height']}")
                         else:
-                            print(f"⚠️ Page {page_num_int} in saved data but not in current data")
+                            print(f" Page {page_num_int} in saved data but not in current data")
                 elif saved_dimensions and not current_dimensions:
-                    print("⚠️ No current dimensions available (page_base_pix might be empty)")
+                    print(" No current dimensions available (page_base_pix might be empty)")
                     dimensions_match = False
                 elif not saved_dimensions:
-                    print("⚠️ No image dimensions saved in database")
+                    print(" No image dimensions saved in database")
                     dimensions_match = False
                 
-                # ✅ Show warning if dimensions don't match
+                #  Show warning if dimensions don't match
                 if not dimensions_match:
                     if dimension_mismatch_details:
                         mismatch_text = "\n\n".join(dimension_mismatch_details)
@@ -899,7 +1225,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         print("User chose to reprocess - skipping database load")
                         saved_result = None
                 
-                # ✅ Ask if user wants to load saved data (if dimensions match or user accepted mismatch)
+                #  Ask if user wants to load saved data (if dimensions match or user accepted mismatch)
                 if saved_result:
                     reply = QtWidgets.QMessageBox.question(
                         self,
@@ -913,10 +1239,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         # Load from database
                         print("Loading data from database...")
                         df_all = pd.DataFrame(saved_data)
-                            # ✅ ADD: Ensure _hidden column exists in loaded data
+                            #  ADD: Ensure _hidden column exists in loaded data
                         if '_hidden' not in df_all.columns:
                             df_all['_hidden'] = False
-                            print("  ⚠️ Added missing _hidden column to database data")
+                            print(f"Added missing _hidden column to database data")
                         track_skeleton = saved_track_skeleton
                         
                         # Rebuild page_dfs from df_all
@@ -925,51 +1251,51 @@ class WorkspaceWidget(QtWidgets.QWidget):
                             for page_num in df_all['page'].unique():
                                 page_dfs[int(page_num)] = df_all[df_all['page'] == page_num].copy()
                         
-                        print(f"  ✅ Loaded {len(df_all)} rows from database")
+                        print(f"  Loaded {len(df_all)} rows from database")
             
-            # ✅ CLEAR UNDO/REDO STACKS ON NEW LOAD
+            #  CLEAR UNDO/REDO STACKS ON NEW LOAD
             self.undo_stack.clear()
             self.redo_stack.clear()
 
             # Load data into workspace
             self.df_all = self._ensure_hidden_column(df_all.copy())
 
-            # ✅ FIX: Ensure link_coord_row_id column exists in loaded data
+            #  FIX: Ensure link_coord_row_id column exists in loaded data
             if 'link_coord_row_id' not in self.df_all.columns:
                 self.df_all['link_coord_row_id'] = None
-                print("  🔧 Added missing link_coord_row_id column to loaded data")
+                print("   Added missing link_coord_row_id column to loaded data")
 
-            # ✅ FIX: Ensure OCR region columns exist in loaded data (for backward compatibility)
+            #  FIX: Ensure OCR region columns exist in loaded data (for backward compatibility)
             ocr_columns = ['ocr_x1', 'ocr_y1', 'ocr_x2', 'ocr_y2', 'ocr_region_source']
             missing_ocr_cols = [col for col in ocr_columns if col not in self.df_all.columns]
             if missing_ocr_cols:
                 for col in missing_ocr_cols:
                     self.df_all[col] = None
-                print(f"  🔧 Added missing OCR columns to loaded data: {missing_ocr_cols}")
+                print(f"   Added missing OCR columns to loaded data: {missing_ocr_cols}")
 
             self.page_base_pix = page_base_pix
             self.page_dfs = {k: self._ensure_hidden_column(v.copy()) for k, v in page_dfs.items()}
 
-            # ✅ FIX: Ensure link_coord_row_id column exists in page_dfs too
+            #  FIX: Ensure link_coord_row_id column exists in page_dfs too
             for page_num, page_df in self.page_dfs.items():
                 if 'link_coord_row_id' not in page_df.columns:
                     page_df['link_coord_row_id'] = None
 
-                # ✅ FIX: Ensure OCR region columns exist in page_dfs too
+                #  FIX: Ensure OCR region columns exist in page_dfs too
                 for col in ocr_columns:
                     if col not in page_df.columns:
                         page_df[col] = None
 
             self.page_bgr_arrays = page_bgr_arrays
 
-            print(f"  ✅ Loaded into workspace: {len(self.df_all)} rows")
+            print(f"  Loaded into workspace: {len(self.df_all)} rows")
 
-            # ✅ ADD DEBUG: Check _hidden column
+            #  ADD DEBUG: Check _hidden column
             if '_hidden' in self.df_all.columns:
                 hidden_count = self.df_all['_hidden'].sum()
-                print(f"  🔍 Hidden rows in df_all: {hidden_count}")
+                print(f"  Hidden rows in df_all: {hidden_count}")
             else:
-                print(f"  ⚠️ WARNING: _hidden column not found in df_all!")
+                print(f"WARNING: _hidden column not found in df_all!")
 
             # Fill class selector
             self.class_selector_combo.clear()
@@ -986,12 +1312,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.all_page_row_specs.clear()
             for pidx, df_page in self.page_dfs.items():
                 
-                # ✅ ADD DEBUG: Check _hidden column in page df
+                #  ADD DEBUG: Check _hidden column in page df
                 if '_hidden' in df_page.columns:
                     page_hidden_count = df_page['_hidden'].sum()
-                    print(f"  🔍 Page {pidx}: {page_hidden_count} hidden rows out of {len(df_page)}")
+                    print(f"  Page {pidx}: {page_hidden_count} hidden rows out of {len(df_page)}")
                 else:
-                    print(f"  ⚠️ WARNING: Page {pidx} missing _hidden column!")
+                    print(f"WARNING: Page {pidx} missing _hidden column!")
                 
                 specs = {}
                 for _, row in df_page.iterrows():
@@ -1034,7 +1360,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                     # Debug output for angle detection
                     if pd.notna(angle) or pd.notna(angle_raw):
-                        print(f"   🔍 Row {row['row_id']} ({row['cls']}): angle={angle}, angle_raw={angle_raw}")
+                        print(f"Row {row['row_id']} ({row['cls']}): angle={angle}, angle_raw={angle_raw}")
 
                     # Try angle first, then angle_raw
                     use_angle = angle if pd.notna(angle) and angle != 0.0 else angle_raw
@@ -1044,10 +1370,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                             pts = bbox_to_rotated_poly(x1, y1, x2, y2, float(use_angle))
                             spec.update({"is_poly": True, "pts": pts})
                             specs[int(row['row_id'])] = spec
-                            print(f"   ✅ Created ROTATED polygon for row {row['row_id']}, angle={use_angle:.1f}°")
+                            print(f"Created ROTATED polygon for row {row['row_id']}, angle={use_angle:.1f}°")
                             continue
                         except Exception as e:
-                            print(f"   ⚠️ Failed to create rotated poly: {e}")
+                            print(f"Failed to create rotated poly: {e}")
                             pass
 
                     # Priority 3: Fall back to axis-aligned rectangle
@@ -1058,9 +1384,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 
                 self.all_page_row_specs[pidx] = specs
                 
-                # ✅ DEBUG: Show what was built
-                print(f"📦 Page {pidx}: Built {len(specs)} row specs")
-                print(f"   Classes: {df_page['cls'].value_counts().to_dict()}")
+                #  DEBUG: Show what was built
+                print(f" Page {pidx}: Built {len(specs)} row specs")
+                print(f"Classes: {df_page['cls'].value_counts().to_dict()}")
 
             max_page = max(self.page_dfs.keys()) if self.page_dfs else 1
             # Page control removed - single page view only
@@ -1071,9 +1397,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.track_skeleton = track_skeleton
             if track_skeleton is not None:
                 self.btn_toggle_tracks.setEnabled(True)
-                self._set_status(f"✓ Track detection verfügbar: {self.layout_name}")
+                self._set_status(f" Track detection verfügbar: {self.layout_name}")
 
-            # ✅ FIX: Clear old overlay items before changing page
+            #  FIX: Clear old overlay items before changing page
             # This ensures old non-resizable items are replaced with new resizable ones
             for items in self.current_row_items.values():
                 for item in items:
@@ -1083,17 +1409,17 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
             self.on_page_changed(1)
             
-            # ✅ UPDATE UNDO/REDO BUTTON STATES
+            #  UPDATE UNDO/REDO BUTTON STATES
             if hasattr(self, '_update_undo_redo_buttons'):
                 self._update_undo_redo_buttons()
 
-            # ✅ PERFORM AUTO QUALITY CHECK
+            #  PERFORM AUTO QUALITY CHECK
             if hasattr(self, '_perform_auto_quality_check'):
                 self._perform_auto_quality_check()
 
         except Exception as e:
             import traceback
-            print(f"❌ Error in load_data: {e}")
+            print(f"Error in load_data: {e}")
             traceback.print_exc()
             QtWidgets.QMessageBox.critical(
                 self,
@@ -1106,16 +1432,16 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self._is_loading_data = False
 
     def on_toggle_confidence_colors(self, checked: bool):
-        """✅ NEW: Toggle confidence-based bbox coloring"""
-        print(f"\n🎨 CONFIDENCE COLOR TOGGLE: checked={checked}")
+        """ NEW: Toggle confidence-based bbox coloring"""
+        print(f"\n CONFIDENCE COLOR TOGGLE: checked={checked}")
         self.show_confidence_colors = checked
-        print(f"   show_confidence_colors set to: {self.show_confidence_colors}")
+        print(f"show_confidence_colors set to: {self.show_confidence_colors}")
         self._refresh_page_graphics()
 
         if checked:
-            self._set_status("🎨 Konfidenz-Farben aktiviert (🟢>80% 🟡60-80% 🔴<60%)")
+            self._set_status(" Konfidenz-Farben aktiviert (>80% 60-80% <60%)")
         else:
-            self._set_status("🎨 Konfidenz-Farben deaktiviert")
+            self._set_status(" Konfidenz-Farben deaktiviert")
 
     def on_toggle_track_overlay(self, checked: bool):
         """Toggle track centerline overlay (7px thick FLASHY RED line)"""
@@ -1150,7 +1476,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             overlay_item.setOpacity(1.0)  # FULL OPACITY - NO TRANSPARENCY
             self.track_overlay_items.append(overlay_item)
             
-            self._set_status("🛤️ Gleise sichtbar (7px FLASHY ROT)")
+            self._set_status(" Gleise sichtbar (7px FLASHY ROT)")
             
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Overlay-Fehler", f"Konnte Gleis-Overlay nicht erstellen:\n{e}")
@@ -1162,19 +1488,19 @@ class WorkspaceWidget(QtWidgets.QWidget):
             return
         
         try:
-            # ✅ Clean DataFrame - convert numpy types to Python types
+            #  Clean DataFrame - convert numpy types to Python types
             df_cleaned = self.df_all.copy()
             
             # Replace NaN/NaT with None
             df_cleaned = df_cleaned.replace({np.nan: None, pd.NaT: None})
             
-            # ✅ Convert numpy arrays in 'poly' column to lists
+            #  Convert numpy arrays in 'poly' column to lists
             if 'poly' in df_cleaned.columns:
                 df_cleaned['poly'] = df_cleaned['poly'].apply(
                     lambda x: x.tolist() if isinstance(x, np.ndarray) else x
                 )
             
-            # ✅ Convert all numpy numeric types to Python types
+            #  Convert all numpy numeric types to Python types
             for col in df_cleaned.columns:
                 if df_cleaned[col].dtype == np.int64:
                     df_cleaned[col] = df_cleaned[col].astype(object).where(df_cleaned[col].notna(), None)
@@ -1184,12 +1510,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     df_cleaned[col] = df_cleaned[col].apply(lambda x: float(x) if x is not None else None)
             
             data_list = df_cleaned.to_dict("records")
-            # ✅ Collect image dimensions (ensure they're Python ints, not numpy)
+            #  Collect image dimensions (ensure they're Python ints, not numpy)
             image_dimensions = {}
             for page_num, pix in self.page_base_pix.items():
-                image_dimensions[int(page_num)] = {  # ✅ Ensure key is Python int
-                    'width': int(pix.width()),        # ✅ Ensure value is Python int
-                    'height': int(pix.height())       # ✅ Ensure value is Python int
+                image_dimensions[int(page_num)] = {  #  Ensure key is Python int
+                    'width': int(pix.width()),        #  Ensure value is Python int
+                    'height': int(pix.height())       #  Ensure value is Python int
                 }
             
             from database_sqlite import save_workspace_data
@@ -1200,12 +1526,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 image_dimensions
             )
             
-            print(f"✅ Saved {self.layout_name} with dimensions: {image_dimensions}")
+            print(f"Saved {self.layout_name} with dimensions: {image_dimensions}")
             
         except Exception as e:
-            print(f"❌ Save failed: {e}")
+            print(f"Save failed: {e}")
             import traceback
-            traceback.print_exc()  # ✅ Print full error trace for debugging
+            traceback.print_exc()  #  Print full error trace for debugging
             QtWidgets.QMessageBox.critical(self, "Save Error", str(e))
 
     
@@ -1267,9 +1593,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self._create_items_for_page(pidx)
         else:
             # Same page - just update overlays (keep background)
-            print(f"  ℹ️ Same page refresh - updating overlays incrementally")
+            print(f"Same page refresh - updating overlays incrementally")
             
-            # ✅ FIX: Ensure background pixmap exists
+            #  FIX: Ensure background pixmap exists
             has_background = False
             for item in self.scene.items():
                 if isinstance(item, QtWidgets.QGraphicsPixmapItem):
@@ -1278,13 +1604,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
             
             if not has_background:
                 # Background was removed - add it back
-                print(f"  ⚠️ Background missing - restoring...")
+                print(f"Background missing - restoring...")
                 _, _, _, _, bg = self._get_theme_colors()
                 self.scene.setBackgroundBrush(QtGui.QBrush(bg))
                 
                 # Add pixmap at the BOTTOM (z-order = -1)
                 pixmap_item = self.scene.addPixmap(self.page_base_pix[pidx])
-                pixmap_item.setZValue(-1)  # ✅ Ensure it's behind overlays
+                pixmap_item.setZValue(-1)  #  Ensure it's behind overlays
                 
                 self.scene.setSceneRect(QtCore.QRectF(self.page_base_pix[pidx].rect()))
             
@@ -1298,87 +1624,102 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
     def _populate_tree(self, pidx: int):
         """Populate tree widget for given page"""
-        self.tree.clear()
-        self.row_id_to_tree_item.clear()
-        
-        df_page = self.page_dfs.get(pidx)
-        if df_page is None:
-            return
-        # ADD THIS: Filter out hidden rows
-        if '_hidden' in df_page.columns:
-            df_page = df_page[~df_page['_hidden'].fillna(False)].copy()
-        # Get and sort class list
-        classes = sorted(df_page['cls'].unique())
-        if 'coordinate' in classes:
-            classes.remove('coordinate')
-            classes.append('coordinate')
-        
-        for cls_name in classes:
-            parent_item = QtWidgets.QTreeWidgetItem(self.tree)
-            parent_item.setText(0, cls_name)
-            parent_item.setExpanded(True)
-            
-            # Style parent
-            font = parent_item.font(0)
-            font.setBold(True)
-            parent_item.setFont(0, font)
-            parent_item.setFlags(parent_item.flags() & ~QtCore.Qt.ItemIsSelectable)
-            bg_brush = self.palette().window().color().lighter(115)
-            for col in range(4):
-                parent_item.setBackground(col, bg_brush)
-            
-            df_class = df_page[df_page['cls'] == cls_name]
-            item_counter = 1
-            is_no_ocr_class = cls_name in NO_OCR_CLASSES
-            
-            for _, row in df_class.iterrows():
-                row_id = int(row['row_id'])
-                
-                # Determine primary and secondary text
-                if cls_name == 'coordinate':
-                    primary_text = str(row.get('coord_text', ''))
-                    secondary_text = ""
-                    fahrtrichtung_text = ""
-                elif is_no_ocr_class:
-                    # --- FIX START ---
-                    # Check if anchor_text was already populated by the pipeline 
-                    # (e.g., for haltepunkt or weichenende)
-                    existing_anchor_text = row.get('anchor_text', '')
-                    
-                    if existing_anchor_text:
-                        # Use the pre-formatted text from the pipeline
-                        primary_text = str(existing_anchor_text)
-                    else:
-                        # Fallback for other NO_OCR_CLASSES (like isolierstoß)
-                        primary_text = f"{cls_name} {item_counter}"
-                        item_counter += 1 # Only increment if we use the counter
-                    
-                    secondary_text = str(row.get('coord_text', ''))
-                    fahrtrichtung_text = ""
-                    # --- FIX END ---
-                else:
-                    primary_text = str(row.get('anchor_text', ''))
-                    secondary_text = str(row.get('coord_text', ''))
-                    
-                    if cls_name == "signal" and pd.notna(row.get('fahrtrichtung')):
-                        fahrtrichtung_text = str(row['fahrtrichtung'])
-                    else:
+        # Block signals to prevent on_tree_item_changed from firing for every item
+        # This dramatically improves performance (913 items = 2-3 sec → instant)
+        self.tree.blockSignals(True)
+        try:
+            self.tree.clear()
+            self.row_id_to_tree_item.clear()
+
+            df_page = self.page_dfs.get(pidx)
+            if df_page is None:
+                return
+            # Filter out hidden rows
+            if '_hidden' in df_page.columns:
+                df_page = df_page[~df_page['_hidden'].fillna(False)].copy()
+            # Get and sort class list
+            classes = sorted(df_page['cls'].unique())
+            if 'coordinate' in classes:
+                classes.remove('coordinate')
+                classes.append('coordinate')
+
+            for cls_name in classes:
+                parent_item = QtWidgets.QTreeWidgetItem(self.tree)
+                parent_item.setText(0, cls_name)
+                parent_item.setExpanded(True)
+
+                # Style parent
+                font = parent_item.font(0)
+                font.setBold(True)
+                parent_item.setFont(0, font)
+                parent_item.setFlags(parent_item.flags() & ~QtCore.Qt.ItemIsSelectable)
+                bg_brush = self.palette().window().color().lighter(115)
+                for col in range(4):
+                    parent_item.setBackground(col, bg_brush)
+
+                df_class = df_page[df_page['cls'] == cls_name]
+                item_counter = 1
+                is_no_ocr_class = cls_name in NO_OCR_CLASSES
+
+                for _, row in df_class.iterrows():
+                    row_id = int(row['row_id'])
+
+                    # Determine primary and secondary text
+                    if cls_name == 'coordinate':
+                        primary_text = str(row.get('coord_text', ''))
+                        secondary_text = ""
                         fahrtrichtung_text = ""
-                
-                page_str = str(row.get('page', ''))
-                child_item = QtWidgets.QTreeWidgetItem(parent_item)
-                child_item.setText(0, primary_text)
-                child_item.setText(1, secondary_text)
-                child_item.setText(2, fahrtrichtung_text)
-                child_item.setText(3, page_str)
-                
-                child_item.setFlags(child_item.flags() | QtCore.Qt.ItemIsEditable)
-                child_item.setData(0, QtCore.Qt.UserRole, row_id)
-                self.row_id_to_tree_item[row_id] = child_item
-        
-        self._apply_all_filters()
-        self.tree._update_row_count()
-        self.tree._update_selection_count()
+                    elif is_no_ocr_class:
+                        # Check if anchor_text was already populated by the pipeline
+                        # (e.g., for haltepunkt or weichenende)
+                        existing_anchor_text = row.get('anchor_text', '')
+
+                        if existing_anchor_text:
+                            # Use the pre-formatted text from the pipeline
+                            primary_text = str(existing_anchor_text)
+                        else:
+                            # Fallback for other NO_OCR_CLASSES (like isolierstoß)
+                            primary_text = f"{cls_name} {item_counter}"
+                            item_counter += 1  # Only increment if we use the counter
+
+                        secondary_text = str(row.get('coord_text', ''))
+                        fahrtrichtung_text = ""
+                    else:
+                        primary_text = str(row.get('anchor_text', ''))
+                        secondary_text = str(row.get('coord_text', ''))
+
+                        if cls_name == "signal" and pd.notna(row.get('fahrtrichtung')):
+                            fahrtrichtung_text = str(row['fahrtrichtung'])
+                        else:
+                            fahrtrichtung_text = ""
+
+                    page_str = str(row.get('page', ''))
+                    child_item = QtWidgets.QTreeWidgetItem(parent_item)
+
+                    # Get confidence status for color coding
+                    conf = float(row.get('conf', 0.0))
+                    status = get_confidence_status(conf)
+
+                    # Set text WITHOUT emoji icons (clean text only)
+                    child_item.setText(0, primary_text)
+                    child_item.setText(1, secondary_text)
+                    child_item.setText(2, fahrtrichtung_text)
+                    child_item.setText(3, page_str)
+
+                    # No colored backgrounds - user prefers clean dark theme
+
+                    child_item.setFlags(child_item.flags() | QtCore.Qt.ItemIsEditable)
+                    child_item.setData(0, QtCore.Qt.UserRole, row_id)
+                    # Store confidence for filtering
+                    child_item.setData(0, QtCore.Qt.UserRole + 1, conf)
+                    self.row_id_to_tree_item[row_id] = child_item
+
+            self._apply_all_filters()
+            self._update_problem_counts()  # Update counter bar
+            self.tree._update_row_count()
+            self.tree._update_selection_count()
+        finally:
+            self.tree.blockSignals(False)
 
 
     def _apply_all_filters(self):
@@ -1432,7 +1773,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 
                 row = row_data_list.iloc[0]
                 
-                # ✅ Initialize child_visible immediately
+                #  Initialize child_visible immediately
                 child_visible = True
                 
                 # Confidence filter
@@ -1461,7 +1802,172 @@ class WorkspaceWidget(QtWidgets.QWidget):
         
         self.tree.blockSignals(False)
         self.clear_hover_highlight()
-    
+
+    # ========================================================================
+    # RISK FILTERING AND COUNTER METHODS - Matching Erkennungsqualität
+    # ========================================================================
+
+    def _filter_by_risk(self, level: str):
+        """
+        Filter tree items by risk level (matching Erkennungsqualität criteria).
+
+        Args:
+            level: 'high_risk' (>20%), 'medium_risk' (10-20%), or 'low_risk' (<10%)
+        """
+        # Toggle behavior - if same filter clicked, clear it
+        if self._current_risk_filter == level:
+            self._clear_risk_filter()
+            return
+
+        # Uncheck other buttons
+        self.high_risk_btn.setChecked(level == 'high_risk')
+        self.medium_risk_btn.setChecked(level == 'medium_risk')
+        self.low_risk_btn.setChecked(level == 'low_risk')
+
+        self._current_risk_filter = level
+
+        # Apply filter to tree
+        self.tree.blockSignals(True)
+
+        for i in range(self.tree.topLevelItemCount()):
+            parent_item = self.tree.topLevelItem(i)
+            visible_child_count = 0
+
+            for j in range(parent_item.childCount()):
+                child_item = parent_item.child(j)
+                row_id = child_item.data(0, QtCore.Qt.UserRole)
+
+                if row_id is None:
+                    child_item.setHidden(True)
+                    continue
+
+                # Get row from dataframe
+                row_data = self.df_all[self.df_all['row_id'] == row_id]
+                if row_data.empty:
+                    child_item.setHidden(True)
+                    continue
+
+                row = row_data.iloc[0]
+                risk_score, _ = calculate_row_risk_score(row)
+
+                # Determine visibility based on risk level
+                show = False
+                if level == 'high_risk' and risk_score > 0.20:
+                    show = True
+                elif level == 'medium_risk' and 0.10 <= risk_score <= 0.20:
+                    show = True
+                elif level == 'low_risk' and risk_score < 0.10:
+                    show = True
+
+                child_item.setHidden(not show)
+                if show:
+                    visible_child_count += 1
+
+            parent_item.setHidden(visible_child_count == 0)
+
+        self.tree.blockSignals(False)
+
+        level_labels = {
+            'high_risk': 'Sofort prüfen',
+            'medium_risk': 'Bald prüfen',
+            'low_risk': 'Gut erkannt'
+        }
+        self._set_status(f"Filter: {level_labels.get(level, level)} - {self._count_visible_items()} Elemente")
+
+    def _clear_risk_filter(self):
+        """Clear risk filter and show all items."""
+        self._current_risk_filter = None
+        self.high_risk_btn.setChecked(False)
+        self.medium_risk_btn.setChecked(False)
+        self.low_risk_btn.setChecked(False)
+
+        # Re-apply standard filters (class/text)
+        self._apply_all_filters()
+        self._set_status("Filter zurückgesetzt - Alle Elemente angezeigt")
+
+    def _count_visible_items(self) -> int:
+        """Count currently visible tree items."""
+        count = 0
+        for i in range(self.tree.topLevelItemCount()):
+            parent = self.tree.topLevelItem(i)
+            if not parent.isHidden():
+                for j in range(parent.childCount()):
+                    if not parent.child(j).isHidden():
+                        count += 1
+        return count
+
+    def _jump_to_next_risk_item(self):
+        """Jump to the next high-risk item (risk > 20%)."""
+        if self.df_all is None or self.df_all.empty:
+            return
+
+        # Get current selection
+        selected = self.tree.selectedItems()
+        current_row_id = None
+        if selected:
+            current_row_id = selected[0].data(0, QtCore.Qt.UserRole)
+
+        # Find high-risk items
+        high_risk_row_ids = []
+        for _, row in self.df_all.iterrows():
+            # Skip coordinate and weichen_block (same as Erkennungsqualität)
+            if row.get('cls') in ['coordinate', 'weichen_block']:
+                continue
+            risk_score, _ = calculate_row_risk_score(row)
+            if risk_score > 0.20:
+                high_risk_row_ids.append(row['row_id'])
+
+        if not high_risk_row_ids:
+            self._set_status("Keine Elemente zum Prüfen gefunden!")
+            return
+
+        # Sort for consistent ordering
+        high_risk_row_ids.sort()
+
+        # Find next problem after current selection
+        next_row_id = None
+        if current_row_id is not None and current_row_id in high_risk_row_ids:
+            idx = high_risk_row_ids.index(current_row_id)
+            if idx + 1 < len(high_risk_row_ids):
+                next_row_id = high_risk_row_ids[idx + 1]
+            else:
+                next_row_id = high_risk_row_ids[0]  # Wrap to first
+        else:
+            next_row_id = high_risk_row_ids[0]  # Start from first
+
+        # Select the item in tree
+        if next_row_id in self.row_id_to_tree_item:
+            tree_item = self.row_id_to_tree_item[next_row_id]
+
+            # Clear filter first if item is hidden
+            if tree_item.isHidden():
+                self._clear_risk_filter()
+
+            self.tree.clearSelection()
+            tree_item.setSelected(True)
+            self.tree.scrollToItem(tree_item)
+            self._set_status(f"Prüfen: {high_risk_row_ids.index(next_row_id) + 1}/{len(high_risk_row_ids)}")
+
+    def _update_problem_counts(self):
+        """Update the risk counter bar with current counts using Erkennungsqualität criteria."""
+        if self.df_all is None or self.df_all.empty:
+            self.high_risk_btn.setText("0 Sofort prüfen")
+            self.medium_risk_btn.setText("0 Bald prüfen")
+            self.low_risk_btn.setText("0 Gut erkannt")
+            self.next_problem_btn.setEnabled(False)
+            return
+
+        counts = count_risk_categories(self.df_all)
+
+        self.high_risk_btn.setText(f"{counts['high_risk']} Sofort prüfen")
+        self.medium_risk_btn.setText(f"{counts['medium_risk']} Bald prüfen")
+        self.low_risk_btn.setText(f"{counts['low_risk']} Gut erkannt")
+
+        # Enable/disable next problem button
+        self.next_problem_btn.setEnabled(counts['high_risk'] > 0)
+
+    # Quick Correction Panel removed - edit directly in tree
+
     def _create_items_for_page(self, pidx: int):
         """Create graphics items for page"""
         self.current_row_items.clear()
@@ -1472,13 +1978,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
         specs = self.all_page_row_specs.get(pidx, {})
         
         # Debug summary (reduced output)
-        print(f"\n🎨 Creating overlays for page {pidx}, {len(specs)} specs")
+        print(f"\n Creating overlays for page {pidx}, {len(specs)} specs")
         df_page = self.page_dfs.get(pidx)
         # Count custom symbols
         if df_page is not None and 'is_custom_symbol' in df_page.columns:
             custom_count = (df_page['is_custom_symbol'] == True).sum()
             if custom_count > 0:
-                print(f"   📦 {custom_count} custom symbols in page_dfs")
+                print(f" {custom_count} custom symbols in page_dfs")
 
         selected_class = self._active_class_for_threshold_setting
         show_all_classes = (selected_class == "Alle Klassen")
@@ -1520,7 +2026,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             row_data = dfp[dfp['row_id'] == row_id].iloc[0] if dfp is not None and not m.empty else None
             all_bboxes = row_data.get('_all_bboxes') if row_data is not None else None
 
-            # ✅ Priority 1: Check if spec OR dataframe row has polygon data
+            #  Priority 1: Check if spec OR dataframe row has polygon data
             has_poly_in_spec = spec.get("is_poly", False)
             has_poly_in_row = False
             if row_data is not None:
@@ -1554,7 +2060,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 continue  # Skip the normal rendering below
 
             # Normal rendering (including merged signals with poly data)
-            # ✅ Get confidence and determine pen color
+            #  Get confidence and determine pen color
             pen_color = normal  # Default theme color
             pen_width = 2
 
@@ -1566,13 +2072,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 if is_custom:
                     pen_color = QtGui.QColor(255, 0, 255)  # Magenta for custom symbols
                     pen_width = 3
-                    print(f"   🟣 Row {row_id} ({cls}): CUSTOM SYMBOL detected, drawing in Magenta")
+                    print(f" Row {row_id} ({cls}): CUSTOM SYMBOL detected, drawing in Magenta")
 
                 # Priority 1: Error rows (red)
                 elif hasattr(self, 'error_rows') and row_id in self.error_rows:
                     pen_color = QtGui.QColor(255, 0, 0)  # Red
                     pen_width = 3
-                    print(f"   🔴 Row {row_id} ({cls}): ERROR ROW - Red")
+                    print(f"Row {row_id} ({cls}): ERROR ROW - Red")
 
                 # Priority 2: Confidence-based coloring (if enabled)
                 elif hasattr(self, 'show_confidence_colors') and self.show_confidence_colors:
@@ -1623,7 +2129,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     has_ocr_col = 'ocr_x1' in row_data.index if hasattr(row_data, 'index') else 'ocr_x1' in row_data
                     ocr_val = row_data.get('ocr_x1') if has_ocr_col else None
                     if has_ocr_col and ocr_val is not None:
-                        print(f"   DEBUG: Polygon Row {row_id} has OCR data: ocr_x1={ocr_val}")
+                        print(f"DEBUG: Polygon Row {row_id} has OCR data: ocr_x1={ocr_val}")
                 if row_data is not None and pd.notna(row_data.get('ocr_x1')):
                     ocr_x1 = float(row_data['ocr_x1'])
                     ocr_y1 = float(row_data['ocr_y1'])
@@ -1693,7 +2199,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     has_ocr_col = 'ocr_x1' in row_data.index if hasattr(row_data, 'index') else 'ocr_x1' in row_data
                     ocr_val = row_data.get('ocr_x1') if has_ocr_col else None
                     if has_ocr_col and ocr_val is not None:
-                        print(f"   DEBUG: Row {row_id} has OCR data: ocr_x1={ocr_val}")
+                        print(f"DEBUG: Row {row_id} has OCR data: ocr_x1={ocr_val}")
                 if row_data is not None and pd.notna(row_data.get('ocr_x1')):
                     ocr_x1 = float(row_data['ocr_x1'])
                     ocr_y1 = float(row_data['ocr_y1'])
@@ -1739,13 +2245,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                 self.current_row_items[int(row_id)] = items_list
                 created_count += 1
-        
-        # ✅ ADD THIS SUMMARY
-        print(f"\n   📊 Summary:")
-        print(f"      Created: {created_count}")
-        print(f"      Skipped (hidden): {skipped_hidden}")
-        print(f"      Skipped (filters): {skipped_filter}")
-        print(f"      Total in current_row_items: {len(self.current_row_items)}\n")
+
+        #  ADD THIS SUMMARY
+        print(f"\n   Summary:")
+        print(f"Created: {created_count}")
+        print(f"Skipped (hidden): {skipped_hidden}")
+        print(f"Skipped (filters): {skipped_filter}")
+        print(f"Total in current_row_items: {len(self.current_row_items)}\n")
 
     def highlight_row_graphics(self, row_id: int, highlight: bool = True, hover: bool = False):
         """Highlight graphics for row"""
@@ -1974,15 +2480,19 @@ class WorkspaceWidget(QtWidgets.QWidget):
             if row_id is None:
                 self.tree.blockSignals(False)
                 return
-            self._save_state("Zelle bearbeitet", [row_id])
 
             new_text = item.text(column)
             cls = self.get_class_for_row_id(row_id)
+            if cls is None:
+                # Row not found in df_all - shouldn't happen but handle gracefully
+                print(f"Warning: row_id {row_id} not found in df_all, skipping edit")
+                return
             is_coord_class = (cls == 'coordinate')
-            
+
+            # Determine what column is being updated FIRST (needed for precise undo collection)
             col_to_update = None
             is_coord_update = False
-            
+
             if is_coord_class:
                 if column == 0:
                     col_to_update = 'coord_text'
@@ -1995,18 +2505,46 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     is_coord_update = True
                 elif column == 2 and cls == 'signal':
                     col_to_update = 'fahrtrichtung'
-            
+
+            # Collect all affected row_ids for undo (including linked anchors/coordinates)
+            # Only collect linked items when we'll actually propagate to them
+            affected_row_ids = [row_id]
+            if is_coord_class and is_coord_update and 'link_coord_row_id' in self.df_all.columns:
+                # Coordinate coord_text edit → collect linked anchors (forward propagation)
+                linked_anchors = self.df_all[self.df_all['link_coord_row_id'] == row_id]
+                if not linked_anchors.empty:
+                    affected_row_ids.extend(linked_anchors['row_id'].tolist())
+            elif not is_coord_class and is_coord_update and 'link_coord_row_id' in self.df_all.columns:
+                # Anchor coord_text edit → collect linked coordinate (reverse propagation)
+                row_mask = self.df_all['row_id'] == row_id
+                if row_mask.any():
+                    link_coord_id = self.df_all.loc[row_mask, 'link_coord_row_id'].iloc[0]
+                    if pd.notna(link_coord_id):
+                        affected_row_ids.append(int(link_coord_id))
+
+            self._save_state("Zelle bearbeitet", affected_row_ids)
+
             if col_to_update:
+                # Parse coordinate once if needed (reuse for df_all, page_dfs, and propagation)
+                parsed_val, parsed_gi = None, None
+                if is_coord_update:
+                    parsed_val, parsed_gi = parse_coord(new_text)
+
+                # Initialize old_anchor_text before the if block (in case idx_list is empty)
+                old_anchor_text = None
+
                 idx_list = self.df_all.index[self.df_all['row_id'] == row_id].tolist()
                 if idx_list:
                     idx = idx_list[0]
+                    # Save old anchor_text before update (for name-change detection)
+                    if col_to_update == 'anchor_text':
+                        old_anchor_text = self.df_all.loc[idx, 'anchor_text']
                     self.df_all.loc[idx, col_to_update] = new_text
-                    
+
                     if is_coord_update:
-                        val, gi = parse_coord(new_text)
-                        self.df_all.loc[idx, 'coord_value'] = val
-                        self.df_all.loc[idx, 'gi_gl'] = gi
-                
+                        self.df_all.loc[idx, 'coord_value'] = parsed_val
+                        self.df_all.loc[idx, 'gi_gl'] = parsed_gi
+
                 df_page = self.page_dfs.get(self.current_page)
                 if df_page is not None:
                     idx_list_page = df_page.index[df_page['row_id'] == row_id].tolist()
@@ -2014,18 +2552,821 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         idx_p = idx_list_page[0]
                         df_page.loc[idx_p, col_to_update] = new_text
                         if is_coord_update:
-                            val, gi = parse_coord(new_text)
-                            df_page.loc[idx_p, 'coord_value'] = val
-                            df_page.loc[idx_p, 'gi_gl'] = gi
-            
-            if self.tree.currentItem() is item:
-                self.on_tree_selection_changed()
-        
+                            df_page.loc[idx_p, 'coord_value'] = parsed_val
+                            df_page.loc[idx_p, 'gi_gl'] = parsed_gi
+
+                # Auto-merge and recalculate Fahrtrichtung when signal name (anchor_text) changes
+                if col_to_update == 'anchor_text' and cls == 'signal':
+                    # Only recalculate if name actually changed (fix: prevent unnecessary recalc)
+                    old_name_upper = str(old_anchor_text or '').upper().strip()
+                    new_name_upper = str(new_text or '').upper().strip()
+                    if new_name_upper != old_name_upper:
+                        self._merge_and_recalculate_fahrtrichtung(row_id, new_text, item)
+                    else:
+                        print(f"Skipping Fahrtrichtung recalc: name unchanged ('{new_text}')")
+
+                # Update overlay label to reflect the change
+                items = self.current_row_items.get(row_id)
+                row_mask = self.df_all['row_id'] == row_id
+                if items and row_mask.any():
+                    updated_row = self.df_all[row_mask].iloc[0]
+
+                    # Rebuild label: {cls} {conf} | {anchor_text} | {coord_text} θ={angle}°
+                    label = f"{updated_row['cls']} {updated_row.get('conf', '')}"
+                    if pd.notna(updated_row.get('anchor_text')) and updated_row['anchor_text']:
+                        label += f" | {updated_row['anchor_text']}"
+                    if pd.notna(updated_row.get('coord_text')) and updated_row['coord_text']:
+                        label += f" | {updated_row['coord_text']}"
+                    if pd.notna(updated_row.get('angle')):
+                        try:
+                            label += f" θ={float(updated_row['angle']):.1f}°"
+                        except Exception:
+                            pass
+
+                    # Update the text label item
+                    for it in items:
+                        if isinstance(it, QtWidgets.QGraphicsSimpleTextItem):
+                            it.setText(label)
+                            break
+
+                    # Update spec for persistence
+                    specs = self.all_page_row_specs.get(self.current_page, {})
+                    if row_id in specs:
+                        specs[row_id]['label'] = label
+
+                # Propagate coordinate changes to linked anchors
+                # Only propagate if is_coord_update is True (so parsed_val/parsed_gi are defined)
+                if is_coord_class and is_coord_update and 'link_coord_row_id' in self.df_all.columns:
+                    linked_anchors = self.df_all[self.df_all['link_coord_row_id'] == row_id]
+                    if not linked_anchors.empty:
+                        # Reuse parsed_val/parsed_gi from earlier (already parsed at line 2526)
+                        for linked_idx in linked_anchors.index:
+                            linked_row_id = self.df_all.loc[linked_idx, 'row_id']
+                            linked_page = int(self.df_all.loc[linked_idx, 'page'])
+
+                            # Update coord_text in df_all
+                            self.df_all.loc[linked_idx, 'coord_text'] = new_text
+                            self.df_all.loc[linked_idx, 'coord_value'] = parsed_val
+                            self.df_all.loc[linked_idx, 'gi_gl'] = parsed_gi
+
+                            # Update in page_dfs
+                            if linked_page in self.page_dfs:
+                                page_row_mask = self.page_dfs[linked_page]['row_id'] == linked_row_id
+                                if page_row_mask.any():
+                                    page_row_idx = self.page_dfs[linked_page][page_row_mask].index[0]
+                                    self.page_dfs[linked_page].loc[page_row_idx, 'coord_text'] = new_text
+                                    self.page_dfs[linked_page].loc[page_row_idx, 'coord_value'] = parsed_val
+                                    self.page_dfs[linked_page].loc[page_row_idx, 'gi_gl'] = parsed_gi
+
+                            # Update tree item (signals already blocked at function start)
+                            linked_tree_item = self.row_id_to_tree_item.get(linked_row_id)
+                            if linked_tree_item:
+                                linked_tree_item.setText(1, new_text)  # coord_text in column 1
+
+                            # Update graphics label (only if on current page)
+                            if linked_page == self.current_page:
+                                linked_items = self.current_row_items.get(linked_row_id)
+                                if linked_items:
+                                    linked_row = self.df_all.loc[linked_idx]
+                                    linked_label = f"{linked_row['cls']} {linked_row.get('conf', '')}"
+                                    if pd.notna(linked_row.get('anchor_text')) and linked_row['anchor_text']:
+                                        linked_label += f" | {linked_row['anchor_text']}"
+                                    if pd.notna(linked_row.get('coord_text')) and linked_row['coord_text']:
+                                        linked_label += f" | {linked_row['coord_text']}"
+                                    if pd.notna(linked_row.get('angle')):
+                                        try:
+                                            linked_label += f" θ={float(linked_row['angle']):.1f}°"
+                                        except Exception:
+                                            pass
+
+                                    for linked_it in linked_items:
+                                        if isinstance(linked_it, QtWidgets.QGraphicsSimpleTextItem):
+                                            linked_it.setText(linked_label)
+                                            break
+
+                                    # Update linked anchor spec for persistence
+                                    linked_specs = self.all_page_row_specs.get(linked_page, {})
+                                    if linked_row_id in linked_specs:
+                                        linked_specs[linked_row_id]['label'] = linked_label
+
+                # Reverse propagation: Anchor coord_text → linked Coordinate
+                if not is_coord_class and is_coord_update and 'link_coord_row_id' in self.df_all.columns:
+                    # Get the linked coordinate row_id from this anchor
+                    anchor_mask = self.df_all['row_id'] == row_id
+                    if anchor_mask.any():
+                        link_coord_id = self.df_all.loc[anchor_mask, 'link_coord_row_id'].iloc[0]
+                        if pd.notna(link_coord_id):
+                            link_coord_id = int(link_coord_id)
+                            coord_mask = self.df_all['row_id'] == link_coord_id
+                            if coord_mask.any():
+                                coord_idx = self.df_all[coord_mask].index[0]
+                                coord_page = int(self.df_all.loc[coord_idx, 'page'])
+
+                                # Reuse parsed_val/parsed_gi (already parsed earlier)
+
+                                # Update coordinate in df_all
+                                self.df_all.loc[coord_idx, 'coord_text'] = new_text
+                                self.df_all.loc[coord_idx, 'coord_value'] = parsed_val
+                                self.df_all.loc[coord_idx, 'gi_gl'] = parsed_gi
+
+                                # Update in page_dfs
+                                if coord_page in self.page_dfs:
+                                    coord_page_mask = self.page_dfs[coord_page]['row_id'] == link_coord_id
+                                    if coord_page_mask.any():
+                                        coord_page_idx = self.page_dfs[coord_page][coord_page_mask].index[0]
+                                        self.page_dfs[coord_page].loc[coord_page_idx, 'coord_text'] = new_text
+                                        self.page_dfs[coord_page].loc[coord_page_idx, 'coord_value'] = parsed_val
+                                        self.page_dfs[coord_page].loc[coord_page_idx, 'gi_gl'] = parsed_gi
+
+                                # Update coordinate's tree item
+                                coord_tree_item = self.row_id_to_tree_item.get(link_coord_id)
+                                if coord_tree_item:
+                                    coord_tree_item.setText(0, new_text)  # coord_text in column 0 for coordinates
+
+                                # Update coordinate's graphics label (only if on current page)
+                                if coord_page == self.current_page:
+                                    coord_items = self.current_row_items.get(link_coord_id)
+                                    if coord_items:
+                                        coord_row = self.df_all.loc[coord_idx]
+                                        coord_label = f"{coord_row['cls']} {coord_row.get('conf', '')}"
+                                        if pd.notna(coord_row.get('coord_text')) and coord_row['coord_text']:
+                                            coord_label += f" | {coord_row['coord_text']}"
+                                        if pd.notna(coord_row.get('angle')):
+                                            try:
+                                                coord_label += f" θ={float(coord_row['angle']):.1f}°"
+                                            except Exception:
+                                                pass
+
+                                        for coord_it in coord_items:
+                                            if isinstance(coord_it, QtWidgets.QGraphicsSimpleTextItem):
+                                                coord_it.setText(coord_label)
+                                                break
+
+                                        # Update coordinate spec for persistence
+                                        coord_specs = self.all_page_row_specs.get(coord_page, {})
+                                        if link_coord_id in coord_specs:
+                                            coord_specs[link_coord_id]['label'] = coord_label
+
+            # Note: Removed on_tree_selection_changed() call to prevent unwanted zoom on edit
+
         except Exception as e:
-            print(f"Error in on_tree_item_changed: {e}")
+            import traceback
+            # Use locals().get() to safely access variables that might not be defined yet
+            print(f"Error in on_tree_item_changed (row_id={locals().get('row_id')}, column={column}, cls={locals().get('cls')}): {e}")
+            traceback.print_exc()
         finally:
             self.tree.blockSignals(False)
-    
+
+    def _is_vsignal_or_exempt(self, signal_name: str) -> bool:
+        """
+        Check if signal name is a V-signal or exempt pattern.
+        These signal types don't need Fahrtrichtung.
+
+        Exempt patterns:
+        - V-signals: Start with 'V' (e.g., V1, V2, VA1)
+        - Single letter + 3+ digits: e.g., A123, U456, B789
+        """
+        if not signal_name:
+            return False
+
+        name = signal_name.upper().strip()
+
+        # V-signal check
+        if name.startswith("V"):
+            return True
+
+        # Single letter + 3+ digits pattern (e.g., A123, U456)
+        if (len(name) >= 4 and
+            name[0].isalpha() and
+            name[1:].isdigit() and
+            len(name[1:]) >= 3):
+            return True
+
+        return False
+
+    def _get_gks_detections_for_page(self, page: int) -> list:
+        """
+        Get all GKS detections for a page as detection dicts.
+        Returns list of dicts with cx, cy, x1, y1, x2, y2, angle, text.
+        """
+        gks_dets = []
+
+        df_page = self.page_dfs.get(page)
+        if df_page is None:
+            return gks_dets
+
+        # Build hidden mask
+        if '_hidden' in df_page.columns:
+            not_hidden = ~df_page['_hidden'].fillna(False)
+        else:
+            not_hidden = pd.Series([True] * len(df_page), index=df_page.index)
+
+        gks_rows = df_page[
+            df_page['cls'].isin(['gks_gesteuert', 'gks_festkodiert']) &
+            not_hidden
+        ]
+
+        for _, row in gks_rows.iterrows():
+            det = {
+                'x1': row.get('ax1'),
+                'y1': row.get('ay1'),
+                'x2': row.get('ax2'),
+                'y2': row.get('ay2'),
+                'cx': row.get('xc'),
+                'cy': row.get('yc'),
+                'angle': row.get('angle', 0.0),
+                'text': row.get('anchor_text', ''),
+                'row_id': row.get('row_id'),
+            }
+            gks_dets.append(det)
+
+        return gks_dets
+
+    def _recalculate_fahrtrichtung_for_signal(self, row_id: int, new_signal_name: str) -> Optional[str]:
+        """
+        Recalculate Fahrtrichtung when signal name is changed.
+
+        3-step logic:
+        1. V-signal/exempt check: If name is V-signal or exempt pattern → clear Fahrtrichtung
+        2. Unanimous inheritance: Look for other signals with same name, inherit if ALL have same Fahrtrichtung
+        3. GKS detection: Run 4-tier GKS detection system
+
+        Returns: New Fahrtrichtung value ('A', 'B', or None)
+        """
+        print(f"\n{'='*60}")
+        print(f"FAHRTRICHTUNG RECALC: Signal name changed to '{new_signal_name}'")
+        print(f"{'='*60}")
+
+        # STEP 1: V-signal / Exempt check
+        if self._is_vsignal_or_exempt(new_signal_name):
+            print(f"Step 1: '{new_signal_name}' is V-signal or exempt → Fahrtrichtung = None")
+            return None
+
+        print(f"Step 1: '{new_signal_name}' is not exempt, continuing...")
+
+        # STEP 2: Unanimous inheritance from same-named signals
+        if self.df_all is not None:
+            # Build hidden mask (exclude hidden/merged rows)
+            if '_hidden' in self.df_all.columns:
+                not_hidden = ~self.df_all['_hidden'].fillna(False)
+            else:
+                not_hidden = pd.Series([True] * len(self.df_all), index=self.df_all.index)
+
+            # Handle NaN in anchor_text for comparison
+            anchor_upper = self.df_all['anchor_text'].fillna('').str.upper().str.strip()
+
+            # Find other signals with the same name (excluding current row and hidden rows)
+            same_name_signals = self.df_all[
+                (self.df_all['cls'] == 'signal') &
+                (anchor_upper == new_signal_name.upper().strip()) &
+                (self.df_all['row_id'] != row_id) &
+                (self.df_all['fahrtrichtung'].notna()) &
+                (self.df_all['fahrtrichtung'].isin(['A', 'B'])) &
+                not_hidden
+            ]
+
+            if not same_name_signals.empty:
+                # Get unique Fahrtrichtung values
+                unique_fahrt = same_name_signals['fahrtrichtung'].unique()
+
+                if len(unique_fahrt) == 1:
+                    # Unanimous - all same-named signals have the same Fahrtrichtung
+                    inherited_fahrt = unique_fahrt[0]
+                    print(f"Step 2: Found {len(same_name_signals)} signals with name '{new_signal_name}', all have Fahrtrichtung '{inherited_fahrt}'")
+                    print(f"→ Inheriting Fahrtrichtung = '{inherited_fahrt}'")
+                    return inherited_fahrt
+                else:
+                    # Mixed - different Fahrtrichtung values exist
+                    print(f"Step 2: Found {len(same_name_signals)} signals with name '{new_signal_name}', but Fahrtrichtung is mixed: {list(unique_fahrt)}")
+                    print(f"→ Cannot inherit, proceeding to GKS detection...")
+            else:
+                print(f"Step 2: No other signals with name '{new_signal_name}' have Fahrtrichtung set")
+
+        # STEP 3: GKS-based detection (4-tier system)
+        print(f"Step 3: Running GKS detection...")
+
+        # Get current row data
+        row_list = self.df_all[self.df_all['row_id'] == row_id]
+        if row_list.empty:
+            print(f"Error: Row {row_id} not found")
+            return None
+
+        row = row_list.iloc[0]
+        page = row.get('page')
+
+        # Build signal detection dict
+        signal_det = self._reconstruct_det_from_row(row)
+        signal_det['text'] = new_signal_name  # Use the new name
+
+        # FIX: If merged row has fahrtrichtung_signal position, use those coordinates for GKS detection
+        # This ensures recalculation uses the position where fahrtrichtung was originally detected
+        signal_positions = row.get('_signal_positions')
+        if isinstance(signal_positions, dict) and 'fahrtrichtung_signal' in signal_positions:
+            fahr_pos = signal_positions['fahrtrichtung_signal']
+            if fahr_pos.get('ax1') is not None:
+                print(f"Using fahrtrichtung_signal position for recalculation")
+                signal_det['x1'] = fahr_pos.get('ax1')
+                signal_det['y1'] = fahr_pos.get('ay1')
+                signal_det['x2'] = fahr_pos.get('ax2')
+                signal_det['y2'] = fahr_pos.get('ay2')
+                # Update center coordinates
+                if signal_det['x1'] is not None and signal_det['x2'] is not None:
+                    signal_det['cx'] = (signal_det['x1'] + signal_det['x2']) / 2
+                    signal_det['cy'] = (signal_det['y1'] + signal_det['y2']) / 2
+
+        # Get GKS detections for the page
+        gks_dets = self._get_gks_detections_for_page(page)
+
+        if not gks_dets:
+            print(f"No GKS detections on page {page}, cannot determine Fahrtrichtung")
+            return None
+
+        print(f"Found {len(gks_dets)} GKS detections on page {page}")
+
+        # TIER 1: Strict GKS detection
+        fahrtrichtung = detect_fahrtrichtung(
+            signal_det,
+            gks_dets,
+            track_skeleton=None,
+            track_bounds=None,
+            max_distance=250
+        )
+
+        if fahrtrichtung:
+            print(f"Tier 1 (strict GKS): Fahrtrichtung = '{fahrtrichtung}'")
+            return fahrtrichtung
+
+        # TIER 3: Relaxed GKS column search (skip Tier 2 track skeleton)
+        fahrtrichtung, _ = detect_fahrtrichtung_gks_relaxed(
+            signal_det,
+            gks_dets,
+            used_gks_ids=set()
+        )
+
+        if fahrtrichtung:
+            print(f"Tier 3 (relaxed GKS): Fahrtrichtung = '{fahrtrichtung}'")
+            return fahrtrichtung
+
+        # TIER 4: Nearest GKS fallback
+        fahrtrichtung, _ = detect_fahrtrichtung_gks_nearest(
+            signal_det,
+            gks_dets,
+            used_gks_ids=set()
+        )
+
+        if fahrtrichtung:
+            print(f"Tier 4 (nearest GKS): Fahrtrichtung = '{fahrtrichtung}'")
+            return fahrtrichtung
+
+        print(f"All tiers failed, Fahrtrichtung = None")
+        return None
+
+    def _merge_and_recalculate_fahrtrichtung(self, row_id: int, new_signal_name: str,
+                                              tree_item: QtWidgets.QTreeWidgetItem = None):
+        """
+        Handle signal name change with merge detection and Fahrtrichtung recalculation.
+
+        Flow:
+        1. Check for duplicate signals with same name on same page (with spatial clustering)
+        2. If duplicates exist within spatial threshold, merge them (copy data, hide duplicates)
+        3. Recalculate Fahrtrichtung for the merged signal
+        4. Update UI (tree, graphics)
+
+        Args:
+            row_id: The row_id of the signal being edited
+            new_signal_name: The new signal name
+            tree_item: The tree widget item being edited (optional, will be retrieved if not provided)
+        """
+        # Get tree_item from dictionary if not provided
+        if tree_item is None:
+            tree_item = self.row_id_to_tree_item.get(row_id)
+        print(f"\n{'='*60}")
+        print(f"MERGE + FAHRTRICHTUNG: Signal name changed to '{new_signal_name}'")
+        print(f"{'='*60}")
+
+        if self.df_all is None:
+            return
+
+        # Get the current row
+        idx_list = self.df_all.index[self.df_all['row_id'] == row_id].tolist()
+        if not idx_list:
+            print(f"Error: Row {row_id} not found")
+            return
+
+        idx = idx_list[0]
+        current_row = self.df_all.loc[idx]
+        page = current_row.get('page')
+
+        # Get current signal center
+        current_cx = current_row.get('xc') or current_row.get('cx') or (
+            (current_row.get('ax1', 0) + current_row.get('ax2', 0)) / 2
+        )
+        current_cy = current_row.get('yc') or current_row.get('cy') or (
+            (current_row.get('ay1', 0) + current_row.get('ay2', 0)) / 2
+        )
+
+        # DEBUG: Show current signal info
+        print(f"Current signal: row_id={row_id}, page={page}, name='{new_signal_name}'")
+        print(f"Current signal center: ({current_cx:.0f}, {current_cy:.0f})")
+
+        # =====================================================================
+        # STEP 1: Find duplicate signals with same name on same page
+        # =====================================================================
+        # Build hidden mask
+        if '_hidden' in self.df_all.columns:
+            not_hidden = ~self.df_all['_hidden'].fillna(False)
+            hidden_count = (~not_hidden).sum()
+            print(f"Hidden rows in df_all: {hidden_count}")
+        else:
+            not_hidden = pd.Series([True] * len(self.df_all), index=self.df_all.index)
+            print("No '_hidden' column in df_all")
+
+        # Handle NaN in anchor_text for comparison
+        anchor_upper = self.df_all['anchor_text'].fillna('').str.upper().str.strip()
+        target_name = new_signal_name.upper().strip()
+        print(f"Looking for signals with anchor_text = '{target_name}'")
+
+        # DEBUG: Show all signals on this page
+        signals_on_page = self.df_all[
+            (self.df_all['cls'] == 'signal') &
+            (self.df_all['page'] == page) &
+            not_hidden
+        ]
+        print(f"Total visible signals on page {page}: {len(signals_on_page)}")
+        for _, sig in signals_on_page.iterrows():
+            sig_name = str(sig.get('anchor_text', '')).upper().strip()
+            sig_id = sig.get('row_id')
+            match_marker = " <-- MATCH" if sig_name == target_name and sig_id != row_id else ""
+            print(f"  - row_id={sig_id}, name='{sig.get('anchor_text', '')}' -> upper='{sig_name}'{match_marker}")
+
+        all_duplicates = self.df_all[
+            (self.df_all['cls'] == 'signal') &
+            (anchor_upper == target_name) &
+            (self.df_all['page'] == page) &
+            (self.df_all['row_id'] != row_id) &
+            not_hidden
+        ]
+        print(f"Duplicates found (same name, same page, not hidden, not self): {len(all_duplicates)}")
+
+        # =====================================================================
+        # STEP 1B: Spatial clustering - only merge duplicates within threshold
+        # =====================================================================
+        # Use same default threshold as the pipeline (1500px for few signals)
+        SPATIAL_THRESHOLD = 1500  # pixels
+
+        # Filter duplicates by spatial proximity
+        nearby_duplicates = []
+        for dup_idx, dup_row in all_duplicates.iterrows():
+            dup_cx = dup_row.get('xc') or dup_row.get('cx') or (
+                (dup_row.get('ax1', 0) + dup_row.get('ax2', 0)) / 2
+            )
+            dup_cy = dup_row.get('yc') or dup_row.get('cy') or (
+                (dup_row.get('ay1', 0) + dup_row.get('ay2', 0)) / 2
+            )
+
+            # Calculate 2D Euclidean distance
+            distance = ((current_cx - dup_cx) ** 2 + (current_cy - dup_cy) ** 2) ** 0.5
+
+            if distance <= SPATIAL_THRESHOLD:
+                nearby_duplicates.append((dup_idx, dup_row, distance))
+                print(f"  Nearby duplicate: row_id={dup_row['row_id']}, distance={distance:.0f}px")
+            else:
+                print(f"  Far duplicate (skip): row_id={dup_row['row_id']}, distance={distance:.0f}px > {SPATIAL_THRESHOLD}px")
+
+        if not nearby_duplicates:
+            if all_duplicates.empty:
+                print(f"No duplicates found for '{new_signal_name}' on page {page}")
+            else:
+                print(f"Found {len(all_duplicates)} duplicate(s) but none within spatial threshold ({SPATIAL_THRESHOLD}px)")
+        else:
+            print(f"Found {len(nearby_duplicates)} nearby duplicate(s) for '{new_signal_name}' on page {page}")
+
+            # =====================================================================
+            # STEP 1C: Select best primary instance based on data quality
+            # =====================================================================
+            # Priority: Instance WITH coordinate > Instance WITHOUT coordinate
+            # Tie-breaker: Higher confidence
+
+            def _calculate_primary_score(row_data):
+                """Calculate quality score for selecting primary instance."""
+                score = 0
+                # Coordinate presence is most important (1000 points)
+                coord_val = row_data.get('coord_text')
+                if pd.notna(coord_val) and coord_val:
+                    score += 1000
+                # Confidence as tie-breaker (0-10 points)
+                score += (row_data.get('conf') or 0) * 10
+                # Fahrtrichtung is nice to have (50 points)
+                fahrt_val = row_data.get('fahrtrichtung')
+                if pd.notna(fahrt_val) and fahrt_val:
+                    score += 50
+                return score
+
+            # Calculate score for current row (the one being renamed)
+            current_score = _calculate_primary_score(current_row)
+            current_has_coord = pd.notna(current_row.get('coord_text')) and current_row.get('coord_text')
+            print(f"\nPrimary selection - Current row_id={row_id}: score={current_score}, has_coord={current_has_coord}")
+
+            # Find if any duplicate has higher score
+            best_primary_idx = idx
+            best_primary_row_id = row_id
+            best_primary_score = current_score
+            best_primary_dup_info = None  # (dup_idx, dup_row, distance) if swap needed
+
+            for dup_idx, dup_row, distance in nearby_duplicates:
+                dup_score = _calculate_primary_score(dup_row)
+                dup_row_id = int(dup_row['row_id'])
+                dup_has_coord = pd.notna(dup_row.get('coord_text')) and dup_row.get('coord_text')
+                print(f"  Duplicate row_id={dup_row_id}: score={dup_score}, has_coord={dup_has_coord}")
+
+                if dup_score > best_primary_score:
+                    best_primary_score = dup_score
+                    best_primary_idx = dup_idx
+                    best_primary_row_id = dup_row_id
+                    best_primary_dup_info = (dup_idx, dup_row, distance)
+                    print(f"    -> Better candidate for primary!")
+
+            # Check if we need to swap primary
+            swap_primary = (best_primary_dup_info is not None)
+
+            if swap_primary:
+                # =====================================================================
+                # STEP 2A: SWAP PRIMARY - Duplicate has better data
+                # =====================================================================
+                dup_idx, dup_row, distance = best_primary_dup_info
+                dup_row_id = int(dup_row['row_id'])
+                print(f"\n*** PRIMARY SWAP: row_id={dup_row_id} (score={best_primary_score}) becomes primary instead of row_id={row_id} (score={current_score})")
+
+                # 1. Update duplicate to use the new name (it becomes the primary)
+                self.df_all.loc[dup_idx, 'anchor_text'] = new_signal_name
+                print(f"  Updated duplicate's anchor_text to '{new_signal_name}'")
+
+                # 2. Copy Fahrtrichtung from current if current has better source (GKS > track)
+                SOURCE_PRIORITY = {
+                    'gks': 4, 'gks_relaxed': 3, 'gks_nearest': 2, 'gks_confirmed': 2,
+                    'track': 1, 'merged': 0, 'none': 0, '': 0,
+                }
+                dup_fahrt = dup_row.get('fahrtrichtung')
+                dup_source = dup_row.get('_fahrtrichtung_source', 'none')
+                current_fahrt = current_row.get('fahrtrichtung')
+                current_source = current_row.get('_fahrtrichtung_source', 'none')
+                if pd.isna(dup_source): dup_source = 'none'
+                if pd.isna(current_source): current_source = 'none'
+
+                dup_priority = SOURCE_PRIORITY.get(str(dup_source), 0)
+                current_priority = SOURCE_PRIORITY.get(str(current_source), 0)
+
+                if current_fahrt and (not dup_fahrt or current_priority > dup_priority):
+                    self.df_all.loc[dup_idx, 'fahrtrichtung'] = current_fahrt
+                    self.df_all.loc[dup_idx, '_fahrtrichtung_source'] = current_source
+                    print(f"  Copied Fahrtrichtung '{current_fahrt}' (source: {current_source}) from current to new primary")
+
+                # 3. Store current row's position in _signal_positions of new primary
+                signal_positions = self.df_all.loc[dup_idx, '_signal_positions'] if '_signal_positions' in self.df_all.columns else None
+                if signal_positions is None or (isinstance(signal_positions, float) and pd.isna(signal_positions)):
+                    signal_positions = {}
+                position_key = f"merged_{row_id}"
+                signal_positions[position_key] = {
+                    'ax1': current_row.get('ax1'), 'ay1': current_row.get('ay1'),
+                    'ax2': current_row.get('ax2'), 'ay2': current_row.get('ay2'),
+                    'row_id': row_id
+                }
+                self.df_all.at[dup_idx, '_signal_positions'] = signal_positions
+                print(f"  Stored current row's position in new primary's _signal_positions")
+
+                # 4. Hide current row (the one being renamed, which has no coordinate)
+                self.df_all.loc[idx, '_hidden'] = True
+                print(f"  Hidden current row_id={row_id}")
+
+                # 5. Remove current row from tree widget
+                current_tree_item = self.row_id_to_tree_item.get(row_id)
+                if current_tree_item:
+                    parent = current_tree_item.parent()
+                    if parent:
+                        parent.removeChild(current_tree_item)
+                    else:
+                        index_in_tree = self.tree.indexOfTopLevelItem(current_tree_item)
+                        if index_in_tree >= 0:
+                            self.tree.takeTopLevelItem(index_in_tree)
+                    del self.row_id_to_tree_item[row_id]
+                    print(f"  Removed current row from tree")
+
+                # 6. Remove current row from graphics
+                if row_id in self.current_row_items:
+                    graphics_items = self.current_row_items.pop(row_id, [])
+                    for item in graphics_items:
+                        if item.scene():
+                            item.scene().removeItem(item)
+                    print(f"  Removed {len(graphics_items)} graphics items from current row")
+
+                # 7. Update tree widget for new primary (duplicate)
+                dup_tree_item = self.row_id_to_tree_item.get(dup_row_id)
+                if dup_tree_item:
+                    self.tree.blockSignals(True)
+                    dup_tree_item.setText(0, new_signal_name)  # Update name column
+                    self.tree.blockSignals(False)
+                    print(f"  Updated new primary's tree item name")
+                    # Update tree_item reference for Fahrtrichtung update later
+                    tree_item = dup_tree_item
+
+                # 8. Update idx and row_id for Fahrtrichtung recalculation
+                idx = dup_idx
+                row_id = dup_row_id
+
+                # 9. Update page_dfs for both rows
+                df_page = self.page_dfs.get(page)
+                if df_page is not None:
+                    # Update new primary in page_dfs
+                    dup_page_idx_list = df_page.index[df_page['row_id'] == dup_row_id].tolist()
+                    if dup_page_idx_list:
+                        dup_page_idx = dup_page_idx_list[0]
+                        df_page.loc[dup_page_idx, 'anchor_text'] = new_signal_name
+                        if current_fahrt and (not dup_fahrt or current_priority > dup_priority):
+                            df_page.loc[dup_page_idx, 'fahrtrichtung'] = current_fahrt
+                            df_page.loc[dup_page_idx, '_fahrtrichtung_source'] = current_source
+
+                    # Hide old current in page_dfs
+                    old_page_idx_list = df_page.index[df_page['row_id'] == current_row['row_id']].tolist()
+                    if old_page_idx_list:
+                        df_page.loc[old_page_idx_list[0], '_hidden'] = True
+
+                # 10. Handle any OTHER nearby duplicates (besides the one that became primary)
+                merged_row_ids = []
+                for other_dup_idx, other_dup_row, other_distance in nearby_duplicates:
+                    other_dup_row_id = int(other_dup_row['row_id'])
+                    if other_dup_row_id == dup_row_id:
+                        continue  # Skip the one that became primary
+
+                    print(f"\nMerging other duplicate row_id={other_dup_row_id} into new primary:")
+
+                    # Store position
+                    position_key = f"merged_{other_dup_row_id}"
+                    signal_positions[position_key] = {
+                        'ax1': other_dup_row.get('ax1'), 'ay1': other_dup_row.get('ay1'),
+                        'ax2': other_dup_row.get('ax2'), 'ay2': other_dup_row.get('ay2'),
+                        'row_id': other_dup_row_id
+                    }
+                    self.df_all.at[idx, '_signal_positions'] = signal_positions
+
+                    # Hide
+                    self.df_all.loc[other_dup_idx, '_hidden'] = True
+                    merged_row_ids.append(other_dup_row_id)
+
+                    # Remove from tree
+                    other_tree_item = self.row_id_to_tree_item.get(other_dup_row_id)
+                    if other_tree_item:
+                        parent = other_tree_item.parent()
+                        if parent:
+                            parent.removeChild(other_tree_item)
+                        else:
+                            index_in_tree = self.tree.indexOfTopLevelItem(other_tree_item)
+                            if index_in_tree >= 0:
+                                self.tree.takeTopLevelItem(index_in_tree)
+                        del self.row_id_to_tree_item[other_dup_row_id]
+
+                    # Remove from graphics
+                    if other_dup_row_id in self.current_row_items:
+                        graphics_items = self.current_row_items.pop(other_dup_row_id, [])
+                        for item in graphics_items:
+                            if item.scene():
+                                item.scene().removeItem(item)
+
+                    print(f"  Hidden and removed other duplicate row_id={other_dup_row_id}")
+
+            else:
+                # =====================================================================
+                # STEP 2B: Normal merge - Current row stays as primary
+                # =====================================================================
+                print(f"\nKeeping row_id={row_id} as primary (highest score={current_score})")
+                merged_row_ids = []
+
+                for dup_idx, dup_row, distance in nearby_duplicates:
+                    dup_row_id = int(dup_row['row_id'])  # Ensure Python int, not numpy int64
+                    print(f"\nMerging duplicate row_id={dup_row_id} (distance={distance:.0f}px):")
+
+                    # Get CURRENT values from df_all (not stale current_row)
+                    current_coord_text = self.df_all.loc[idx, 'coord_text'] if 'coord_text' in self.df_all.columns else None
+                    current_fahrt = self.df_all.loc[idx, 'fahrtrichtung'] if 'fahrtrichtung' in self.df_all.columns else None
+
+                    # Copy coordinate if current doesn't have one
+                    if pd.isna(current_coord_text) or not current_coord_text:
+                        if pd.notna(dup_row.get('coord_text')) and dup_row.get('coord_text'):
+                            self.df_all.loc[idx, 'coord_text'] = dup_row['coord_text']
+                            self.df_all.loc[idx, 'coord_value'] = dup_row.get('coord_value')
+                            self.df_all.loc[idx, 'gi_gl'] = dup_row.get('gi_gl')
+                            self.df_all.loc[idx, 'link_coord_row_id'] = dup_row.get('link_coord_row_id')
+                            print(f"  Copied coordinate: '{dup_row['coord_text']}'")
+
+                            # Update tree item column 1 (coord_text)
+                            if tree_item:
+                                self.tree.blockSignals(True)
+                                tree_item.setText(1, str(dup_row['coord_text']))
+                                self.tree.blockSignals(False)
+
+                    # Copy Fahrtrichtung if current doesn't have one (prefer GKS source)
+                    if pd.isna(current_fahrt) or not current_fahrt:
+                        if pd.notna(dup_row.get('fahrtrichtung')) and dup_row.get('fahrtrichtung'):
+                            self.df_all.loc[idx, 'fahrtrichtung'] = dup_row['fahrtrichtung']
+                            self.df_all.loc[idx, '_fahrtrichtung_source'] = dup_row.get('_fahrtrichtung_source', 'merged')
+                            print(f"  Copied Fahrtrichtung: '{dup_row['fahrtrichtung']}'")
+
+                    # Store duplicate position in _signal_positions
+                    signal_positions = self.df_all.loc[idx, '_signal_positions'] if '_signal_positions' in self.df_all.columns else None
+                    if signal_positions is None or (isinstance(signal_positions, float) and pd.isna(signal_positions)):
+                        signal_positions = {}
+
+                    position_key = f"merged_{dup_row_id}"
+                    signal_positions[position_key] = {
+                        'ax1': dup_row.get('ax1'),
+                        'ay1': dup_row.get('ay1'),
+                        'ax2': dup_row.get('ax2'),
+                        'ay2': dup_row.get('ay2'),
+                        'row_id': dup_row_id
+                    }
+                    self.df_all.at[idx, '_signal_positions'] = signal_positions  # Use .at for dict values
+                    print(f"  Stored position: {position_key}")
+
+                    # Hide the duplicate row
+                    self.df_all.loc[dup_idx, '_hidden'] = True
+                    print(f"  Hidden duplicate row_id={dup_row_id}")
+                    merged_row_ids.append(dup_row_id)
+
+                    # Remove duplicate from tree widget
+                    dup_tree_item = self.row_id_to_tree_item.get(dup_row_id)
+                    if dup_tree_item:
+                        parent = dup_tree_item.parent()
+                        if parent:
+                            parent.removeChild(dup_tree_item)
+                        else:
+                            index = self.tree.indexOfTopLevelItem(dup_tree_item)
+                            if index >= 0:
+                                self.tree.takeTopLevelItem(index)
+                        del self.row_id_to_tree_item[dup_row_id]
+                        print(f"  Removed from tree")
+
+                    # Remove duplicate from graphics scene
+                    if dup_row_id in self.current_row_items:
+                        graphics_items = self.current_row_items.pop(dup_row_id, [])
+                        for item in graphics_items:
+                            if item.scene():
+                                item.scene().removeItem(item)
+                        print(f"  Removed {len(graphics_items)} graphics items")
+
+                # Update page_dfs as well (inside else block, after for loop)
+                df_page = self.page_dfs.get(page)
+                if df_page is not None:
+                    # Update current row in page_dfs
+                    page_idx_list = df_page.index[df_page['row_id'] == row_id].tolist()
+                    if page_idx_list:
+                        page_idx = page_idx_list[0]
+                        # Copy updated values from df_all
+                        # Use .at for complex objects (dicts), .loc for simple scalar values
+                        for col in ['coord_text', 'coord_value', 'gi_gl', 'link_coord_row_id',
+                                   'fahrtrichtung', '_fahrtrichtung_source']:
+                            if col in self.df_all.columns:
+                                value = self.df_all.loc[idx, col]
+                                if col not in df_page.columns:
+                                    df_page[col] = None
+                                df_page.loc[page_idx, col] = value
+                        # Handle _signal_positions separately (dict value needs .at)
+                        if '_signal_positions' in self.df_all.columns:
+                            if '_signal_positions' not in df_page.columns:
+                                df_page['_signal_positions'] = None
+                            df_page.at[page_idx, '_signal_positions'] = self.df_all.at[idx, '_signal_positions']
+
+                    # Hide merged duplicates in page_dfs
+                    for merged_row_id in merged_row_ids:
+                        dup_page_idx_list = df_page.index[df_page['row_id'] == merged_row_id].tolist()
+                        if dup_page_idx_list:
+                            df_page.loc[dup_page_idx_list[0], '_hidden'] = True
+
+        # =====================================================================
+        # STEP 3: Recalculate Fahrtrichtung
+        # =====================================================================
+        # Reload current row after merge updates
+        current_row = self.df_all.loc[idx]
+
+        new_fahrt = self._recalculate_fahrtrichtung_for_signal(row_id, new_signal_name)
+
+        # Update Fahrtrichtung in dataframes
+        self.df_all.loc[idx, 'fahrtrichtung'] = new_fahrt
+
+        df_page = self.page_dfs.get(page)
+        if df_page is not None:
+            page_idx_list = df_page.index[df_page['row_id'] == row_id].tolist()
+            if page_idx_list:
+                df_page.loc[page_idx_list[0], 'fahrtrichtung'] = new_fahrt
+
+        # Update tree widget column 2 (Fahrtrichtung)
+        fahrt_display = str(new_fahrt) if new_fahrt else ""
+        if tree_item:
+            self.tree.blockSignals(True)
+            tree_item.setText(2, fahrt_display)
+            self.tree.blockSignals(False)
+        print(f"Updated Fahrtrichtung in tree: '{fahrt_display}'")
+
+        print(f"{'='*60}\n")
+
     def on_class_selector_changed(self, class_name: str):
         """Handle class selector change"""
         self._active_class_for_threshold_setting = class_name
@@ -2126,15 +3467,15 @@ class WorkspaceWidget(QtWidgets.QWidget):
             poly_points: Actual polygon points [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] for rotated bboxes
         """
         print("=" * 80)
-        print("🚨 DEBUG: on_bbox_resized() FUNCTION WAS CALLED - YOU SHOULD SEE THIS!")
+        print(" DEBUG: on_bbox_resized() FUNCTION WAS CALLED - YOU SHOULD SEE THIS!")
         print("=" * 80)
 
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
 
         try:
-            print(f"🔄 Bbox resized for row_id {row_id}: ({x:.1f}, {y:.1f}, {w:.1f}, {h:.1f})")
+            print(f" Bbox resized for row_id {row_id}: ({x:.1f}, {y:.1f}, {w:.1f}, {h:.1f})")
             if poly_points:
-                print(f"   Polygon points: {poly_points}")
+                print(f"Polygon points: {poly_points}")
 
             # Find the row in df_all
             row_mask = self.df_all['row_id'] == row_id
@@ -2146,12 +3487,19 @@ class WorkspaceWidget(QtWidgets.QWidget):
             cls = row.get('cls')
             page = int(row.get('page', self.current_page))
 
-            print(f"   📋 Row data: cls='{cls}', page={page}, row_id={row_id}")
-            print(f"   📋 Row columns: {list(row.index)}")
-            if 'link_coord_row_id' in row.index:
-                print(f"   📋 Row link_coord_row_id value: {row.get('link_coord_row_id')}")
+            # Capture old signal name for merge detection (handle NaN properly)
+            if cls == 'signal':
+                old_anchor = row.get('anchor_text')
+                old_signal_name = str(old_anchor).strip() if pd.notna(old_anchor) else ''
+            else:
+                old_signal_name = ''
 
-            # ✅ UNDO/REDO: Collect all affected row IDs BEFORE making changes
+            print(f" Row data: cls='{cls}', page={page}, row_id={row_id}")
+            print(f" Row columns: {list(row.index)}")
+            if 'link_coord_row_id' in row.index:
+                print(f" Row link_coord_row_id value: {row.get('link_coord_row_id')}")
+
+            #  UNDO/REDO: Collect all affected row IDs BEFORE making changes
             affected_row_ids = [row_id]
 
             # If this is a coordinate, also include all linked anchors
@@ -2159,11 +3507,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 linked_anchors = self.df_all[self.df_all['link_coord_row_id'] == row_id]
                 if not linked_anchors.empty:
                     affected_row_ids.extend(linked_anchors['row_id'].tolist())
-                    print(f"   📝 Found {len(linked_anchors)} linked anchors that will be affected")
+                    print(f" Found {len(linked_anchors)} linked anchors that will be affected")
 
             # Save state for undo/redo
             self._save_state("Bbox geändert", affected_row_ids)
-            print(f"   💾 Saved state for undo/redo ({len(affected_row_ids)} rows affected)")
+            print(f" Saved state for undo/redo ({len(affected_row_ids)} rows affected)")
 
             # Update coordinates based on class
             x2, y2 = x + w, y + h
@@ -2221,13 +3569,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 # Convert to numpy array format expected by OCR functions
                 poly_array = np.array(poly_points, dtype=np.float32).flatten()  # [x1, y1, x2, y2, x3, y3, x4, y4]
                 det["poly"] = poly_array
-                print(f"   ✅ Updated poly field with new polygon points")
+                print(f"Updated poly field with new polygon points")
 
-                # ✅ CRITICAL: Save the new poly back to dataframe for undo/redo!
+                #  CRITICAL: Save the new poly back to dataframe for undo/redo!
                 self.df_all.at[row_idx, 'poly'] = poly_array
                 if page in self.page_dfs and page_mask.any():
                     self.page_dfs[page].at[page_idx, 'poly'] = poly_array
-                print(f"   ✅ Saved new poly to dataframe for undo/redo")
+                print(f"Saved new poly to dataframe for undo/redo")
 
                 # Also update obb_* fields for consistency
                 det["obb_cx"] = (x + x2) / 2
@@ -2248,8 +3596,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
             ocr_mode = 'angular' if _is_angular(normalized_angle) else 'horizontal'
 
             dist_cardinal = _dist_to_cardinal(raw_angle)
-            print(f"   📐 Angle analysis: raw={raw_angle:.2f}° norm={normalized_angle:.2f}° dist_to_cardinal={dist_cardinal:.2f}°")
-            print(f"   Detected OCR mode: {ocr_mode}")
+            print(f" Angle analysis: raw={raw_angle:.2f}° norm={normalized_angle:.2f}° dist_to_cardinal={dist_cardinal:.2f}°")
+            print(f"Detected OCR mode: {ocr_mode}")
 
             # Use class-specific OCR functions (same as Re-OCR feature)
             # These functions handle their own cropping and preprocessing
@@ -2265,27 +3613,27 @@ class WorkspaceWidget(QtWidgets.QWidget):
             if cls == "coordinate":
                 if ocr_mode == 'horizontal':
                     new_text = ocr_coordinate_horizontal(det, bgr_array, "paddleocr")
-                    print(f"   📏 Coordinate horizontal OCR: '{new_text}'")
+                    print(f" Coordinate horizontal OCR: '{new_text}'")
                 else:
                     new_text = ocr_coordinate_angular(det, bgr_array, "paddleocr")
-                    print(f"   📐 Coordinate angular OCR: '{new_text}'")
+                    print(f" Coordinate angular OCR: '{new_text}'")
             elif cls == "signal":
                 new_text = ocr_signal_name(det, bgr_array, "paddleocr")
-                print(f"   🚦 Signal OCR: '{new_text}'")
+                print(f" Signal OCR: '{new_text}'")
             elif cls in {"gks_gesteuert", "gks_festkodiert"}:
                 if ocr_mode == 'horizontal':
                     new_text = ocr_numeric_cardinal_box(det, bgr_array)
-                    print(f"   🔢 GKS cardinal OCR: '{new_text}'")
+                    print(f" GKS cardinal OCR: '{new_text}'")
                 else:
                     new_text = ocr_numeric_tilted_box(det, bgr_array)
-                    print(f"   🔢 GKS tilted OCR: '{new_text}'")
+                    print(f" GKS tilted OCR: '{new_text}'")
             elif cls == "weichen_block":
-                # ✅ Use specialized multi-line OCR for weichen_block
+                #  Use specialized multi-line OCR for weichen_block
                 new_text = ocr_weichen_block(det, bgr_array)
-                print(f"   🔀 Weichen block OCR (multi-line): '{new_text}'")
-            # ✅ NEW: Handle template-matched symbols
+                print(f" Weichen block OCR (multi-line): '{new_text}'")
+            #  NEW: Handle template-matched symbols
             elif row.get('is_new_symbol', False):
-                print(f"   🎨 Template symbol '{cls}' bbox resized - re-extracting text")
+                print(f" Template symbol '{cls}' bbox resized - re-extracting text")
 
                 # Get symbol definition to know text_position
                 try:
@@ -2325,16 +3673,16 @@ class WorkspaceWidget(QtWidgets.QWidget):
                                 from core.ocr_engine import paddleocr_recognize
                                 new_text, _ = paddleocr_recognize(text_crop)
 
-                            print(f"   🎨 Template text OCR: '{new_text}'")
+                            print(f" Template text OCR: '{new_text}'")
                         else:
                             new_text = ""  # Symbol doesn't need text
-                            print(f"   🎨 Template symbol has no text requirement")
+                            print(f" Template symbol has no text requirement")
                     else:
-                        print(f"   ⚠️ Symbol definition '{symbol_name}' not found")
+                        print(f"Symbol definition '{symbol_name}' not found")
                         new_text = ""
 
                 except Exception as e:
-                    print(f"   ⚠️ Error during template OCR: {e}")
+                    print(f"Error during template OCR: {e}")
                     import traceback
                     traceback.print_exc()
                     new_text = ""
@@ -2342,58 +3690,58 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 # NUMERIC_OK already imported at top from core.ocr_engine
                 new_text = ocr_generic_name(det, bgr_array, "paddleocr",
                                            allow_numeric=(cls in NUMERIC_OK), cls_name=cls)
-                print(f"   📝 Generic OCR ({cls}): '{new_text}'")
+                print(f" Generic OCR ({cls}): '{new_text}'")
 
-            print(f"   ✅ Final OCR result: '{new_text}'")
+            print(f"Final OCR result: '{new_text}'")
 
             # Update text in dataframe
-            print(f"   📝 Updating dataframe for cls='{cls}', row_id={row_id}")
+            print(f" Updating dataframe for cls='{cls}', row_id={row_id}")
 
             if cls == 'coordinate':
-                print(f"   ✅ This is a COORDINATE - updating coord_text and checking for linked anchors")
+                print(f"This is a COORDINATE - updating coord_text and checking for linked anchors")
                 self.df_all.loc[row_idx, 'coord_text'] = new_text
                 if page in self.page_dfs and page_mask.any():
                     self.page_dfs[page].loc[page_idx, 'coord_text'] = new_text
 
                 # Update all linked anchors with the new coordinate text
-                print(f"   🔍 Checking for link_coord_row_id column...")
-                print(f"   📊 Columns in df_all: {list(self.df_all.columns)}")
+                print(f"Checking for link_coord_row_id column...")
+                print(f"Columns in df_all: {list(self.df_all.columns)}")
 
                 if 'link_coord_row_id' in self.df_all.columns:
-                    print(f"   ✅ link_coord_row_id column EXISTS")
+                    print(f"link_coord_row_id column EXISTS")
 
                     # Show all link_coord_row_id values for debugging
                     all_links = self.df_all[self.df_all['link_coord_row_id'].notna()][['row_id', 'cls', 'link_coord_row_id', 'anchor_text', 'coord_text']]
                     if not all_links.empty:
-                        print(f"   📊 All linked rows in dataframe (total {len(all_links)}):")
+                        print(f"All linked rows in dataframe (total {len(all_links)}):")
                         for idx in all_links.index:
                             link_id = self.df_all.loc[idx, 'link_coord_row_id']
                             anchor_row_id = self.df_all.loc[idx, 'row_id']
                             anchor_cls = self.df_all.loc[idx, 'cls']
                             anchor_coord_text = self.df_all.loc[idx, 'coord_text']
-                            print(f"      - Anchor row_id={anchor_row_id} (cls={anchor_cls}) -> links to coord row_id={link_id}, current coord_text='{anchor_coord_text}'")
+                            print(f"- Anchor row_id={anchor_row_id} (cls={anchor_cls}) -> links to coord row_id={link_id}, current coord_text='{anchor_coord_text}'")
                     else:
-                        print(f"   ⚠️ NO linked rows found in entire dataframe!")
+                        print(f"NO linked rows found in entire dataframe!")
 
-                    print(f"   🔍 Searching for anchors with link_coord_row_id == {row_id}")
+                    print(f"Searching for anchors with link_coord_row_id == {row_id}")
                     linked_anchors = self.df_all[self.df_all['link_coord_row_id'] == row_id]
-                    print(f"   📊 Query returned {len(linked_anchors)} rows")
+                    print(f"Query returned {len(linked_anchors)} rows")
 
                     if len(linked_anchors) == 0:
-                        print(f"   ❌ NO LINKED ANCHORS FOUND for coordinate row_id={row_id}")
-                        print(f"   💡 This coordinate might not be linked to any anchors yet")
+                        print(f"NO LINKED ANCHORS FOUND for coordinate row_id={row_id}")
+                        print(f" This coordinate might not be linked to any anchors yet")
                     if len(linked_anchors) > 0:
-                        print(f"   📋 Linked anchor details:")
+                        print(f" Linked anchor details:")
                         for idx in linked_anchors.index:
-                            print(f"      - row_id={self.df_all.loc[idx, 'row_id']}, cls={self.df_all.loc[idx, 'cls']}, anchor_text={self.df_all.loc[idx, 'anchor_text']}")
+                            print(f"- row_id={self.df_all.loc[idx, 'row_id']}, cls={self.df_all.loc[idx, 'cls']}, anchor_text={self.df_all.loc[idx, 'anchor_text']}")
                     if not linked_anchors.empty:
-                        print(f"   📎 Found {len(linked_anchors)} linked anchors for coordinate row_id={row_id}")
+                        print(f" Found {len(linked_anchors)} linked anchors for coordinate row_id={row_id}")
                         for linked_idx in linked_anchors.index:
                             linked_row_id = self.df_all.loc[linked_idx, 'row_id']
                             linked_page = int(self.df_all.loc[linked_idx, 'page'])
                             linked_cls = self.df_all.loc[linked_idx, 'cls']
 
-                            print(f"      → Updating linked {linked_cls} row_id={linked_row_id} (page {linked_page})")
+                            print(f"→ Updating linked {linked_cls} row_id={linked_row_id} (page {linked_page})")
 
                             # Update dataframe
                             self.df_all.loc[linked_idx, 'coord_text'] = new_text
@@ -2404,7 +3752,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                                 if page_row_mask.any():
                                     page_row_idx = self.page_dfs[linked_page][page_row_mask].index[0]
                                     self.page_dfs[linked_page].loc[page_row_idx, 'coord_text'] = new_text
-                                    print(f"      ✓ Updated page_dfs for page {linked_page}")
+                                    print(f" Updated page_dfs for page {linked_page}")
 
                             # Update tree item
                             linked_tree_item = self.row_id_to_tree_item.get(linked_row_id)
@@ -2412,9 +3760,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
                                 # Debug: show current values before update
                                 current_col0 = linked_tree_item.text(0)
                                 current_col1 = linked_tree_item.text(1)
-                                print(f"      📋 BEFORE tree update:")
-                                print(f"         Column 0 (anchor_text): '{current_col0}'")
-                                print(f"         Column 1 (coord_text): '{current_col1}'")
+                                print(f" BEFORE tree update:")
+                                print(f"Column 0 (anchor_text): '{current_col0}'")
+                                print(f"Column 1 (coord_text): '{current_col1}'")
 
                                 self.tree.blockSignals(True)
                                 linked_tree_item.setText(1, new_text)  # coord_text in column 1
@@ -2422,12 +3770,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                                 # Debug: verify update
                                 after_col1 = linked_tree_item.text(1)
-                                print(f"      📋 AFTER tree update:")
-                                print(f"         Column 1 (coord_text): '{after_col1}'")
-                                print(f"      ✓ Updated tree item column 1: '{current_col1}' → '{new_text}'")
+                                print(f" AFTER tree update:")
+                                print(f"Column 1 (coord_text): '{after_col1}'")
+                                print(f" Updated tree item column 1: '{current_col1}' → '{new_text}'")
                             else:
-                                print(f"      ⚠️ No tree item found for linked_row_id={linked_row_id}")
-                                print(f"      🔍 Available tree items: {list(self.row_id_to_tree_item.keys())[:10]}...")
+                                print(f"No tree item found for linked_row_id={linked_row_id}")
+                                print(f"Available tree items: {list(self.row_id_to_tree_item.keys())[:10]}...")
 
                             # Update graphics label (only if on current page)
                             if linked_page == self.current_page:
@@ -2449,34 +3797,34 @@ class WorkspaceWidget(QtWidgets.QWidget):
                                     for linked_it in linked_items:
                                         if isinstance(linked_it, QtWidgets.QGraphicsSimpleTextItem):
                                             linked_it.setText(linked_label)
-                                            print(f"      ✓ Updated graphics label: '{linked_label}'")
+                                            print(f" Updated graphics label: '{linked_label}'")
                                             break
 
-                                    # ✅ Update linked anchor spec for persistence
+                                    #  Update linked anchor spec for persistence
                                     linked_specs = self.all_page_row_specs.get(linked_page, {})
                                     if linked_row_id in linked_specs:
                                         linked_specs[linked_row_id]['label'] = linked_label
-                                        print(f"      ✓ Updated linked anchor spec label")
+                                        print(f" Updated linked anchor spec label")
                                 else:
-                                    print(f"      ⚠️ Linked anchor not found in current_row_items")
+                                    print(f"Linked anchor not found in current_row_items")
                             else:
-                                print(f"      ℹ️ Linked anchor on different page ({linked_page} vs {self.current_page}), graphics will update when page is viewed")
+                                print(f"Linked anchor on different page ({linked_page} vs {self.current_page}), graphics will update when page is viewed")
                     else:
-                        print(f"   ℹ️ No linked anchors found for this coordinate")
+                        print(f"No linked anchors found for this coordinate")
                 else:
-                    print(f"   ⚠️ No 'link_coord_row_id' column in dataframe")
+                    print(f"No 'link_coord_row_id' column in dataframe")
 
             else:
                 # Non-coordinate classes: update anchor_text
 
-                # ✅ Special handling for weichen_block: parse FIRST, then set anchor_text to block ID only
+                #  Special handling for weichen_block: parse FIRST, then set anchor_text to block ID only
                 if cls == 'weichen_block':
-                    print(f"   🔍 DEBUG: Raw OCR text for weichen_block:")
-                    print(f"      Value: '{new_text}'")
-                    print(f"      Repr: {repr(new_text)}")
-                    print(f"      Length: {len(new_text)} chars")
-                    print(f"      Line count: {len(new_text.split(chr(10)))} lines (using \\n)")
-                    print(f"      Lines: {new_text.split(chr(10))}")
+                    print(f"DEBUG: Raw OCR text for weichen_block:")
+                    print(f"Value: '{new_text}'")
+                    print(f"Repr: {repr(new_text)}")
+                    print(f"Length: {len(new_text)} chars")
+                    print(f"Line count: {len(new_text.split(chr(10)))} lines (using \\n)")
+                    print(f"Lines: {new_text.split(chr(10))}")
 
                     from core.image_processing import parse_weichen_block
                     parsed = parse_weichen_block(new_text)
@@ -2484,12 +3832,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     weichen_coords = parsed.get('coordinates', [])
                     coord_text_combined = " | ".join(weichen_coords) if weichen_coords else None
 
-                    print(f"   🔧 Parsed weichen_block:")
-                    print(f"      Block ID: '{weichen_block_id}'")
-                    print(f"      Coordinates: {weichen_coords}")
-                    print(f"      Combined coord_text: '{coord_text_combined}'")
+                    print(f" Parsed weichen_block:")
+                    print(f"Block ID: '{weichen_block_id}'")
+                    print(f"Coordinates: {weichen_coords}")
+                    print(f"Combined coord_text: '{coord_text_combined}'")
 
-                    # ✅ Set anchor_text to ONLY the block ID (not full OCR text)
+                    #  Set anchor_text to ONLY the block ID (not full OCR text)
                     self.df_all.loc[row_idx, 'anchor_text'] = weichen_block_id
                     if page in self.page_dfs and page_mask.any():
                         self.page_dfs[page].loc[page_idx, 'anchor_text'] = weichen_block_id
@@ -2503,20 +3851,28 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     self.df_all.at[row_idx, 'weichen_coordinates'] = weichen_coords
                     if page in self.page_dfs and page_mask.any():
                         self.page_dfs[page].at[page_idx, 'weichen_coordinates'] = weichen_coords
-                # ✅ NEW: Template symbols use 'text' field, not 'anchor_text'
+                #  NEW: Template symbols use 'text' field, not 'anchor_text'
                 elif row.get('is_new_symbol', False):
-                    print(f"   🎨 Updating template symbol text field")
+                    print(f" Updating template symbol text field")
                     # Template symbols store text in 'text' field
                     text_field = 'text' if 'text' in self.df_all.columns else 'anchor_text'
                     self.df_all.loc[row_idx, text_field] = new_text
                     if page in self.page_dfs and page_mask.any():
                         self.page_dfs[page].loc[page_idx, text_field] = new_text
-                    print(f"   🎨 Updated {text_field} to '{new_text}'")
+                    print(f" Updated {text_field} to '{new_text}'")
                 else:
                     # Other non-coordinate classes: update anchor_text normally
                     self.df_all.loc[row_idx, 'anchor_text'] = new_text
                     if page in self.page_dfs and page_mask.any():
                         self.page_dfs[page].loc[page_idx, 'anchor_text'] = new_text
+
+            # SIGNAL MERGE + FAHRTRICHTUNG: Trigger when signal name changes via bbox resize OCR
+            if cls == 'signal':
+                new_signal_name = str(new_text).strip()
+                if new_signal_name and new_signal_name.upper() != old_signal_name.upper():
+                    print(f"\n Signal name changed via bbox resize: '{old_signal_name}' → '{new_signal_name}'")
+                    print(f" Triggering merge + Fahrtrichtung recalculation...")
+                    self._merge_and_recalculate_fahrtrichtung(row_id, new_signal_name)
 
             # Update tree widget for this item
             item = self.row_id_to_tree_item.get(row_id)
@@ -2532,8 +3888,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     updated_coord_text = updated_coord_text if pd.notna(updated_coord_text) else ''
                     item.setText(0, updated_anchor_text)  # Block ID in column 0
                     item.setText(1, updated_coord_text)   # Coordinates in column 1
-                    print(f"   🌳 Updated tree column 0 (anchor_text): '{updated_anchor_text}'")
-                    print(f"   🌳 Updated tree column 1 (coord_text): '{updated_coord_text}'")
+                    print(f" Updated tree column 0 (anchor_text): '{updated_anchor_text}'")
+                    print(f" Updated tree column 1 (coord_text): '{updated_coord_text}'")
                 else:
                     item.setText(0, new_text)  # anchor_text goes in column 0 for other non-coordinates
 
@@ -2561,16 +3917,16 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 for it in items:
                     if isinstance(it, QtWidgets.QGraphicsSimpleTextItem):
                         it.setText(label)
-                        print(f"   🏷️  Updated label to: '{label}'")
+                        print(f"Updated label to: '{label}'")
                         break
 
-                # ✅ Also update the spec so label persists on page re-render
+                #  Also update the spec so label persists on page re-render
                 specs = self.all_page_row_specs.get(page, {})
                 if row_id in specs:
                     specs[row_id]['label'] = label
-                    print(f"   📝 Updated spec label for persistence")
+                    print(f" Updated spec label for persistence")
 
-            # ✅ FIX: Deselect the graphics item to hide resize handles and return to normal appearance
+            #  FIX: Deselect the graphics item to hide resize handles and return to normal appearance
             items = self.current_row_items.get(row_id)
             if items:
                 for it in items:
@@ -2578,9 +3934,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     # This triggers itemChange() which hides the resize handles
                     if hasattr(it, 'setSelected'):
                         it.setSelected(False)
-                        print(f"   🔧 Deselected graphics item for row_id {row_id}")
+                        print(f" Deselected graphics item for row_id {row_id}")
 
-            self._set_status(f"✓ Bbox aktualisiert & OCR ({ocr_mode}) durchgeführt: '{new_text}'")
+            self._set_status(f" Bbox aktualisiert & OCR ({ocr_mode}) durchgeführt: '{new_text}'")
 
         except Exception as e:
             import traceback
@@ -2602,13 +3958,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
             x, y, w, h: New OCR region bounding box coordinates
         """
         print("=" * 80)
-        print("🔷 OCR REGION RESIZED - Showing adjustment dialog")
+        print(" OCR REGION RESIZED - Showing adjustment dialog")
         print("=" * 80)
 
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
 
         try:
-            print(f"🔄 OCR region resized for row_id {row_id}: ({x:.1f}, {y:.1f}, {w:.1f}, {h:.1f})")
+            print(f" OCR region resized for row_id {row_id}: ({x:.1f}, {y:.1f}, {w:.1f}, {h:.1f})")
 
             # Find the row in df_all
             row_mask = self.df_all['row_id'] == row_id
@@ -2642,9 +3998,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
             width_delta = delta_x2 - delta_x1  # Difference between right and left edge movements
             height_delta = delta_y2 - delta_y1
 
-            print(f"   📋 Row data: cls='{cls}', page={page}, row_id={row_id}")
-            print(f"   📏 Edge deltas: x1={delta_x1:+d}, y1={delta_y1:+d}, x2={delta_x2:+d}, y2={delta_y2:+d}")
-            print(f"   📏 Display: offset=({offset_x:+d}, {offset_y:+d}), size_delta=({width_delta:+d}, {height_delta:+d})")
+            print(f" Row data: cls='{cls}', page={page}, row_id={row_id}")
+            print(f" Edge deltas: x1={delta_x1:+d}, y1={delta_y1:+d}, x2={delta_x2:+d}, y2={delta_y2:+d}")
+            print(f" Display: offset=({offset_x:+d}, {offset_y:+d}), size_delta=({width_delta:+d}, {height_delta:+d})")
 
             # Get BGR array for current page
             bgr_array = self.page_bgr_arrays.get(page)
@@ -2673,7 +4029,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
             # Run OCR on new region
             new_text, ocr_confidence = paddleocr_recognize(pil_new_crop)
-            print(f"   ✅ New OCR result: '{new_text}' (conf={ocr_confidence:.3f})")
+            print(f"New OCR result: '{new_text}' (conf={ocr_confidence:.3f})")
 
             # Get old crop for preview (if available)
             old_crop_rgb = None
@@ -2703,7 +4059,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                 apply_to_current, apply_to_all_in_plan, save_to_template = dialog.get_options()
 
-                print(f"   📝 User choices: current={apply_to_current}, all_in_plan={apply_to_all_in_plan}, "
+                print(f" User choices: current={apply_to_current}, all_in_plan={apply_to_all_in_plan}, "
                       f"save_to_template={save_to_template}")
 
                 # Determine which row_ids to update
@@ -2713,11 +4069,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     # Find all instances of this symbol class
                     same_class_mask = self.df_all['cls'] == cls
                     row_ids_to_update = self.df_all[same_class_mask]['row_id'].tolist()
-                    print(f"   📊 Applying to {len(row_ids_to_update)} instances of '{cls}'")
+                    print(f"Applying to {len(row_ids_to_update)} instances of '{cls}'")
 
                 # Save state for undo/redo
-                print(f"   💾 Saving state before OCR adjustment:")
-                print(f"      Row {row_id}: ocr_x1={old_ocr_x1}, ocr_y1={old_ocr_y1}, ocr_x2={old_ocr_x2}, ocr_y2={old_ocr_y2}")
+                print(f" Saving state before OCR adjustment:")
+                print(f"Row {row_id}: ocr_x1={old_ocr_x1}, ocr_y1={old_ocr_y1}, ocr_x2={old_ocr_x2}, ocr_y2={old_ocr_y2}")
                 self._save_state("OCR-Region geändert", row_ids_to_update)
 
                 # Apply adjustment to selected rows (using edge-specific deltas)
@@ -2782,20 +4138,20 @@ class WorkspaceWidget(QtWidgets.QWidget):
                                 current_dx, current_dy, current_width, current_height, sym_angle
                             )
 
-                            print(f"   🔄 Rotation transform: angle={sym_angle:.1f}°")
-                            print(f"      Current frame: dx={current_dx}, dy={current_dy}, w={current_width}, h={current_height}")
-                            print(f"      Template (0°): dx={absolute_dx}, dy={absolute_dy}, w={final_width}, h={final_height}")
+                            print(f" Rotation transform: angle={sym_angle:.1f}°")
+                            print(f"Current frame: dx={current_dx}, dy={current_dy}, w={current_width}, h={current_height}")
+                            print(f"Template (0°): dx={absolute_dx}, dy={absolute_dy}, w={final_width}, h={final_height}")
 
-                            print(f"   💾 Saving to template: dx={absolute_dx}, dy={absolute_dy}, "
+                            print(f" Saving to template: dx={absolute_dx}, dy={absolute_dy}, "
                                   f"width={final_width}, height={final_height}")
 
                             self._save_ocr_adjustment_to_template(
                                 cls, absolute_dx, absolute_dy, final_width, final_height
                             )
                         else:
-                            print(f"   ⚠️ Cannot save to template: No OCR region data")
+                            print(f"Cannot save to template: No OCR region data")
                     else:
-                        print(f"   ⚠️ Cannot save to template: Reference row not found")
+                        print(f"Cannot save to template: Reference row not found")
 
                 # Check if we should show auto-learning suggestion
                 # TODO: Auto-learning needs redesign to work with absolute offsets
@@ -2803,11 +4159,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 # if self.ocr_adjustment_tracker.should_show_suggestion(cls):
                 #     self._show_auto_learning_suggestion(cls)
 
-                self._set_status(f"✓ OCR-Region aktualisiert für {len(row_ids_to_update)} Instanz(en)")
-                print(f"   ✅ OCR region resize complete!")
+                self._set_status(f" OCR-Region aktualisiert für {len(row_ids_to_update)} Instanz(en)")
+                print(f"OCR region resize complete!")
 
             else:
-                print("   ❌ User cancelled adjustment")
+                print(f"User cancelled adjustment")
                 # Revert the visual change (reload the page)
                 self._refresh_page_graphics()
 
@@ -2874,11 +4230,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 # --- ADD THIS (logic for different messages) ---
                 if mode == 'angular':
                     self._set_status(
-                        "📐 Manuelles OCR (Angular): 1. Zelle auswählen. 2. Klicken Sie Start- & Endpunkt der Text-Basislinie. 3. Klicken Sie ein drittes Mal, um die Höhe festzulegen."
+                        " Manuelles OCR (Angular): 1. Zelle auswählen. 2. Klicken Sie Start- & Endpunkt der Text-Basislinie. 3. Klicken Sie ein drittes Mal, um die Höhe festzulegen."
                     )
                 else:
                     self._set_status(
-                        "📏 Manuelles OCR (Horizontal): 1. Zelle in Tabelle auswählen. 2. Ziehen Sie ein horizontales Rechteck auf dem Bild."
+                        " Manuelles OCR (Horizontal): 1. Zelle in Tabelle auswählen. 2. Ziehen Sie ein horizontales Rechteck auf dem Bild."
                     )
                 # --- END ADD ---
 
@@ -3235,15 +4591,15 @@ class WorkspaceWidget(QtWidgets.QWidget):
             return
         self._save_state("Koordinate verknüpft", [anchor_row_id])
 
-        # ✅ FIX: Ensure link_coord_row_id column exists
+        #  FIX: Ensure link_coord_row_id column exists
         if 'link_coord_row_id' not in self.df_all.columns:
-            print(f"   🔧 Creating link_coord_row_id column in df_all")
+            print(f" Creating link_coord_row_id column in df_all")
             self.df_all['link_coord_row_id'] = None
 
         anchor_idx_list = self.df_all.index[self.df_all['row_id'] == anchor_row_id].tolist()
         if anchor_idx_list:
             idx = anchor_idx_list[0]
-            # ✅ FIX: Store the coordinate row_id to track the link
+            #  FIX: Store the coordinate row_id to track the link
             self.df_all.at[idx, 'link_coord_row_id'] = coord_row_id
             self.df_all.at[idx, 'coord_text'] = coord_text
             self.df_all.at[idx, 'coord_value'] = coord_value
@@ -3252,18 +4608,18 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.df_all.at[idx, 'cy1'] = cy1
             self.df_all.at[idx, 'cx2'] = cx2
             self.df_all.at[idx, 'cy2'] = cy2
-            print(f"   ✅ Linked anchor row_id={anchor_row_id} to coordinate row_id={coord_row_id}")
+            print(f"Linked anchor row_id={anchor_row_id} to coordinate row_id={coord_row_id}")
         
         df_page = self.page_dfs.get(self.current_page)
         if df_page is not None:
-            # ✅ FIX: Ensure link_coord_row_id column exists in page_dfs too
+            #  FIX: Ensure link_coord_row_id column exists in page_dfs too
             if 'link_coord_row_id' not in df_page.columns:
                 df_page['link_coord_row_id'] = None
 
             page_idx_list = df_page.index[df_page['row_id'] == anchor_row_id].tolist()
             if page_idx_list:
                 idx_p = page_idx_list[0]
-                # ✅ FIX: Store the link in page_dfs too
+                #  FIX: Store the link in page_dfs too
                 df_page.at[idx_p, 'link_coord_row_id'] = coord_row_id
                 df_page.at[idx_p, 'coord_text'] = coord_text
                 df_page.at[idx_p, 'coord_value'] = coord_value
@@ -3277,7 +4633,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         if anchor_tree_item:
             anchor_tree_item.setText(1, coord_text)
 
-        # ✅ OPTIMIZED: Only update the single affected row (not full page rebuild)
+        #  OPTIMIZED: Only update the single affected row (not full page rebuild)
         self._update_single_row_overlay(anchor_row_id)
     
     def _refresh_page_graphics(self):
@@ -3300,7 +4656,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         Args:
             row_id: The row ID to update
         """
-        print(f"  🔄 Incremental update for row {row_id}")
+        print(f"   Incremental update for row {row_id}")
 
         # 1. Remove existing overlay items for this row
         if row_id in self.current_row_items:
@@ -3308,7 +4664,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             for item in items:
                 if item and item.scene():
                     self.scene.removeItem(item)
-            print(f"     Removed {len(items)} old overlay items")
+            print(f"Removed {len(items)} old overlay items")
 
         # 2. Rebuild spec for this single row
         df_page = self.page_dfs.get(self.current_page)
@@ -3317,7 +4673,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
         row_data = df_page[df_page['row_id'] == row_id]
         if row_data.empty:
-            print(f"     ⚠️ Row {row_id} not found in page_dfs")
+            print(f"Row {row_id} not found in page_dfs")
             return
 
         row = row_data.iloc[0]
@@ -3382,7 +4738,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         specs = {row_id: spec}
         self._add_overlays_for_rows(self.current_page, {row_id}, specs)
 
-        print(f"     ✅ Overlay updated with label: {label[:50]}...")
+        print(f"Overlay updated with label: {label[:50]}...")
 
     def on_export_excel(self):
         """Export to Excel with advanced user configuration"""
@@ -3772,7 +5128,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         # Clear redo stack (new action invalidates redo history)
         self.redo_stack.clear()
         
-        self._set_status(f"💾 {action_name} - Rückgängig: Strg+Z")
+        self._set_status(f" {action_name} - Rückgängig: Strg+Z")
         
         # Update button states
         if hasattr(self, '_update_undo_redo_buttons'):
@@ -3781,11 +5137,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
     def undo(self):
         """Undo last action"""
 
-        print(f"🔵 UNDO called - Stack size: {len(self.undo_stack)}")
+        print(f"UNDO called - Stack size: {len(self.undo_stack)}")
 
         if not self.undo_stack:
-            self._set_status("⚠️ Nichts rückgängig zu machen")
-            print(f"   ⚠️ Undo stack is empty!")
+            self._set_status(" Nichts rückgängig zu machen")
+            print(f"Undo stack is empty!")
             QtWidgets.QMessageBox.information(
                 self,
                 "Rückgängig",
@@ -3798,14 +5154,14 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
         try:
             state = self.undo_stack.pop()
-            print(f"🔵 Undoing action: {state['action']}")
-            print(f"🔵 State contains {len(state['rows'])} rows")
-            print(f"🔵 Row IDs in state: {list(state['rows'].keys())}")
+            print(f"Undoing action: {state['action']}")
+            print(f"State contains {len(state['rows'])} rows")
+            print(f"Row IDs in state: {list(state['rows'].keys())}")
             
             is_deletion = state.get('is_deletion', False)
             
             if is_deletion:
-                print(f"🔵 Restoring {len(state['rows'])} deleted rows")
+                print(f"Restoring {len(state['rows'])} deleted rows")
                 
                 redo_state = {
                     'action': f"Redo: {state['action']}",
@@ -3819,7 +5175,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 row_ids_to_restore = []
                 
                 for row_id, row_dict in state['rows'].items():
-                    print(f"  📌 Restoring row {row_id}: cls={row_dict.get('cls')}, page={row_dict.get('page')}")
+                    print(f"   Restoring row {row_id}: cls={row_dict.get('cls')}, page={row_dict.get('page')}")
                     
                     row_ids_to_restore.append(row_id)
                     
@@ -3834,60 +5190,64 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     rows_to_add.append(restored_dict)
                 
                 if rows_to_add:
-                    print(f"  ✅ Adding {len(rows_to_add)} rows back to df_all")
+                    print(f"  Adding {len(rows_to_add)} rows back to df_all")
                     
                     # Remove duplicates FIRST
-                    print(f"  🧹 Removing any existing duplicates of row_ids: {row_ids_to_restore}")
+                    print(f"   Removing any existing duplicates of row_ids: {row_ids_to_restore}")
                     self.df_all = self.df_all[~self.df_all['row_id'].isin(row_ids_to_restore)]
-                    print(f"  📊 df_all after cleanup: {len(self.df_all)} rows")
+                    print(f"  df_all after cleanup: {len(self.df_all)} rows")
                     
                     # Add rows back
                     new_rows_df = pd.DataFrame(rows_to_add)
                     self.df_all = pd.concat([self.df_all, new_rows_df], ignore_index=True)
                     
-                    print(f"  📊 df_all after restore: {len(self.df_all)} rows")
+                    print(f"  df_all after restore: {len(self.df_all)} rows")
                     
                     # Verify no duplicates
                     duplicate_check = self.df_all['row_id'].duplicated().sum()
                     if duplicate_check > 0:
-                        print(f"  ⚠️ WARNING: {duplicate_check} duplicate row_ids found!")
+                        print(f"WARNING: {duplicate_check} duplicate row_ids found!")
                         self.df_all = self.df_all.drop_duplicates(subset='row_id', keep='last')
-                        print(f"  🧹 After deduplication: {len(self.df_all)} rows")
+                        print(f"   After deduplication: {len(self.df_all)} rows")
                     
-                    # ✅ FIX: Rebuild page_dfs for ALL pages that were affected
+                    #  FIX: Rebuild page_dfs for ALL pages that were affected
                     affected_pages = set(row_dict.get('page') for row_dict in state['rows'].values())
-                    print(f"  🔄 Rebuilding page_dfs for affected pages: {affected_pages}")
+                    print(f"   Rebuilding page_dfs for affected pages: {affected_pages}")
                     
                     for page_num in affected_pages:
                         if page_num is not None:
                             page_num_int = int(page_num)
                             self.page_dfs[page_num_int] = self.df_all[self.df_all['page'] == page_num].copy()
-                            print(f"    Page {page_num_int}: {len(self.page_dfs[page_num_int])} rows")
+                            print(f"Page {page_num_int}: {len(self.page_dfs[page_num_int])} rows")
                     
-                    # ✅ FIX: Rebuild row specs for affected pages ONLY
-                    print(f"  🔄 Rebuilding row specs for affected pages...")
+                    #  FIX: Rebuild row specs for affected pages ONLY
+                    print(f"   Rebuilding row specs for affected pages...")
                     for page_num in affected_pages:
                         if page_num is not None:
                             page_num_int = int(page_num)
                             self._rebuild_row_specs_for_page(page_num_int)
                     
-                    # ✅ FIX: Only refresh if current page was affected
+                    #  FIX: Only refresh if current page was affected
                     if self.current_page in affected_pages:
-                        print(f"  🔄 Refreshing current page {self.current_page}...")
-                        # Force full graphics rebuild
-                        self.scene.clear()
-                        _, _, _, _, bg = self._get_theme_colors()
-                        self.scene.setBackgroundBrush(QtGui.QBrush(bg))
-                        self.scene.addPixmap(self.page_base_pix[self.current_page])
-                        self.scene.setSceneRect(QtCore.QRectF(self.page_base_pix[self.current_page].rect()))
-                        self._create_items_for_page(self.current_page)
-                        self._populate_tree(self.current_page)
+                        print(f"   Refreshing current page {self.current_page}...")
+                        # Guard against missing page pixmap
+                        if self.current_page not in self.page_base_pix:
+                            print(f"WARNING: page_base_pix missing for page {self.current_page}, skipping graphics refresh")
+                        else:
+                            # Force full graphics rebuild
+                            self.scene.clear()
+                            _, _, _, _, bg = self._get_theme_colors()
+                            self.scene.setBackgroundBrush(QtGui.QBrush(bg))
+                            self.scene.addPixmap(self.page_base_pix[self.current_page])
+                            self.scene.setSceneRect(QtCore.QRectF(self.page_base_pix[self.current_page].rect()))
+                            self._create_items_for_page(self.current_page)
+                            self._populate_tree(self.current_page)
 
-                    print(f"  ✅ Deletion undo complete!")
+                    print(f"  Deletion undo complete!")
             
             else:
                 # Normal undo (edit) - restore previous values
-                print(f"🔵 Restoring previous state for {len(state['rows'])} rows")
+                print(f"Restoring previous state for {len(state['rows'])} rows")
 
                 # Save current state to redo stack BEFORE restoring
                 redo_state = {
@@ -3941,19 +5301,19 @@ class WorkspaceWidget(QtWidgets.QWidget):
                             ocr_y1 = old_row_dict.get('ocr_y1')
                             ocr_x2 = old_row_dict.get('ocr_x2')
                             ocr_y2 = old_row_dict.get('ocr_y2')
-                            print(f"  🔙 Restoring row {row_id} ({cls}):")
-                            print(f"      OCR region: ocr_x1={ocr_x1}, ocr_y1={ocr_y1}, ocr_x2={ocr_x2}, ocr_y2={ocr_y2}")
+                            print(f"   Restoring row {row_id} ({cls}):")
+                            print(f"OCR region: ocr_x1={ocr_x1}, ocr_y1={ocr_y1}, ocr_x2={ocr_x2}, ocr_y2={ocr_y2}")
                             if cls == 'coordinate':
-                                print(f"      Coords: cx1={old_row_dict.get('cx1')}, cy1={old_row_dict.get('cy1')}, cx2={old_row_dict.get('cx2')}, cy2={old_row_dict.get('cy2')}")
+                                print(f"Coords: cx1={old_row_dict.get('cx1')}, cy1={old_row_dict.get('cy1')}, cx2={old_row_dict.get('cx2')}, cy2={old_row_dict.get('cy2')}")
                             else:
-                                print(f"      Anchor: ax1={old_row_dict.get('ax1')}, ay1={old_row_dict.get('ay1')}, ax2={old_row_dict.get('ax2')}, ay2={old_row_dict.get('ay2')}")
+                                print(f"Anchor: ax1={old_row_dict.get('ax1')}, ay1={old_row_dict.get('ay1')}, ax2={old_row_dict.get('ax2')}, ay2={old_row_dict.get('ay2')}")
 
                 self.redo_stack.append(redo_state)
 
                 # Rebuild page_dfs for affected pages
                 for page_num in affected_pages:
                     self.page_dfs[page_num] = self.df_all[self.df_all['page'] == page_num].copy()
-                    print(f"  🔄 Rebuilt page_dfs for page {page_num}")
+                    print(f"   Rebuilt page_dfs for page {page_num}")
 
                     # Debug: Verify coordinates in page_dfs
                     for row_id in state['rows'].keys():
@@ -3961,26 +5321,26 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         if not row_in_page.empty:
                             r = row_in_page.iloc[0]
                             if r['cls'] == 'coordinate':
-                                print(f"     Page_dfs row {row_id}: cx1={r.get('cx1')}, cy1={r.get('cy1')}, cx2={r.get('cx2')}, cy2={r.get('cy2')}")
+                                print(f"Page_dfs row {row_id}: cx1={r.get('cx1')}, cy1={r.get('cy1')}, cx2={r.get('cx2')}, cy2={r.get('cy2')}")
                             else:
-                                print(f"     Page_dfs row {row_id}: ax1={r.get('ax1')}, ay1={r.get('ay1')}, ax2={r.get('ax2')}, ay2={r.get('ay2')}")
+                                print(f"Page_dfs row {row_id}: ax1={r.get('ax1')}, ay1={r.get('ay1')}, ax2={r.get('ax2')}, ay2={r.get('ay2')}")
 
                 # Rebuild row specs for affected pages
                 for page_num in affected_pages:
                     self._rebuild_row_specs_for_page(page_num)
-                    print(f"  🔄 Rebuilt row specs for page {page_num}")
+                    print(f"   Rebuilt row specs for page {page_num}")
 
                     # Debug: Show specs
                     for row_id in state['rows'].keys():
                         if row_id in self.all_page_row_specs.get(page_num, {}):
                             spec = self.all_page_row_specs[page_num][row_id]
-                            print(f"     Spec for row {row_id}: {spec}")
+                            print(f"Spec for row {row_id}: {spec}")
 
                 # Refresh display if current page affected
                 if self.current_page in affected_pages:
-                    print(f"  🔄 Refreshing current page {self.current_page}")
+                    print(f"   Refreshing current page {self.current_page}")
 
-                    # ✅ OPTIMIZATION: Only update affected items instead of full rebuild
+                    #  OPTIMIZATION: Only update affected items instead of full rebuild
                     # This is much faster than clearing the entire scene
                     affected_on_current_page = [rid for rid in state['rows'].keys()
                                                 if rid in self.all_page_row_specs.get(self.current_page, {})]
@@ -3988,7 +5348,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     use_incremental = len(affected_on_current_page) < 50
 
                     if use_incremental:
-                        print(f"     Using incremental update for {len(affected_on_current_page)} items")
+                        print(f"Using incremental update for {len(affected_on_current_page)} items")
 
                         try:
                             # Remove only affected items
@@ -4022,33 +5382,36 @@ class WorkspaceWidget(QtWidgets.QWidget):
                                             tree_item.setText(1, str(r.get('coord_text', '')))
                                         self.tree.blockSignals(False)
 
-                            print(f"     ✅ Incremental update complete")
+                            print(f"Incremental update complete")
 
                         except Exception as e:
                             # Fallback to full rebuild if anything goes wrong
-                            print(f"     ⚠️ Incremental update failed: {e}")
-                            print(f"     ⚠️ Falling back to full rebuild")
+                            print(f"Incremental update failed: {e}")
+                            print(f"Falling back to full rebuild")
                             use_incremental = False
 
                     if not use_incremental:
                         # Many items affected or incremental failed - do full rebuild
-                        print(f"     Using full rebuild for {len(affected_on_current_page)} items")
-                        self.scene.clear()
-                        _, _, _, _, bg = self._get_theme_colors()
-                        self.scene.setBackgroundBrush(QtGui.QBrush(bg))
-                        self.scene.addPixmap(self.page_base_pix[self.current_page])
-                        self.scene.setSceneRect(QtCore.QRectF(self.page_base_pix[self.current_page].rect()))
-                        self._create_items_for_page(self.current_page)
-                        self._populate_tree(self.current_page)
-                        print(f"     ✅ Full rebuild complete")
+                        print(f"Using full rebuild for {len(affected_on_current_page)} items")
+                        if self.current_page not in self.page_base_pix:
+                            print(f"WARNING: page_base_pix missing for page {self.current_page}, skipping graphics refresh")
+                        else:
+                            self.scene.clear()
+                            _, _, _, _, bg = self._get_theme_colors()
+                            self.scene.setBackgroundBrush(QtGui.QBrush(bg))
+                            self.scene.addPixmap(self.page_base_pix[self.current_page])
+                            self.scene.setSceneRect(QtCore.QRectF(self.page_base_pix[self.current_page].rect()))
+                            self._create_items_for_page(self.current_page)
+                            self._populate_tree(self.current_page)
+                            print(f"Full rebuild complete")
 
-                print(f"  ✅ Edit undo complete!")
+                print(f"  Edit undo complete!")
 
             self._set_status(f"↶ Rückgängig: {state['action']} - Wiederholen: Strg+Y")
             self._update_undo_redo_buttons()
 
         except Exception as e:
-            print(f"❌ ERROR during undo: {e}")
+            print(f"ERROR during undo: {e}")
             import traceback
             traceback.print_exc()
             QtWidgets.QMessageBox.critical(self, "Undo Error", f"Error during undo: {str(e)}")
@@ -4059,7 +5422,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
     def redo(self):
         """Redo last undone action"""        
         if not self.redo_stack:
-            self._set_status("⚠️ Nichts wiederherzustellen")
+            self._set_status(" Nichts wiederherzustellen")
             QtWidgets.QMessageBox.information(
                 self,
                 "Wiederholen",
@@ -4067,21 +5430,21 @@ class WorkspaceWidget(QtWidgets.QWidget):
             )
             return
         
-        # ✅ SET FLAG TO PREVENT STATE SAVING
+        #  SET FLAG TO PREVENT STATE SAVING
         self._is_undoing_or_redoing = True
         self.cancel_pending_ocr_resize()
 
         try:
             # Pop from redo stack
             state = self.redo_stack.pop()
-            print(f"🔵 Redoing action: {state['action']}")
+            print(f"Redoing action: {state['action']}")
             
             is_deletion = state.get('is_deletion', False)
             
             if is_deletion:
-                # ✅ RE-DELETE ROWS
+                #  RE-DELETE ROWS
                 row_ids_to_delete = list(state['rows'].keys())
-                print(f"🔵 Re-deleting {len(row_ids_to_delete)} rows: {row_ids_to_delete}")
+                print(f"Re-deleting {len(row_ids_to_delete)} rows: {row_ids_to_delete}")
                 
                 # Save to undo stack
                 undo_state = {
@@ -4163,17 +5526,20 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     self.all_page_row_specs[pidx] = specs
 
                 # Refresh display - force full rebuild
-                print(f"  🔄 Forcing full graphics rebuild for deletion redo")
-                self.scene.clear()
-                _, _, _, _, bg = self._get_theme_colors()
-                self.scene.setBackgroundBrush(QtGui.QBrush(bg))
-                self.scene.addPixmap(self.page_base_pix[self.current_page])
-                self.scene.setSceneRect(QtCore.QRectF(self.page_base_pix[self.current_page].rect()))
-                self._create_items_for_page(self.current_page)
-                self._populate_tree(self.current_page)
+                print(f"   Forcing full graphics rebuild for deletion redo")
+                if self.current_page not in self.page_base_pix:
+                    print(f"WARNING: page_base_pix missing for page {self.current_page}, skipping graphics refresh")
+                else:
+                    self.scene.clear()
+                    _, _, _, _, bg = self._get_theme_colors()
+                    self.scene.setBackgroundBrush(QtGui.QBrush(bg))
+                    self.scene.addPixmap(self.page_base_pix[self.current_page])
+                    self.scene.setSceneRect(QtCore.QRectF(self.page_base_pix[self.current_page].rect()))
+                    self._create_items_for_page(self.current_page)
+                    self._populate_tree(self.current_page)
 
             else:
-                # ✅ NORMAL REDO (EDIT)
+                #  NORMAL REDO (EDIT)
                 # Save current state to undo stack
                 undo_state = {
                     'action': state['action'].replace('Redo: ', ''),
@@ -4226,7 +5592,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                                 self.df_all.at[idx, col] = value
                             except Exception as e:
-                                print(f"⚠️ Could not restore column '{col}': {e}")
+                                print(f" Could not restore column '{col}': {e}")
 
                         page = int(row_dict.get('page', self.current_page))
                         affected_pages.add(page)
@@ -4234,12 +5600,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 # Rebuild page_dfs for all affected pages (like undo does)
                 for page_num in affected_pages:
                     self.page_dfs[page_num] = self.df_all[self.df_all['page'] == page_num].copy()
-                    print(f"  🔄 Rebuilt page_dfs for page {page_num}")
+                    print(f"   Rebuilt page_dfs for page {page_num}")
 
                 # Rebuild row specs for affected pages
                 for page_num in affected_pages:
                     self._rebuild_row_specs_for_page(page_num)
-                    print(f"  🔄 Rebuilt row specs for page {page_num}")
+                    print(f"   Rebuilt row specs for page {page_num}")
 
                 # Update tree widget
                 for row_id, row_dict in state['rows'].items():
@@ -4254,7 +5620,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         else:
                             tree_item.setText(0, str(row_dict.get('anchor_text', '')))
                             tree_item.setText(1, str(row_dict.get('coord_text', '')))
-                            
+
                             if cls == 'signal' and pd.notna(row_dict.get('fahrtrichtung')):
                                 tree_item.setText(2, str(row_dict.get('fahrtrichtung', '')))
                         
@@ -4263,16 +5629,16 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 # Rebuild graphics - optimize like undo
                 # (Specs already rebuilt above for affected pages)
                 if self.current_page in affected_pages:
-                    print(f"  🔄 Refreshing graphics for redo")
+                    print(f"   Refreshing graphics for redo")
 
-                    # ✅ OPTIMIZATION: Only update affected items instead of full rebuild
+                    #  OPTIMIZATION: Only update affected items instead of full rebuild
                     affected_on_current_page = [rid for rid in state['rows'].keys()
                                                 if rid in self.all_page_row_specs.get(self.current_page, {})]
 
                     use_incremental = len(affected_on_current_page) < 50
 
                     if use_incremental:
-                        print(f"     Using incremental update for {len(affected_on_current_page)} items")
+                        print(f"Using incremental update for {len(affected_on_current_page)} items")
 
                         try:
                             # Remove only affected items
@@ -4287,25 +5653,28 @@ class WorkspaceWidget(QtWidgets.QWidget):
                             specs = self.all_page_row_specs.get(self.current_page, {})
                             self._add_overlays_for_rows(self.current_page, set(affected_on_current_page), specs)
 
-                            print(f"     ✅ Incremental update complete")
+                            print(f"Incremental update complete")
 
                         except Exception as e:
                             # Fallback to full rebuild if anything goes wrong
-                            print(f"     ⚠️ Incremental update failed: {e}")
-                            print(f"     ⚠️ Falling back to full rebuild")
+                            print(f"Incremental update failed: {e}")
+                            print(f"Falling back to full rebuild")
                             use_incremental = False
 
                     if not use_incremental:
                         # Many items affected or incremental failed - do full rebuild
-                        print(f"     Using full rebuild for {len(affected_on_current_page)} items")
-                        self.scene.clear()
-                        _, _, _, _, bg = self._get_theme_colors()
-                        self.scene.setBackgroundBrush(QtGui.QBrush(bg))
-                        self.scene.addPixmap(self.page_base_pix[self.current_page])
-                        self.scene.setSceneRect(QtCore.QRectF(self.page_base_pix[self.current_page].rect()))
-                        self._create_items_for_page(self.current_page)
-                        self._populate_tree(self.current_page)
-                        print(f"     ✅ Full rebuild complete")
+                        print(f"Using full rebuild for {len(affected_on_current_page)} items")
+                        if self.current_page not in self.page_base_pix:
+                            print(f"WARNING: page_base_pix missing for page {self.current_page}, skipping graphics refresh")
+                        else:
+                            self.scene.clear()
+                            _, _, _, _, bg = self._get_theme_colors()
+                            self.scene.setBackgroundBrush(QtGui.QBrush(bg))
+                            self.scene.addPixmap(self.page_base_pix[self.current_page])
+                            self.scene.setSceneRect(QtCore.QRectF(self.page_base_pix[self.current_page].rect()))
+                            self._create_items_for_page(self.current_page)
+                            self._populate_tree(self.current_page)
+                            print(f"Full rebuild complete")
 
             self._set_status(f"↷ Wiederhergestellt: {state['action']}")
 
@@ -4313,13 +5682,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self._update_undo_redo_buttons()
 
         except Exception as e:
-            print(f"❌ ERROR during redo: {e}")
+            print(f"ERROR during redo: {e}")
             import traceback
             traceback.print_exc()
             QtWidgets.QMessageBox.critical(self, "Redo Error", f"Error during redo: {str(e)}")
 
         finally:
-            # ✅ ALWAYS CLEAR FLAG
+            #  ALWAYS CLEAR FLAG
             self._is_undoing_or_redoing = False
 
 
@@ -4398,7 +5767,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             # Run validation
             from uservalidation.ultimate_validator import validate_everything
 
-            # ✅ NEW: Save to database if layout_name is available
+            #  NEW: Save to database if layout_name is available
             result = validate_everything(
                 self.df_all,
                 auto_correct=False,
@@ -4408,34 +5777,38 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
             progress.close()
 
-            # ✅ Store result for overlay toggling
+            #  Store result for overlay toggling
             self.validation_result = result
 
-            # ✅ NEW: Update error notification in status/title
+            #  NEW: Update error notification in status/title
             self._update_error_notification(result)
 
-            # ✅ Add missing detection overlays
+            #  Add missing detection overlays
             self._add_missing_detection_overlays(result)
 
-            # Show validation dialog
-            dialog = EnhancedValidationResultsDialog(result, self)
+            # Show validation dialog (with uncertain detections if available)
+            dialog = EnhancedValidationResultsDialog(result, self.uncertain_detections, self)
             dialog.setWindowFlags(
                 QtCore.Qt.Window |  # Make it a separate window
                 QtCore.Qt.WindowMinimizeButtonHint |  # Add minimize button
                 QtCore.Qt.WindowMaximizeButtonHint |  # Add maximize button
                 QtCore.Qt.WindowCloseButtonHint  # Add close button
-            )            
+            )
             # Connect handlers
-            dialog.corrections_accepted.connect(self._apply_corrections)  # ✅ Remove lambda
+            dialog.corrections_accepted.connect(self._apply_corrections)  #  Remove lambda
             dialog.jump_to_detection.connect(self._jump_to_detection)
 
-            # ✅ NEW: Connect tool activation signals
+            #  NEW: Connect tool activation signals
             dialog.activate_manual_ocr.connect(self._activate_manual_ocr_tool)
             dialog.activate_manual_link.connect(self._activate_manual_link_tool)
             dialog.activate_bbox_resize.connect(self._activate_bbox_resize_tool)
             dialog.delete_row.connect(self._delete_row_from_validation)
 
-            # ✅ Add toggle button to dialog
+            # Connect uncertain detection signals
+            dialog.uncertain_confirmed.connect(self._add_confirmed_uncertain_detections)
+            dialog.jump_to_position.connect(self._jump_to_position)
+
+            #  Add toggle button to dialog
             dialog.show()
             self._validation_dialog = dialog
 
@@ -4454,7 +5827,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
     def _update_error_notification(self, validation_result):
         """
-        ✅ NEW: Update UI to show validation error summary.
+         NEW: Update UI to show validation error summary.
 
         Displays error count in status bar and highlights problematic rows.
         """
@@ -4466,13 +5839,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
             # Build notification message
             if total == 0:
-                msg = "✓ Keine Validierungsprobleme gefunden"
+                msg = " Keine Validierungsprobleme gefunden"
                 color = "green"
             elif errors > 0:
-                msg = f"⚠️ {errors} Fehler, {warnings} Warnungen ({total} gesamt)"
+                msg = f" {errors} Fehler, {warnings} Warnungen ({total} gesamt)"
                 color = "red"
             else:
-                msg = f"⚠️ {warnings} Warnungen ({total} gesamt)"
+                msg = f" {warnings} Warnungen ({total} gesamt)"
                 color = "orange"
 
             # Update status bar
@@ -4490,7 +5863,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 self.error_rows = set(error_row_ids)
 
         except Exception as e:
-            print(f"⚠️ Failed to update error notification: {e}")
+            print(f" Failed to update error notification: {e}")
 
     def _add_overlay_toggle_to_dialog(self, dialog):
         """Add toggle button for missing detection overlays to validation dialog"""
@@ -4519,10 +5892,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     # Switch page if needed
                     if target_page != self.current_page:
                         self.current_page = target_page
-                        self.on_page_changed(target_page)  # ✅ FIX: Use on_page_changed
+                        self.on_page_changed(target_page)  #  FIX: Use on_page_changed
             
             # Center view on position
-            self.view.centerOn(x, y)  # ✅ FIX: Use self.view, not self.graphics_view
+            self.view.centerOn(x, y)  #  FIX: Use self.view, not self.graphics_view
             
             # Highlight the position
             self._highlight_position(x, y)
@@ -4531,22 +5904,594 @@ class WorkspaceWidget(QtWidgets.QWidget):
             # PART 2: Jump in Tree
             # ========================================
             if row_id >= 0:
-                self._jump_to_tree_row(row_id)  # ✅ FIX: Renamed from _jump_to_table_row
+                self._jump_to_tree_row(row_id)  #  FIX: Renamed from _jump_to_table_row
             
             # Show status
-            self._set_status(  # ✅ FIX: Use _set_status instead of statusBar()
-                f"🎯 Springe zu Position ({x:.0f}, {y:.0f})" + 
+            self._set_status(  #  FIX: Use _set_status instead of statusBar()
+                f" Springe zu Position ({x:.0f}, {y:.0f})" + 
                 (f" | Zeile {row_id}" if row_id >= 0 else "")
             )
         
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self._set_status(f"❌ Fehler beim Springen: {str(e)}")  # ✅ FIX
+            self._set_status(f" Fehler beim Springen: {str(e)}")  #  FIX
+
+    def _jump_to_position(self, position: tuple):
+        """
+        Jump to a position in the graphics view (for uncertain detections).
+
+        Args:
+            position: (x, y) coordinates to center on
+        """
+        try:
+            x, y = position
+            self.view.centerOn(x, y)
+            self._highlight_position(x, y)
+            self._set_status(f" Springe zu Position ({x:.0f}, {y:.0f})")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self._set_status(f" Fehler beim Springen: {str(e)}")
+
+    def _get_page_coordinates_for_linking(self, page: int) -> list:
+        """
+        Get all coordinate detections from a specific page for linking.
+
+        Args:
+            page: Page number
+
+        Returns:
+            List of coordinate dicts compatible with link_anchor_to_coord()
+        """
+        if self.df_all is None or self.df_all.empty:
+            return []
+
+        coords_df = self.df_all[
+            (self.df_all['page'] == page) &
+            (self.df_all['cls'] == 'coordinate')
+        ]
+
+        # Convert to list of dicts for linking function
+        coords = []
+        for _, row in coords_df.iterrows():
+            cx1 = row.get('cx1') if pd.notna(row.get('cx1')) else 0
+            cy1 = row.get('cy1') if pd.notna(row.get('cy1')) else 0
+            cx2 = row.get('cx2') if pd.notna(row.get('cx2')) else 0
+            cy2 = row.get('cy2') if pd.notna(row.get('cy2')) else 0
+
+            coords.append({
+                'x1': cx1, 'y1': cy1,
+                'x2': cx2, 'y2': cy2,
+                'cx': (cx1 + cx2) / 2,
+                'cy': (cy1 + cy2) / 2,
+                'w': cx2 - cx1,
+                'h': cy2 - cy1,
+                'name': 'coordinate',
+                'text': row.get('coord_text'),
+                'row_id': row.get('row_id'),
+                'angle': row.get('angle', 0),
+            })
+        return coords
+
+    def _get_next_row_id(self) -> int:
+        """Get next available row_id."""
+        if self.df_all is None or self.df_all.empty or 'row_id' not in self.df_all.columns:
+            return 0
+        max_id = self.df_all['row_id'].max()
+        return int(max_id) + 1 if pd.notna(max_id) else 0
+
+    def _get_page_gks_with_coord_map(self, page: int) -> tuple:
+        """
+        Get all GKS detections and build coordinate map using SAME dict objects.
+
+        CRITICAL: link_haltetafel_to_gks() uses id(gks_det) as keys,
+        so the gks_coord_map MUST use id() of the SAME dict objects
+        that are in the gks_dets list.
+
+        Args:
+            page: Page number
+
+        Returns:
+            Tuple of (gks_dets, gks_coord_map):
+            - gks_dets: List of GKS detection dicts
+            - gks_coord_map: Dict mapping id(gks_det) to linked coordinate dict
+        """
+        if self.df_all is None or self.df_all.empty:
+            return [], {}
+
+        gks_df = self.df_all[
+            (self.df_all['page'] == page) &
+            (self.df_all['cls'].isin(['gks_festkodiert', 'gks_gesteuert']))
+        ]
+
+        gks_dets = []
+        gks_coord_map = {}
+
+        for _, row in gks_df.iterrows():
+            ax1 = row.get('ax1') if pd.notna(row.get('ax1')) else 0
+            ay1 = row.get('ay1') if pd.notna(row.get('ay1')) else 0
+            ax2 = row.get('ax2') if pd.notna(row.get('ax2')) else 0
+            ay2 = row.get('ay2') if pd.notna(row.get('ay2')) else 0
+
+            # Create GKS detection dict
+            gks_det = {
+                'x1': ax1, 'y1': ay1, 'x2': ax2, 'y2': ay2,
+                'cx': (ax1 + ax2) / 2,
+                'cy': (ay1 + ay2) / 2,
+                'w': ax2 - ax1,
+                'h': ay2 - ay1,
+                'name': row.get('cls'),
+                'text': row.get('anchor_text'),
+                'angle': row.get('angle') if pd.notna(row.get('angle')) else 0,
+                'angle_raw': row.get('angle_raw') if pd.notna(row.get('angle_raw')) else 0,
+                'obb_cx': row.get('obb_cx'),
+                'obb_cy': row.get('obb_cy'),
+                'obb_w': row.get('obb_w'),
+                'obb_h': row.get('obb_h'),
+                'row_id': row.get('row_id'),
+            }
+            gks_dets.append(gks_det)
+
+            # Build coord map using id() of the SAME gks_det object
+            if pd.notna(row.get('cx1')) and pd.notna(row.get('coord_text')):
+                cx1 = row.get('cx1')
+                cy1 = row.get('cy1')
+                cx2 = row.get('cx2')
+                cy2 = row.get('cy2')
+                gks_coord_map[id(gks_det)] = {
+                    'x1': cx1, 'y1': cy1, 'x2': cx2, 'y2': cy2,
+                    'cx': (cx1 + cx2) / 2 if cx1 and cx2 else 0,
+                    'cy': (cy1 + cy2) / 2 if cy1 and cy2 else 0,
+                    'text': row.get('coord_text'),
+                }
+
+        return gks_dets, gks_coord_map
+
+    def _process_confirmed_uncertain_detection(self, det: dict) -> dict:
+        """
+        Process a user-confirmed uncertain detection through OCR, linking,
+        Fahrtrichtung detection, and other class-specific processing.
+
+        Args:
+            det: Detection dict with x1,y1,x2,y2,cx,cy,name,conf,page,angle,etc.
+
+        Returns:
+            Processed row dict ready for df_all
+        """
+        from core.ocr_engine import ocr_anchor_name, ocr_coordinate_unified
+        from core.linking import (
+            link_anchor_to_coord, parse_coord, detect_fahrtrichtung,
+            link_haltetafel_to_gks, link_isolierstoss_fallback,
+            detect_fahrtrichtung_gks_relaxed, detect_fahrtrichtung_gks_nearest
+        )
+        from core.pipelineworker import NO_OCR_CLASSES, FIXED_TEXT_CLASSES
+
+        page = det.get('page', 0)
+        cls_name = det.get('name', '')
+
+        # Get BGR image for this page
+        bgr_image = self.page_bgr_arrays.get(page)
+
+        # Initialize result fields
+        anchor_text = ''
+        anchor_conf = 0.0
+        coord_text = None
+        coord_value = None
+        gi_gl = None
+        coord_bbox = (None, None, None, None)
+        linked_coord = None
+        link_coord_row_id = None
+        fahrtrichtung = None
+        fahrtrichtung_source = None
+
+        # Get page data for linking
+        page_coords = self._get_page_coordinates_for_linking(page)
+        page_gks_dets, gks_coord_map = self._get_page_gks_with_coord_map(page)
+
+        # Track which coordinates are already used (simplified - just get IDs)
+        used_coord_ids = set()
+
+        # 1. OCR PROCESSING (only if BGR image available)
+        if bgr_image is not None:
+            try:
+                if cls_name == 'coordinate':
+                    # Coordinate: use coordinate OCR
+                    anchor_text = ocr_coordinate_unified(det, bgr_image, self.ocr_engine) or ''
+                    if anchor_text:
+                        parsed = parse_coord(anchor_text)
+                        if parsed:
+                            coord_value, gi_gl = parsed
+                        coord_text = anchor_text
+                elif cls_name in FIXED_TEXT_CLASSES:
+                    # Fixed text classes (prellblock="PB", gm_block="GM")
+                    anchor_text = FIXED_TEXT_CLASSES[cls_name]
+                elif cls_name not in NO_OCR_CLASSES:
+                    # Normal OCR for anchor text
+                    anchor_text = ocr_anchor_name(det, bgr_image, self.ocr_engine) or ''
+
+                print(f"[UNCERTAIN OCR] {cls_name}: '{anchor_text}'")
+            except Exception as e:
+                print(f"[UNCERTAIN OCR ERROR] {cls_name}: {e}")
+                anchor_text = ''
+        else:
+            print(f"[WARNING] No BGR image for page {page}, skipping OCR")
+
+        # 2. COORDINATE LINKING (for non-coordinate classes)
+        if cls_name != 'coordinate':
+            try:
+                # Standard linking first
+                linked_coord = link_anchor_to_coord(det, page_coords, learned_patterns=None)
+
+                # Class-specific fallbacks
+                if linked_coord is None:
+                    if cls_name == 'haltetafel' and page_gks_dets:
+                        # Haltetafel: try linking via GKS
+                        gks_dets_festkodiert = [g for g in page_gks_dets if g['name'] == 'gks_festkodiert']
+                        linked_coord = link_haltetafel_to_gks(
+                            det, gks_dets_festkodiert, page_coords, gks_coord_map
+                        )
+                        if linked_coord:
+                            print(f"[UNCERTAIN LINK] haltetafel linked via GKS fallback")
+
+                    elif cls_name == 'isolierstoß':
+                        # Isolierstoß: try fallback linking (all directions)
+                        linked_coord = link_isolierstoss_fallback(
+                            det, page_coords, used_coord_ids, max_radius=300
+                        )
+                        if linked_coord:
+                            print(f"[UNCERTAIN LINK] isolierstoß linked via fallback")
+
+                if linked_coord:
+                    # Get coordinate text from linked coordinate
+                    coord_text = linked_coord.get('text')
+                    if coord_text:
+                        parsed = parse_coord(coord_text)
+                        if parsed:
+                            coord_value, gi_gl = parsed
+                    coord_bbox = (
+                        linked_coord.get('x1'),
+                        linked_coord.get('y1'),
+                        linked_coord.get('x2'),
+                        linked_coord.get('y2')
+                    )
+                    link_coord_row_id = linked_coord.get('row_id')
+                    print(f"[UNCERTAIN LINK] {cls_name} -> coord '{coord_text}' (row_id={link_coord_row_id})")
+                else:
+                    print(f"[UNCERTAIN LINK] {cls_name}: No coordinate found nearby")
+            except Exception as e:
+                print(f"[UNCERTAIN LINK ERROR] {cls_name}: {e}")
+
+        # 3. FAHRTRICHTUNG DETECTION (for signals)
+        if cls_name == 'signal':
+            try:
+                # Build signal det with text for Fahrtrichtung detection
+                signal_det = {**det, 'text': anchor_text}
+
+                # Try GKS-based Fahrtrichtung first
+                fahrtrichtung = detect_fahrtrichtung(
+                    signal_det,
+                    page_gks_dets,
+                    track_skeleton=self.track_skeleton,
+                    track_bounds=None,
+                    max_distance=250,
+                    dy_min=30,
+                    dy_max=200
+                )
+
+                if fahrtrichtung:
+                    fahrtrichtung_source = 'gks' if page_gks_dets else 'track'
+                    print(f"[UNCERTAIN FAHRT] signal '{anchor_text}' -> {fahrtrichtung} (via {fahrtrichtung_source})")
+                else:
+                    # Tiered fallbacks when basic GKS detection fails
+                    print(f"[UNCERTAIN FAHRT] signal '{anchor_text}': Trying Tier 3 (GKS relaxed, dy≤600px)...")
+
+                    # Tier 3: GKS relaxed (dy≤600px)
+                    tier3_result, tier3_gks = detect_fahrtrichtung_gks_relaxed(
+                        signal_det,
+                        page_gks_dets,
+                        dy_max=600
+                    )
+
+                    if tier3_result:
+                        fahrtrichtung = tier3_result
+                        fahrtrichtung_source = 'gks_relaxed'
+                        print(f"[UNCERTAIN FAHRT] Tier 3 success: {fahrtrichtung}")
+                    else:
+                        # Tier 4: GKS nearest (Euclidean dist≤800px)
+                        print(f"[UNCERTAIN FAHRT] Tier 3 failed, trying Tier 4 (GKS nearest, dist≤800px)...")
+                        tier4_result, tier4_gks = detect_fahrtrichtung_gks_nearest(
+                            signal_det,
+                            page_gks_dets,
+                            max_dist=800
+                        )
+
+                        if tier4_result:
+                            fahrtrichtung = tier4_result
+                            fahrtrichtung_source = 'gks_nearest'
+                            print(f"[UNCERTAIN FAHRT] Tier 4 success: {fahrtrichtung}")
+                        else:
+                            print(f"[UNCERTAIN FAHRT] All tiers failed for signal '{anchor_text}'")
+            except Exception as e:
+                print(f"[UNCERTAIN FAHRT ERROR] signal: {e}")
+
+        # 4. BUILD ROW DICT
+        row = {
+            'row_id': self._get_next_row_id(),
+            'page': page,
+            'cls': cls_name,
+            'conf': round(det.get('conf', 0.0), 3),
+            'anchor_text': anchor_text,
+            'anchor_conf': anchor_conf,
+            'coord_text': coord_text,
+            'coord_value': coord_value,
+            'gi_gl': gi_gl,
+            'ax1': det.get('x1'),
+            'ay1': det.get('y1'),
+            'ax2': det.get('x2'),
+            'ay2': det.get('y2'),
+            'cx1': coord_bbox[0],
+            'cy1': coord_bbox[1],
+            'cx2': coord_bbox[2],
+            'cy2': coord_bbox[3],
+            'angle': det.get('angle'),
+            'angle_raw': det.get('angle_raw'),
+            'obb_cx': det.get('obb_cx'),
+            'obb_cy': det.get('obb_cy'),
+            'obb_w': det.get('obb_w'),
+            'obb_h': det.get('obb_h'),
+            'detection_source': 'USER_CONFIRMED',
+            'detection_status': 'confirmed',
+            'fahrtrichtung': fahrtrichtung,
+            '_fahrtrichtung_source': fahrtrichtung_source,
+            'link_coord_row_id': link_coord_row_id,
+        }
+
+        return row
+
+    def _add_confirmed_uncertain_detections(self, confirmed_dets: list):
+        """
+        Add confirmed uncertain detections with full OCR and linking processing.
+
+        Args:
+            confirmed_dets: List of detection dicts that user confirmed
+        """
+        try:
+            if not confirmed_dets:
+                return
+
+            print(f"\n[UNCERTAIN] Processing {len(confirmed_dets)} confirmed detections...")
+
+            # Process each detection through OCR and linking
+            new_rows = []
+            for det in confirmed_dets:
+                processed_row = self._process_confirmed_uncertain_detection(det)
+                new_rows.append(processed_row)
+
+            if new_rows:
+                # Add to DataFrame
+                new_df = pd.DataFrame(new_rows)
+                self.df_all = pd.concat([self.df_all, new_df], ignore_index=True)
+
+                # Merge signals with existing same-name signals
+                for row in new_rows:
+                    if row.get('cls') == 'signal' and row.get('anchor_text'):
+                        self._merge_signal_with_existing(row['anchor_text'], row['page'])
+
+                # Remove from uncertain_detections
+                self.uncertain_detections = [
+                    d for d in self.uncertain_detections
+                    if not d.get('user_confirmed', False)
+                ]
+
+                # Rebuild page_dfs only for affected pages
+                affected_pages = set(row.get('page', 0) for row in new_rows)
+                for page_num in affected_pages:
+                    page_num_int = int(page_num)
+                    self.page_dfs[page_num_int] = self.df_all[self.df_all['page'] == page_num].copy()
+
+                # Refresh display
+                self.on_page_changed(self.current_page)
+
+                self._set_status(f" {len(new_rows)} Erkennung(en) mit OCR verarbeitet und hinzugefügt")
+                print(f"[UNCERTAIN] Added {len(new_rows)} processed detections to df_all")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Fehler",
+                f"Fehler beim Verarbeiten der bestätigten Erkennungen:\n{str(e)}"
+            )
+
+    def _merge_signal_with_existing(self, signal_name: str, page: int):
+        """
+        Merge a newly added signal with existing signals of the same name.
+
+        Uses spatial clustering logic from merge_duplicate_signals():
+        - Find all signals with same name on same page
+        - If >1 instance, merge Fahrtrichtung/coord data into primary instance
+        - Mark duplicates as hidden (_hidden=True)
+        - Store all signal positions in _signal_positions
+        """
+        import json
+
+        if not signal_name or self.df_all is None or self.df_all.empty:
+            return
+
+        # Find all signals with this name on this page
+        mask = (
+            (self.df_all['cls'] == 'signal') &
+            (self.df_all['page'] == page) &
+            (self.df_all['anchor_text'] == signal_name)
+        )
+
+        # Exclude already hidden rows
+        if '_hidden' in self.df_all.columns:
+            mask = mask & (~self.df_all['_hidden'].fillna(False))
+
+        signal_indices = self.df_all[mask].index.tolist()
+
+        if len(signal_indices) <= 1:
+            return  # No duplicates to merge
+
+        print(f"\n[UNCERTAIN MERGE] Found {len(signal_indices)} instances of '{signal_name}' on page {page}")
+
+        # Find PRIMARY instance (has coordinate, or has Fahrtrichtung, or highest confidence)
+        primary_idx = None
+        primary_score = -1
+
+        for idx in signal_indices:
+            row = self.df_all.loc[idx]
+            score = 0
+            if pd.notna(row.get('coord_text')):
+                score += 1000  # Has coordinate = primary candidate (must match _merge_and_recalculate_fahrtrichtung)
+            if row.get('fahrtrichtung'):
+                score += 50  # Has Fahrtrichtung
+            score += (row.get('conf') or 0) * 10  # Confidence boost
+
+            if score > primary_score:
+                primary_score = score
+                primary_idx = idx
+
+        if primary_idx is None:
+            print(f"[UNCERTAIN MERGE] No primary instance found")
+            return
+
+        print(f"[UNCERTAIN MERGE] Primary instance: row index {primary_idx} (score={primary_score})")
+
+        # Build signal positions map and merge data
+        signal_positions = {}
+
+        def to_native(val):
+            """Convert numpy types to native Python types for JSON serialization."""
+            if val is None or pd.isna(val):
+                return None
+            if hasattr(val, 'item'):  # numpy scalar
+                return val.item()
+            return val
+
+        for idx in signal_indices:
+            row = self.df_all.loc[idx]
+            row_id_val = to_native(row.get('row_id', idx))
+            pos_key = f"instance_{row_id_val}"
+            signal_positions[pos_key] = {
+                'ax1': to_native(row.get('ax1')),
+                'ay1': to_native(row.get('ay1')),
+                'ax2': to_native(row.get('ax2')),
+                'ay2': to_native(row.get('ay2')),
+                'row_id': row_id_val,
+            }
+
+            if idx == primary_idx:
+                continue
+
+            # Fahrtrichtung source priority (higher = more reliable)
+            SOURCE_PRIORITY = {
+                'gks': 4,
+                'gks_relaxed': 3,
+                'gks_nearest': 2,
+                'gks_confirmed': 2,  # Same as gks_nearest
+                'track': 1,
+                'merged': 0,
+                'none': 0,
+                '': 0,
+            }
+
+            # Get source priorities
+            primary_fahrt = self.df_all.at[primary_idx, 'fahrtrichtung'] if 'fahrtrichtung' in self.df_all.columns else None
+            primary_source = self.df_all.at[primary_idx, '_fahrtrichtung_source'] if '_fahrtrichtung_source' in self.df_all.columns else 'none'
+            if pd.isna(primary_source):
+                primary_source = 'none'
+
+            new_fahrt = row.get('fahrtrichtung')
+            new_source = row.get('_fahrtrichtung_source', 'none')
+            if pd.isna(new_source):
+                new_source = 'none'
+
+            primary_priority = SOURCE_PRIORITY.get(str(primary_source), 0)
+            new_priority = SOURCE_PRIORITY.get(str(new_source), 0)
+
+            # Merge if:
+            # 1. Primary has no Fahrtrichtung and new has one, OR
+            # 2. New source has HIGHER priority than primary source
+            should_merge_fahrt = False
+            if new_fahrt:
+                if not primary_fahrt:
+                    should_merge_fahrt = True
+                    print(f"[UNCERTAIN MERGE] Merging Fahrtrichtung: primary has none")
+                elif new_priority > primary_priority:
+                    should_merge_fahrt = True
+                    print(f"[UNCERTAIN MERGE] Merging Fahrtrichtung: new source '{new_source}' (priority {new_priority}) > primary source '{primary_source}' (priority {primary_priority})")
+
+            if should_merge_fahrt:
+                self.df_all.at[primary_idx, 'fahrtrichtung'] = new_fahrt
+                self.df_all.at[primary_idx, '_fahrtrichtung_source'] = new_source
+                print(f"[UNCERTAIN MERGE] Updated Fahrtrichtung to '{new_fahrt}' (source: {new_source})")
+
+            # Merge coord if primary doesn't have it
+            primary_coord = self.df_all.at[primary_idx, 'coord_text'] if 'coord_text' in self.df_all.columns else None
+            if (not primary_coord or pd.isna(primary_coord)) and row.get('coord_text'):
+                self.df_all.at[primary_idx, 'coord_text'] = row['coord_text']
+                self.df_all.at[primary_idx, 'coord_value'] = row.get('coord_value')
+                self.df_all.at[primary_idx, 'gi_gl'] = row.get('gi_gl')
+                self.df_all.at[primary_idx, 'cx1'] = row.get('cx1')
+                self.df_all.at[primary_idx, 'cy1'] = row.get('cy1')
+                self.df_all.at[primary_idx, 'cx2'] = row.get('cx2')
+                self.df_all.at[primary_idx, 'cy2'] = row.get('cy2')
+                print(f"[UNCERTAIN MERGE] Merged coordinate '{row['coord_text']}' from instance {idx}")
+
+            # Mark duplicate as hidden
+            if '_hidden' not in self.df_all.columns:
+                self.df_all['_hidden'] = False
+            if '_merged_into' not in self.df_all.columns:
+                self.df_all['_merged_into'] = None
+
+            self.df_all.at[idx, '_hidden'] = True
+            self.df_all.at[idx, '_merged_into'] = primary_idx
+            print(f"[UNCERTAIN MERGE] Marked instance {idx} as hidden (merged into {primary_idx})")
+
+        # Store signal positions in primary row
+        if '_signal_positions' not in self.df_all.columns:
+            self.df_all['_signal_positions'] = None
+        self.df_all.at[primary_idx, '_signal_positions'] = json.dumps(signal_positions)
+
+        # Sync to page_dfs for overlay creation
+        primary_row = self.df_all.loc[primary_idx]
+        primary_row_id = primary_row.get('row_id')
+        if page in self.page_dfs:
+            df_page = self.page_dfs[page]
+            if '_signal_positions' not in df_page.columns:
+                df_page['_signal_positions'] = None
+            if '_hidden' not in df_page.columns:
+                df_page['_hidden'] = False
+
+            # Update primary row in page_dfs
+            page_mask = df_page['row_id'] == primary_row_id
+            if page_mask.any():
+                page_idx = df_page[page_mask].index[0]
+                df_page.at[page_idx, '_signal_positions'] = json.dumps(signal_positions)
+
+            # Mark hidden rows in page_dfs
+            for idx in signal_indices:
+                if idx == primary_idx:
+                    continue
+                hidden_row_id = self.df_all.loc[idx, 'row_id']
+                hidden_mask = df_page['row_id'] == hidden_row_id
+                if hidden_mask.any():
+                    hidden_page_idx = df_page[hidden_mask].index[0]
+                    df_page.at[hidden_page_idx, '_hidden'] = True
+
+            self.page_dfs[page] = df_page
+            print(f"[UNCERTAIN MERGE] Synced _signal_positions and _hidden to page_dfs[{page}]")
+
+        print(f"[UNCERTAIN MERGE] Stored {len(signal_positions)} positions in _signal_positions")
+        print(f"[UNCERTAIN MERGE] Complete: merged {len(signal_indices)-1} duplicates into primary")
 
     def _activate_manual_ocr_tool(self, mode: str):
         """
-        ✅ NEW: Activate manual OCR tool (horizontal or angular)
+         NEW: Activate manual OCR tool (horizontal or angular)
 
         Args:
             mode: 'horizontal' or 'angular'
@@ -4557,20 +6502,20 @@ class WorkspaceWidget(QtWidgets.QWidget):
             elif mode == 'angular':
                 self.btn_manual_ocr_angular.setChecked(True)
 
-            self._set_status(f"🔧 {mode.capitalize()} OCR aktiviert")
+            self._set_status(f" {mode.capitalize()} OCR aktiviert")
         except Exception as e:
-            print(f"⚠️ Failed to activate OCR tool: {e}")
+            print(f" Failed to activate OCR tool: {e}")
 
     def _activate_manual_link_tool(self):
-        """✅ NEW: Activate manual linking tool"""
+        """ NEW: Activate manual linking tool"""
         try:
             self.btn_manual_link.setChecked(True)
-            self._set_status("🔧 Manuelles Verknüpfen aktiviert")
+            self._set_status(" Manuelles Verknüpfen aktiviert")
         except Exception as e:
-            print(f"⚠️ Failed to activate manual link tool: {e}")
+            print(f" Failed to activate manual link tool: {e}")
 
     def _activate_bbox_resize_tool(self):
-        """✅ NEW: Activate bbox resize mode (just inform user, no specific tool)"""
+        """ NEW: Activate bbox resize mode (just inform user, no specific tool)"""
         try:
             # Bbox resize is done by directly dragging detection edges in the view
             # No specific tool button needed, just inform user
@@ -4579,13 +6524,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 "Erkennungsbereich anpassen",
                 "Ziehen Sie die Ecken oder Kanten des Erkennungsbereichs im Bild, um die Größe anzupassen."
             )
-            self._set_status("🔧 Bbox Resize: Ziehen Sie die Erkennungsbereich-Kanten")
+            self._set_status(" Bbox Resize: Ziehen Sie die Erkennungsbereich-Kanten")
         except Exception as e:
-            print(f"⚠️ Failed to activate bbox resize: {e}")
+            print(f" Failed to activate bbox resize: {e}")
 
     def _delete_row_from_validation(self, row_id: int):
         """
-        ✅ NEW: Delete a single row from validation dialog (no confirmation needed)
+         NEW: Delete a single row from validation dialog (no confirmation needed)
 
         Args:
             row_id: The row_id to delete
@@ -4596,7 +6541,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             # Find the tree item
             tree_item = self.row_id_to_tree_item.get(row_id)
             if not tree_item:
-                print(f"⚠️ Row ID {row_id} not found in tree")
+                print(f" Row ID {row_id} not found in tree")
                 self.tree.blockSignals(False)
                 return
 
@@ -4638,14 +6583,14 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self._update_undo_redo_buttons()
 
         except Exception as e:
-            print(f"⚠️ Failed to delete row {row_id}: {e}")
+            print(f" Failed to delete row {row_id}: {e}")
             import traceback
             traceback.print_exc()
         finally:
             self.tree.blockSignals(False)
             self.item_details_notes.clear()
 
-    def _jump_to_tree_row(self, row_id: int):  # ✅ FIX: Renamed from _jump_to_table_row
+    def _jump_to_tree_row(self, row_id: int):  #  FIX: Renamed from _jump_to_table_row
         """
         Jump to and highlight a specific row in the tree.
         
@@ -4656,7 +6601,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         tree_item = self.row_id_to_tree_item.get(row_id)
         
         if not tree_item:
-            print(f"⚠️ Row ID {row_id} not found in tree")
+            print(f" Row ID {row_id} not found in tree")
             return
         
         # Clear previous selection
@@ -4673,12 +6618,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
         )
         
         # Flash highlight effect
-        self._flash_tree_item(tree_item)  # ✅ FIX: Renamed from _flash_table_row
+        self._flash_tree_item(tree_item)  #  FIX: Renamed from _flash_table_row
         
         # Also zoom in graphics view
         self.zoom_to_row(row_id)
 
-    def _flash_tree_item(self, item: QtWidgets.QTreeWidgetItem):  # ✅ FIX: Renamed
+    def _flash_tree_item(self, item: QtWidgets.QTreeWidgetItem):  #  FIX: Renamed
         """
         Flash a tree item to draw attention.
         
@@ -4766,7 +6711,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
     def _select_row_in_tree(self, row_id):
         """Select and highlight a row in the tree widget."""
         
-        # ✅ FIX: Use self.tree directly (no need for workspace reference)
+        #  FIX: Use self.tree directly (no need for workspace reference)
         if not hasattr(self, 'tree') or self.tree is None:
             return
         
@@ -4795,7 +6740,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             # Also trigger zoom to graphics
             self.zoom_to_row(row_id)
         else:
-            print(f"⚠️ Row ID {row_id} not found in tree")
+            print(f" Row ID {row_id} not found in tree")
 
     def _restore_tree_item_background(self, item, original_bg):
         """Helper to restore tree item background color"""
@@ -4812,7 +6757,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         if not corrections:
             return
 
-        # ✅ UNDO/REDO: Pre-scan to find ALL affected rows (corrections + propagations)
+        #  UNDO/REDO: Pre-scan to find ALL affected rows (corrections + propagations)
         affected_row_ids = [issue.row_id for issue in corrections]
 
         # Pre-scan coordinate corrections to find propagation targets
@@ -4837,9 +6782,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
         # Save state for ALL affected rows BEFORE making any changes
         self._save_state("Validierung korrigiert", affected_row_ids)
-        print(f"💾 Saved validation state for {len(affected_row_ids)} rows (corrections + propagations)")
+        print(f" Saved validation state for {len(affected_row_ids)} rows (corrections + propagations)")
 
-        # ✅ FIX: Use self directly
+        #  FIX: Use self directly
         coordinate_updates = {}  # Track coordinate changes for propagation
 
         for issue in corrections:
@@ -4890,9 +6835,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 tree_item = self.row_id_to_tree_item.get(issue.row_id)
                 if tree_item:
                     self.tree.blockSignals(True)
-                    
+
                     cls = self.df_all.at[idx, 'cls']
-                    
+
                     if issue.field == 'anchor_text':
                         tree_item.setText(0, issue.suggested_value)
                     elif issue.field == 'coord_text':
@@ -4905,12 +6850,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     
                     self.tree.blockSignals(False)
         
-        # ✅ Propagate coordinate changes to linked elements
+        #  Propagate coordinate changes to linked elements
         if coordinate_updates:
             linked_count, propagated_row_ids = self._propagate_coordinate_changes(coordinate_updates)
-            print(f"✅ Propagated coordinate changes to {linked_count} linked elements")
+            print(f"Propagated coordinate changes to {linked_count} linked elements")
         
-        # ✅ Rebuild graphics with updated data
+        #  Rebuild graphics with updated data
         self._rebuild_row_specs_for_current_page()
         self.on_page_changed(self.current_page)
         
@@ -4951,7 +6896,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             if cx1 is None or cy1 is None:
                 continue
             
-            # ✅ Find all elements on the same page that reference this OLD coordinate text
+            #  Find all elements on the same page that reference this OLD coordinate text
             same_page_mask = (self.df_all['page'] == coord_page) & (self.df_all['cls'] != 'coordinate')
             
             for idx, row in self.df_all[same_page_mask].iterrows():
@@ -4989,12 +6934,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
                             self.page_dfs[coord_page].loc[page_mask, 'cx2'] = cx2
                             self.page_dfs[coord_page].loc[page_mask, 'cy2'] = cy2
                     
-                    # ✅ Update tree widget display
+                    #  Update tree widget display
                     tree_item = self.row_id_to_tree_item.get(row['row_id'])
                     if tree_item:
                         tree_item.setText(1, new_text)  # Column 1 is coord_text
                     
-                    print(f"✅ Updated linked element: {row.get('cls')} '{row.get('anchor_text')}' → '{new_text}'")
+                    print(f"Updated linked element: {row.get('cls')} '{row.get('anchor_text')}' → '{new_text}'")
 
         return updated_count, affected_row_ids
 
@@ -5019,16 +6964,16 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self.redo_shortcut2.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
         self.redo_shortcut2.activated.connect(self._on_redo_shortcut)
         
-        print("✅ Undo/Redo shortcuts initialized")
+        print("Undo/Redo shortcuts initialized")
 
     def _on_undo_shortcut(self):
         """Handle undo shortcut activation"""
-        print("🔵 Undo shortcut triggered (Ctrl+Z)")
+        print("Undo shortcut triggered (Ctrl+Z)")
         self.undo()
 
     def _on_redo_shortcut(self):
         """Handle redo shortcut activation"""
-        print("🔵 Redo shortcut triggered (Ctrl+Y)")
+        print("Redo shortcut triggered (Ctrl+Y)")
         self.redo()
 
     def _update_undo_redo_buttons(self):
@@ -5147,7 +7092,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             x1, y1, x2, y2 = bbox
             confidence = issue.confidence
             
-            # ✅ Color based on confidence
+            #  Color based on confidence
             if confidence > 0.8:
                 color = QtGui.QColor(255, 0, 0, 80)  # Red (high confidence)
                 pen_color = QtGui.QColor(255, 0, 0, 200)
@@ -5167,7 +7112,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             rect.setZValue(500)  # Draw above detections but below highlights
             
             # Add label
-            label_text = f"❓ {issue.context.get('expected_class', 'Objekt')}\n{confidence:.0%} Konfidenz"
+            label_text = f" {issue.context.get('expected_class', 'Objekt')}\n{confidence:.0%} Konfidenz"
             label = self.scene.addText(label_text)
             label.setPos(x1, y1 - 40)
             label.setDefaultTextColor(pen_color)
@@ -5209,7 +7154,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         state = {
             'action': f"{len(row_ids_to_delete)} Zeilen gelöscht",
             'timestamp': pd.Timestamp.now(),
-            'is_deletion': True,  # ✅ Mark this as a deletion
+            'is_deletion': True,  #  Mark this as a deletion
             'rows': {}
         }
         
@@ -5242,7 +7187,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         # Clear redo stack
         self.redo_stack.clear()
         
-        print(f"💾 Saved deletion state: {len(row_ids_to_delete)} rows")
+        print(f" Saved deletion state: {len(row_ids_to_delete)} rows")
 
     def _rebuild_row_specs_for_page(self, page_num: int):
         """
@@ -5251,15 +7196,15 @@ class WorkspaceWidget(QtWidgets.QWidget):
         Args:
             page_num: Page number to rebuild specs for
         """
-        print(f"  🔧 Rebuilding specs for page {page_num}")
+        print(f"   Rebuilding specs for page {page_num}")
         
         df_page = self.page_dfs.get(page_num)
         if df_page is None or df_page.empty:
-            print(f"    ⚠️ No data for page {page_num}")
+            print(f"No data for page {page_num}")
             self.all_page_row_specs[page_num] = {}
             return
         
-        # ✅ Initialize specs dictionary
+        #  Initialize specs dictionary
         specs = {}
         
         for _, row in df_page.iterrows():
@@ -5324,10 +7269,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
             spec.update({"rect": (int(x1), int(y1), w, h)})
             specs[row_id] = spec
         
-        # ✅ Store the rebuilt specs
+        #  Store the rebuilt specs
         self.all_page_row_specs[page_num] = specs
         
-        print(f"    ✅ Rebuilt {len(specs)} specs for page {page_num}")
+        print(f"Rebuilt {len(specs)} specs for page {page_num}")
 
     def _update_existing_overlays(self, pidx: int):
         """
@@ -5343,7 +7288,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         to_add = new_row_ids - existing_row_ids
         to_update = existing_row_ids & new_row_ids
         
-        print(f"  🔄 Overlay update: Remove {len(to_remove)}, Add {len(to_add)}, Update {len(to_update)}")
+        print(f"   Overlay update: Remove {len(to_remove)}, Add {len(to_add)}, Update {len(to_update)}")
         
         # Remove deleted overlays
         for row_id in to_remove:
@@ -5398,7 +7343,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 if m.empty:
                     continue
 
-                # ✅ Skip hidden rows
+                #  Skip hidden rows
                 if m.iloc[0].get('_hidden', False):
                     continue
 
@@ -5413,7 +7358,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 if conf < g or conf < c:
                     continue
 
-            # ✅ NEW: Determine pen color based on validation errors or confidence
+            #  NEW: Determine pen color based on validation errors or confidence
             pen_color = normal  # Default theme color
             pen_width = 2
 
@@ -5486,7 +7431,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 self.scene.addItem(ti)
                 items_list.extend([rect, ti])
 
-            # ✅ Create OCR bbox if OCR data exists
+            #  Create OCR bbox if OCR data exists
             if dfp is not None:
                 m = dfp[dfp['row_id'] == row_id]
                 if not m.empty:
@@ -5548,7 +7493,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         Create a single overlay from a bbox dictionary (for merged signals).
         Shows ONLY the coordinate overlay (first bbox in _all_bboxes).
         """
-        print(f"   ✅ Creating single overlay for row {row_id}")
+        print(f"Creating single overlay for row {row_id}")
 
         items = []
 
@@ -5559,17 +7504,17 @@ class WorkspaceWidget(QtWidgets.QWidget):
         ay2 = bbox.get('ay2', 0)
 
         if ax1 == 0 and ay1 == 0 and ax2 == 0 and ay2 == 0:
-            print(f"      ⚠️ WARNING: Signal bbox has zero coordinates!")
+            print(f"WARNING: Signal bbox has zero coordinates!")
             return
 
-        # ✅ Get confidence and angle for color determination and rotation
+        #  Get confidence and angle for color determination and rotation
         conf = bbox.get('conf', 1.0)
         angle = bbox.get('angle', 0.0)
         angle_raw = bbox.get('angle_raw', angle)
 
-        print(f"      🔍 Merged signal bbox: angle={angle}, angle_raw={angle_raw}")
+        print(f"Merged signal bbox: angle={angle}, angle_raw={angle_raw}")
 
-        # ✅ Determine pen color based on confidence or errors
+        #  Determine pen color based on confidence or errors
         pen_color = QtGui.QColor(0, 200, 0)  # Default green
         pen_width = 3
 
@@ -5577,7 +7522,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         if hasattr(self, 'error_rows') and row_id in self.error_rows:
             pen_color = QtGui.QColor(255, 0, 0)  # Red for errors
             pen_width = 3
-            print(f"      🔴 MERGED SIGNAL Row {row_id}: ERROR ROW - Red")
+            print(f"MERGED SIGNAL Row {row_id}: ERROR ROW - Red")
 
         # Priority 2: Confidence-based coloring (if enabled)
         elif hasattr(self, 'show_confidence_colors') and self.show_confidence_colors:
@@ -5591,16 +7536,16 @@ class WorkspaceWidget(QtWidgets.QWidget):
             else:
                 pen_color = QtGui.QColor(255, 50, 0)  # Bright red-orange (low confidence)
                 color_name = "Red"
-            print(f"      🎨 MERGED SIGNAL Row {row_id} (conf={conf:.2f}): {color_name}")
+            print(f" MERGED SIGNAL Row {row_id} (conf={conf:.2f}): {color_name}")
         else:
-            print(f"      ⚪ MERGED SIGNAL Row {row_id} (conf={conf:.2f}): Default green (confidence colors disabled)")
+            print(f" MERGED SIGNAL Row {row_id} (conf={conf:.2f}): Default green (confidence colors disabled)")
 
-        # ✅ Check if rotated (use angle_raw preferably)
+        #  Check if rotated (use angle_raw preferably)
         use_angle = angle_raw if angle_raw != 0.0 else angle
 
         if abs(float(use_angle)) > 5.0:
             # Create ROTATED polygon for signal bbox
-            print(f"      🔄 Creating ROTATED signal bbox with angle={use_angle:.1f}°")
+            print(f" Creating ROTATED signal bbox with angle={use_angle:.1f}°")
             try:
                 pts = bbox_to_rotated_poly(ax1, ay1, ax2, ay2, float(use_angle))
                 poly_item = ResizablePolygonBBoxItem(
@@ -5617,7 +7562,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 self.scene.addItem(poly_item)
                 items.append(poly_item)
             except Exception as e:
-                print(f"      ⚠️ Failed to create rotated signal bbox: {e}")
+                print(f"Failed to create rotated signal bbox: {e}")
                 # Fall back to axis-aligned rectangle
                 w, h = ax2 - ax1, ay2 - ay1
                 rect = ResizableBBoxItem(ax1, ay1, w, h, int(row_id), self)
@@ -5648,10 +7593,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
             cy2 = bbox['cy2']
 
             if not (cx1 == 0 and cy1 == 0 and cx2 == 0 and cy2 == 0):
-                # ✅ Check if coordinate bbox should also be rotated
+                #  Check if coordinate bbox should also be rotated
                 if abs(float(use_angle)) > 5.0:
                     # Create ROTATED polygon for coordinate bbox
-                    print(f"      🔄 Creating ROTATED coordinate bbox with angle={use_angle:.1f}°")
+                    print(f" Creating ROTATED coordinate bbox with angle={use_angle:.1f}°")
                     try:
                         pts = bbox_to_rotated_poly(cx1, cy1, cx2, cy2, float(use_angle))
                         coord_poly = QtWidgets.QGraphicsPolygonItem(qpolygonf_from_pts(pts))
@@ -5663,9 +7608,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                         self.scene.addItem(coord_poly)
                         items.append(coord_poly)
-                        print(f"      ✅ Added ROTATED coordinate bbox")
+                        print(f"Added ROTATED coordinate bbox")
                     except Exception as e:
-                        print(f"      ⚠️ Failed to create rotated coordinate bbox: {e}")
+                        print(f"Failed to create rotated coordinate bbox: {e}")
                         # Fall back to axis-aligned rectangle
                         cw = cx2 - cx1
                         ch = cy2 - cy1
@@ -5678,7 +7623,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                         self.scene.addItem(coord_rect)
                         items.append(coord_rect)
-                        print(f"      ✅ Added coordinate bbox (fallback)")
+                        print(f"Added coordinate bbox (fallback)")
                 else:
                     # Create axis-aligned rectangle for coordinate bbox
                     cw = cx2 - cx1
@@ -5692,7 +7637,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                     self.scene.addItem(coord_rect)
                     items.append(coord_rect)
-                    print(f"      ✅ Added coordinate bbox")
+                    print(f"Added coordinate bbox")
         
         # Create label
         label = bbox.get('label', 'Unknown')
@@ -5709,26 +7654,22 @@ class WorkspaceWidget(QtWidgets.QWidget):
         # Store items
         self.current_row_items[row_id] = items
         
-        print(f"   ✅ Created single overlay for row {row_id}")
+        print(f"Created single overlay for row {row_id}")
 
     def switch_to_page(self, page_number: int):
         """
         Switch to a specific page number.
-        
+
         Args:
             page_number: The page number to switch to (1-indexed)
         """
-        if not hasattr(self, 'page_spin') or not self.page_spin:
-            print(f"[WORKSPACE] No page_spin available")
+        # Validate page number against available pages
+        if not hasattr(self, 'page_dfs') or page_number not in self.page_dfs:
+            print(f"[WORKSPACE] Page {page_number} not in page_dfs")
             return
-        
-        # Check if page number is valid
-        if page_number < self.page_spin.minimum() or page_number > self.page_spin.maximum():
-            print(f"[WORKSPACE] Page {page_number} out of range ({self.page_spin.minimum()}-{self.page_spin.maximum()})")
-            return
-        
-        # Set the page
-        self.page_spin.setValue(page_number)
+
+        # Call on_page_changed directly (page_spin is deprecated)
+        self.on_page_changed(page_number)
         print(f"[WORKSPACE] Switched to page {page_number}")
     def _apply_ocr_adjustment_to_rows(self, row_ids: List[int], delta_x1: int, delta_y1: int,
                                       delta_x2: int, delta_y2: int,
@@ -5774,13 +7715,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 if pd.isna(old_ocr_x1):
                     continue
 
-                # ✅ SPECIAL HANDLING: For the current symbol being adjusted,
+                #  SPECIAL HANDLING: For the current symbol being adjusted,
                 # use absolute coordinates instead of applying deltas
                 # This prevents double-adjustment since the user already dragged it to the desired position
-                print(f"      🔍 DEBUG: current_row_id={current_row_id}, rid={rid}, match={current_row_id is not None and rid == current_row_id}")
+                print(f"DEBUG: current_row_id={current_row_id}, rid={rid}, match={current_row_id is not None and rid == current_row_id}")
                 if current_row_id is not None and rid == current_row_id:
-                    print(f"      🎯 Current symbol (row {rid}): Using absolute coordinates")
-                    print(f"         Absolute: x1={new_x}, y1={new_y}, x2={new_x2}, y2={new_y2}")
+                    print(f" Current symbol (row {rid}): Using absolute coordinates")
+                    print(f"Absolute: x1={new_x}, y1={new_y}, x2={new_x2}, y2={new_y2}")
                     new_ocr_x1 = new_x
                     new_ocr_y1 = new_y
                     new_ocr_x2 = new_x2
@@ -5793,10 +7734,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     # Check if angle exists and is valid
                     if symbol_angle is None or pd.isna(symbol_angle):
                         symbol_angle = 0.0
-                        print(f"      ⚠️ Row {rid}: No angle data, using 0°")
+                        print(f"Row {rid}: No angle data, using 0°")
                     else:
                         symbol_angle = float(symbol_angle)
-                        print(f"      📐 Row {rid}: Symbol angle = {symbol_angle:.1f}°")
+                        print(f" Row {rid}: Symbol angle = {symbol_angle:.1f}°")
 
                     # Transform edge deltas based on rotation
                     # The deltas were calculated for a reference symbol at a specific rotation
@@ -5813,7 +7754,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         final_dy1 = -delta_x2
                         final_dx2 = delta_y2
                         final_dy2 = -delta_x1
-                        print(f"         🔄 90° rotation: (x1={delta_x1}, x2={delta_x2}, y1={delta_y1}, y2={delta_y2}) "
+                        print(f" 90° rotation: (x1={delta_x1}, x2={delta_x2}, y1={delta_y1}, y2={delta_y2}) "
                               f"→ (x1={final_dx1}, x2={final_dx2}, y1={final_dy1}, y2={final_dy2})")
                     elif 135 <= norm_angle < 225:  # ~180° rotation
                         # Edges map: x1→x2, x2→x1, y1→y2, y2→y1
@@ -5821,7 +7762,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         final_dy1 = -delta_y2
                         final_dx2 = -delta_x1
                         final_dy2 = -delta_y1
-                        print(f"         🔄 180° rotation: (x1={delta_x1}, x2={delta_x2}, y1={delta_y1}, y2={delta_y2}) "
+                        print(f" 180° rotation: (x1={delta_x1}, x2={delta_x2}, y1={delta_y1}, y2={delta_y2}) "
                               f"→ (x1={final_dx1}, x2={final_dx2}, y1={final_dy1}, y2={final_dy2})")
                     elif 225 <= norm_angle < 315:  # ~270° rotation
                         # Edges map: x1→y1, x2→y2, y1→x2, y2→x1
@@ -5829,7 +7770,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         final_dy1 = delta_x1
                         final_dx2 = -delta_y1
                         final_dy2 = delta_x2
-                        print(f"         🔄 270° rotation: (x1={delta_x1}, x2={delta_x2}, y1={delta_y1}, y2={delta_y2}) "
+                        print(f" 270° rotation: (x1={delta_x1}, x2={delta_x2}, y1={delta_y1}, y2={delta_y2}) "
                               f"→ (x1={final_dx1}, x2={final_dx2}, y1={final_dy1}, y2={final_dy2})")
                     else:  # ~0° rotation
                         # No transformation needed
@@ -5837,7 +7778,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         final_dy1 = delta_y1
                         final_dx2 = delta_x2
                         final_dy2 = delta_y2
-                        print(f"         ➡️  0° rotation: no edge transformation needed")
+                        print(f"0° rotation: no edge transformation needed")
 
                     # Apply edge-specific adjustments
                     new_ocr_x1 = old_ocr_x1 + final_dx1
@@ -5856,10 +7797,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     )
 
                     if not is_valid:
-                        print(f"      ⚠️ Row {rid}: Adjusted region is invalid (too small or out of bounds), skipping")
+                        print(f"Row {rid}: Adjusted region is invalid (too small or out of bounds), skipping")
                         continue
 
-                    print(f"      ✅ Valid region: ({new_ocr_x1:.0f}, {new_ocr_y1:.0f}, {new_ocr_x2:.0f}, {new_ocr_y2:.0f})")
+                    print(f"Valid region: ({new_ocr_x1:.0f}, {new_ocr_y1:.0f}, {new_ocr_x2:.0f}, {new_ocr_y2:.0f})")
 
                 # Update dataframe
                 self.df_all.loc[row_idx, 'ocr_x1'] = new_ocr_x1
@@ -5901,16 +7842,16 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         item.setText(0, new_text)
                         self.tree.blockSignals(False)
 
-                    print(f"      ✅ Updated row {rid}: '{new_text}' (conf={ocr_conf:.2f})")
+                    print(f"Updated row {rid}: '{new_text}' (conf={ocr_conf:.2f})")
 
                     # Track this row for incremental overlay update
                     updated_row_ids.append(rid)
 
             except Exception as e:
-                print(f"      ⚠️ Error updating row {rid}: {e}")
+                print(f"Error updating row {rid}: {e}")
 
-        # ✅ OPTIMIZED: Only update overlays for affected rows (not full page rebuild)
-        print(f"   🔄 Updating overlays for {len(updated_row_ids)} rows...")
+        #  OPTIMIZED: Only update overlays for affected rows (not full page rebuild)
+        print(f" Updating overlays for {len(updated_row_ids)} rows...")
         for rid in updated_row_ids:
             self._update_single_row_overlay(rid)
 
@@ -5948,8 +7889,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 # Save to config
                 detector._save_config()
 
-                print(f"   💾 Saved OCR region to template '{symbol_class}'")
-                print(f"      dx={dx}, dy={dy}, width={width}, height={height}")
+                print(f" Saved OCR region to template '{symbol_class}'")
+                print(f"dx={dx}, dy={dy}, width={width}, height={height}")
 
                 QtWidgets.QMessageBox.information(
                     self,
@@ -5958,10 +7899,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     f"Diese Anpassung wird automatisch auf alle zukünftigen Pläne angewendet."
                 )
             else:
-                print(f"   ⚠️ Symbol '{symbol_class}' not found in detector")
+                print(f"Symbol '{symbol_class}' not found in detector")
 
         except Exception as e:
-            print(f"   ⚠️ Error saving to template: {e}")
+            print(f"Error saving to template: {e}")
             import traceback
             traceback.print_exc()
 
@@ -5995,9 +7936,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 # Mark as applied
                 self.ocr_adjustment_tracker.apply_learned_to_template(symbol_class)
 
-                print(f"   ✅ Auto-learning suggestion accepted for '{symbol_class}'")
+                print(f"Auto-learning suggestion accepted for '{symbol_class}'")
 
         except Exception as e:
-            print(f"   ⚠️ Error showing auto-learning suggestion: {e}")
+            print(f"Error showing auto-learning suggestion: {e}")
             import traceback
             traceback.print_exc()

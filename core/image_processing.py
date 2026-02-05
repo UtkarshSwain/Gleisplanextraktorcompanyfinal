@@ -152,14 +152,20 @@ def perspective_crop_from_det(det: dict, page_bgr: np.ndarray, pad: int = 6) -> 
     poly = det.get("poly", None)
     if isinstance(poly, np.ndarray):
         pts = poly.astype(np.float32)
+        # Handle flat 1D array [x1,y1,x2,y2,x3,y3,x4,y4] -> reshape to [[x1,y1],...]
+        if pts.ndim == 1 and len(pts) == 8:
+            pts = pts.reshape(4, 2)
     elif isinstance(poly, (list, tuple)) and len(poly) == 4:
         pts = np.array(poly, dtype=np.float32)
+    elif isinstance(poly, (list, tuple)) and len(poly) == 8:
+        # Flat list [x1,y1,x2,y2,...] -> reshape to [[x1,y1],...]
+        pts = np.array(poly, dtype=np.float32).reshape(4, 2)
     else:
         cx = float(det.get("obb_cx", (det["x1"] + det["x2"]) / 2))
         cy = float(det.get("obb_cy", (det["y1"] + det["y2"]) / 2))
         w = float(det.get("obb_w", det["x2"] - det["x1"]))
         h = float(det.get("obb_h", det["y2"] - det["y1"]))
-        # ✅ AFTER (CORRECT - use normalized angle with normalized dimensions):
+        #  AFTER (CORRECT - use normalized angle with normalized dimensions):
         ang_deg = float(det.get("angle", det.get("angle_raw", 0.0)))
         pts = obb_xywhr_to_polygon(cx, cy, w, h, math.radians(ang_deg)).astype(np.float32)
 
@@ -189,12 +195,12 @@ def perspective_crop_from_det(det: dict, page_bgr: np.ndarray, pad: int = 6) -> 
     pts_local[:, 0] -= x_min
     pts_local[:, 1] -= y_min
 
-    s = pts_local.sum(axis=1)
-    d = np.diff(pts_local, axis=1).reshape(-1)
-    tl = pts_local[np.argmin(s)]
-    br = pts_local[np.argmax(s)]
-    tr = pts_local[np.argmin(d)]
-    bl = pts_local[np.argmax(d)]
+    # Use polygon order directly (TL, TR, BR, BL from obb_xywhr_to_polygon)
+    # The sum/diff method fails for significantly tilted rectangles
+    tl = pts_local[0]
+    tr = pts_local[1]
+    br = pts_local[2]
+    bl = pts_local[3]
 
     wA = np.linalg.norm(br - bl)
     wB = np.linalg.norm(tr - tl)
@@ -227,7 +233,7 @@ def rotated_crop_from_det(det: dict, bgr_color: np.ndarray, pad: int = 6) -> Ima
     w = float(det.get("obb_w", det["x2"] - det["x1"]))
     h = float(det.get("obb_h", det["y2"] - det["y1"]))
     
-    # ✓ CRITICAL FIX: Use NORMALIZED angle (matches normalized dimensions)
+    #  CRITICAL FIX: Use NORMALIZED angle (matches normalized dimensions)
     # Previously: used angle_raw → mismatch with obb_w/obb_h
     ang = float(det.get("angle", 0.0))  # Use normalized angle!
     

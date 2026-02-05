@@ -5,7 +5,7 @@ import os
 from PIL import Image, ImageFile
 import cv2
 import re
-from config import POPPLER_PATH, DEBUG_ANGLE_ROUTING, MAX_OCR_WORKERS, CLASS_THRESH, CLASSES, LINK_RULES, ALIASES, DPI, TILE_SIZE
+from config import POPPLER_PATH, DEBUG_ANGLE_ROUTING, DEBUG_YOLO, DEBUG_TRACK, DEBUG_CUSTOM_SYMBOLS, DEBUG_LINKING, DEBUG_OCR, MAX_OCR_WORKERS, CLASS_THRESH, CLASSES, LINK_RULES, ALIASES, DPI, TILE_SIZE
 from pdf2image import convert_from_path, pdfinfo_from_path
 from core.yolo_detection import run_yolo_on_page, run_combined_detection, box_color, pil_to_bgr, tile_image, OVERLAP_PCT, color_masks
 from ultralytics import YOLO
@@ -40,7 +40,7 @@ class PipelineWorker(QtCore.QThread):
     progress = QtCore.pyqtSignal(int)  # 0..100
     status = QtCore.pyqtSignal(str)    # log lines
     page_processed = QtCore.pyqtSignal(int, object, pd.DataFrame)
-    done = QtCore.pyqtSignal(pd.DataFrame, object, object, object) # df, page_dfs, track_skeleton, exception
+    done = QtCore.pyqtSignal(pd.DataFrame, object, object, object, list) # df, page_dfs, track_skeleton, exception, uncertain_detections
     track_detection_progress = QtCore.pyqtSignal(str)
 
     # Supported image formats (loaded directly without conversion)
@@ -56,6 +56,9 @@ class PipelineWorker(QtCore.QThread):
         self.run_analysis = run_analysis
         self.detect_tracks = detect_tracks
 
+        # Storage for uncertain (low-confidence) detections for user review
+        self.uncertain_detections = []
+
         # Determine if input is an image file
         self._is_image_file = file_path.lower().endswith(self.IMAGE_EXTENSIONS)
         
@@ -67,7 +70,8 @@ class PipelineWorker(QtCore.QThread):
         try:
             # Extract base layout name for deterministic UUIDs
             base_layout_name = extract_base_layout_name(self.pdf_path)
-            print(f"\n🔑 Base layout name for UUID generation: '{base_layout_name}'")
+            if DEBUG_YOLO:
+                print(f"\n Base layout name for UUID generation: '{base_layout_name}'")
 
             # Helper function to generate deterministic UUID
             def make_uuid(element_dict):
@@ -89,9 +93,9 @@ class PipelineWorker(QtCore.QThread):
             all_rows = []
             page_bgr_arrays = {}
             page_dfs = {}
-            track_skeleton = None  # ✅ Define at top level
-            gks_dets = []  # ✅ Define at top level to avoid undefined variable
-            all_gks_dets = []  # ✅ Accumulate GKS from all pages for Tier 3/4 fallbacks
+            track_skeleton = None  #  Define at top level
+            gks_dets = []  #  Define at top level to avoid undefined variable
+            all_gks_dets = []  #  Accumulate GKS from all pages for Tier 3/4 fallbacks
 
             # 1. ALWAYS get page count
             if self._is_image_file:
@@ -115,36 +119,37 @@ class PipelineWorker(QtCore.QThread):
                 self.progress.emit(5)
                 set_classes_from_model(model)
                 
-                # 🔍 DIAGNOSTIC: Verify class order
-                print(f"\n{'='*70}")
-                print(f"🔍 CLASS ORDER VERIFICATION")
-                print(f"{'='*70}")
+                #  DIAGNOSTIC: Verify class order
+                if DEBUG_YOLO:
+                    print(f"\n{'='*70}")
+                    print(f"CLASS ORDER VERIFICATION")
+                    print(f"{'='*70}")
 
-                critical_classes = {
-                    9: 'prellblock',
-                    10: 'haltetafel',
-                    11: 'endeweichen',
-                }
+                    critical_classes = {
+                        9: 'prellblock',
+                        10: 'haltetafel',
+                        11: 'endeweichen',
+                    }
 
-                all_correct = True
-                for idx, expected in critical_classes.items():
-                    actual = CLASSES[idx] if idx < len(CLASSES) else '(missing)'
-                    status = '✅' if actual == expected else '❌'
-                    print(f"   [{idx:2d}] {status} Expected: '{expected:15s}' | Got: '{actual}'")
-                    if actual != expected:
-                        all_correct = False
+                    all_correct = True
+                    for idx, expected in critical_classes.items():
+                        actual = CLASSES[idx] if idx < len(CLASSES) else '(missing)'
+                        status = '' if actual == expected else ''
+                        print(f"[{idx:2d}] {status} Expected: '{expected:15s}' | Got: '{actual}'")
+                        if actual != expected:
+                            all_correct = False
 
-                if all_correct:
-                    print(f"\n✅ Class order is CORRECT!")
-                else:
-                    print(f"\n❌ Class order is WRONG! Check your config.py")
+                    if all_correct:
+                        print(f"\nClass order is CORRECT!")
+                    else:
+                        print(f"\nClass order is WRONG! Check your config.py")
 
-                print(f"\nAliasing test:")
-                print(f"   canon_name('endeweichen') → '{canon_name('endeweichen')}'  (should be 'weichenende')")
-                print(f"   canon_name('prellblock')  → '{canon_name('prellblock')}'   (should be 'prellblock')")
-                print(f"   canon_name('haltetafel')  → '{canon_name('haltetafel')}'   (should be 'haltetafel')")
+                    print(f"\nAliasing test:")
+                    print(f"canon_name('endeweichen') → '{canon_name('endeweichen')}'  (should be 'weichenende')")
+                    print(f"canon_name('prellblock')  → '{canon_name('prellblock')}'   (should be 'prellblock')")
+                    print(f"canon_name('haltetafel')  → '{canon_name('haltetafel')}'   (should be 'haltetafel')")
 
-                print(f"{'='*70}\n")
+                    print(f"{'='*70}\n")
                 self.status.emit(f"[init] Model classes: {CLASSES}")
 
                 ALIAS_REV = {}
@@ -221,7 +226,22 @@ class PipelineWorker(QtCore.QThread):
 
                     t_det = time.perf_counter()
                     # Use combined detection: YOLO + Custom Symbols
-                    dets = run_combined_detection(model, bgr_color, detect_custom=True)
+                    all_dets = run_combined_detection(model, bgr_color, detect_custom=True)
+
+                    # Separate confirmed and uncertain detections
+                    confirmed_dets = [d for d in all_dets if d.get('detection_status', 'confirmed') == 'confirmed']
+                    page_uncertain = [d for d in all_dets if d.get('detection_status') == 'uncertain']
+
+                    # Add page info to uncertain detections and store them
+                    for ud in page_uncertain:
+                        ud['page'] = pidx
+                    self.uncertain_detections.extend(page_uncertain)
+
+                    if page_uncertain and DEBUG_YOLO:
+                        print(f"[page {pidx}] Found {len(page_uncertain)} uncertain detections for user review")
+
+                    # Continue processing with confirmed detections only
+                    dets = confirmed_dets
 
                     # Count by source (YOLO vs CUSTOM)
                     yolo_count = sum(1 for d in dets if not d.get('is_custom_symbol', False))
@@ -238,11 +258,12 @@ class PipelineWorker(QtCore.QThread):
                         if d.get('is_custom_symbol', False):
                             class_counts[canon]['custom'] += 1
 
-                    for canon, info in sorted(class_counts.items()):
-                        custom_marker = f" [+{info['custom']} custom]" if info['custom'] > 0 else ""
-                        print(f"   {canon:20s} (raw: {info['raw']:20s}) → {info['count']:3d} detections{custom_marker}")
+                    if DEBUG_YOLO:
+                        for canon, info in sorted(class_counts.items()):
+                            custom_marker = f" [+{info['custom']} custom]" if info['custom'] > 0 else ""
+                            print(f"{canon:20s} (raw: {info['raw']:20s}) → {info['count']:3d} detections{custom_marker}")
 
-                    print(f"{'='*60}\n")
+                        print(f"{'='*60}\n")
                     dt_det = time.perf_counter() - t_det
                     cnt = Counter(d['name'] for d in dets)
                     summary = ", ".join(f"{k}:{v}" for k, v in sorted(cnt.items()))
@@ -281,15 +302,15 @@ class PipelineWorker(QtCore.QThread):
                         
                         if DEBUG_ANGLE_ROUTING and txt:
                             if txt_cleaned != txt:
-                                print(f"   [OCR Coordinate] After clean_overlap: '{txt}' → '{txt_cleaned}'")
+                                print(f"[OCR Coordinate] After clean_overlap: '{txt}' → '{txt_cleaned}'")
                             if txt_fixed != txt_cleaned:
-                                print(f"   [OCR Coordinate] After fix_brackets: '{txt_cleaned}' → '{txt_fixed}'")
+                                print(f"[OCR Coordinate] After fix_brackets: '{txt_cleaned}' → '{txt_fixed}'")
                         
                         val, gi = parse_coord(txt_fixed)
                         
                         if DEBUG_ANGLE_ROUTING and txt:
-                            print(f"   [OCR Coordinate] Final parse result: value={val}, gi_gl={gi}")
-                            print(f"   [OCR Coordinate] Complete flow: '{txt}' → '{txt_fixed}' → value={val}, gi_gl={gi}\n")
+                            print(f"[OCR Coordinate] Final parse result: value={val}, gi_gl={gi}")
+                            print(f"[OCR Coordinate] Complete flow: '{txt}' → '{txt_fixed}' → value={val}, gi_gl={gi}\n")
                         
                         c_color = box_color(mask_red, mask_yel, c["x1"], c["y1"], c["x2"], c["y2"])
                         return (id(c), dict(text=txt_fixed, value=val, gi=gi, color=c_color))
@@ -342,15 +363,16 @@ class PipelineWorker(QtCore.QThread):
                             logger.debug(f"Could not load custom symbols from JSON: {e}")
 
                     # DEBUG: Print loaded configs
-                    print(f"\n🔍 DEBUG: Loaded {len(custom_symbol_config)} custom symbol configs:")
-                    for sym_name, sym_cfg in custom_symbol_config.items():
-                        has_text = sym_cfg.get("has_text", False)
-                        text_region = sym_cfg.get("text_region_offset", None)
-                        print(f"  - {sym_name}: has_text={has_text}, text_region_offset={text_region}")
+                    if DEBUG_CUSTOM_SYMBOLS:
+                        print(f"\nDEBUG: Loaded {len(custom_symbol_config)} custom symbol configs:")
+                        for sym_name, sym_cfg in custom_symbol_config.items():
+                            has_text = sym_cfg.get("has_text", False)
+                            text_region = sym_cfg.get("text_region_offset", None)
+                            print(f"  - {sym_name}: has_text={has_text}, text_region_offset={text_region}")
 
                     def _do_anchor(a):
                         a_color = box_color(mask_red, mask_yel, a["x1"], a["y1"], a["x2"], a["y2"])
-                        # ✅ Initialize all variables at the top to avoid UnboundLocalError
+                        #  Initialize all variables at the top to avoid UnboundLocalError
                         ocr_bbox = None
                         ocr_position = None
                         ocr_conf = 0.0
@@ -363,29 +385,34 @@ class PipelineWorker(QtCore.QThread):
                         elif a.get("is_custom_symbol") and a["name"] in custom_symbol_config:
                             # Custom symbol with specific text position (or precise region)
                             sym_cfg = custom_symbol_config[a["name"]]
-                            print(f"\n🔍 Processing custom symbol: {a['name']}")
-                            print(f"   Config: has_text={sym_cfg.get('has_text', False)}, text_position={sym_cfg.get('text_position')}, text_region_offset={sym_cfg.get('text_region_offset')}")
+                            if DEBUG_CUSTOM_SYMBOLS:
+                                print(f"\nProcessing custom symbol: {a['name']}")
+                                print(f"Config: has_text={sym_cfg.get('has_text', False)}, text_position={sym_cfg.get('text_position')}, text_region_offset={sym_cfg.get('text_region_offset')}")
                             if sym_cfg.get("has_text", False):
                                 text_pos = sym_cfg.get("text_position", "left")
                                 text_region = sym_cfg.get("text_region_offset", None)
-                                print(f"   Calling ocr_custom_symbol_text with text_region_offset={text_region}")
+                                if DEBUG_CUSTOM_SYMBOLS:
+                                    print(f"Calling ocr_custom_symbol_text with text_region_offset={text_region}")
                                 # ocr_custom_symbol_text now returns (text, bbox, position, confidence)
                                 name_txt, ocr_bbox, ocr_position, ocr_conf = ocr_custom_symbol_text(
                                     a, bgr_color, text_pos, self.ocr_engine,
                                     text_region_offset=text_region
                                 )
                                 # Debug: Show OCR bbox result
-                                if ocr_bbox:
-                                    print(f"   ✅ OCR bbox returned: {ocr_bbox}, position={ocr_position}, conf={ocr_conf:.2f}")
-                                else:
-                                    print(f"   ⚠️ No OCR bbox returned (text='{name_txt}')")
+                                if DEBUG_CUSTOM_SYMBOLS:
+                                    if ocr_bbox:
+                                        print(f"OCR bbox returned: {ocr_bbox}, position={ocr_position}, conf={ocr_conf:.2f}")
+                                    else:
+                                        print(f"No OCR bbox returned (text='{name_txt}')")
                             else:
-                                print(f"   ⚠️ Symbol has has_text=False, skipping OCR")
+                                if DEBUG_CUSTOM_SYMBOLS:
+                                    print(f"Symbol has has_text=False, skipping OCR")
                                 name_txt = ""
                         elif a.get("is_custom_symbol"):
                             # Custom symbol but NOT in config - this is the problem case!
-                            print(f"\n⚠️ WARNING: Custom symbol '{a['name']}' detected but NOT in custom_symbol_config!")
-                            print(f"   Available configs: {list(custom_symbol_config.keys())}")
+                            if DEBUG_CUSTOM_SYMBOLS:
+                                print(f"\n WARNING: Custom symbol '{a['name']}' detected but NOT in custom_symbol_config!")
+                                print(f"Available configs: {list(custom_symbol_config.keys())}")
                             ocr_result = ocr_anchor_name(a, bgr_color, self.ocr_engine)
                             name_txt = ocr_result
                         else:
@@ -408,20 +435,22 @@ class PipelineWorker(QtCore.QThread):
                     # ========================================
                     # STEP: TRACK DETECTION (before Fahrtrichtung)
                     # ========================================
-                    track_bounds = None  # ✅ Initialize track_bounds
+                    track_bounds = None  #  Initialize track_bounds
 
                     if self.detect_tracks:
-                        print(f"\n{'='*70}")
-                        print(f"🛤️  TRACK DETECTION - Page {pidx}")
-                        print(f"{'='*70}")
-                        
+                        if DEBUG_TRACK:
+                            print(f"\n{'='*70}")
+                            print(f"  TRACK DETECTION - Page {pidx}")
+                            print(f"{'='*70}")
+
                         try:
                             from track_detection import detect_main_tracks
-                            from core.linking import get_track_bounds  # ✅ Import track bounds function
-                            
+                            from core.linking import get_track_bounds  #  Import track bounds function
+
                             def track_progress(msg):
                                 self.track_detection_progress.emit(msg)
-                                print(msg)
+                                if DEBUG_TRACK:
+                                    print(msg)
 
                             # Detect tracks BEFORE Fahrtrichtung detection
                             # For images, pass the BGR array directly; for PDFs, use pdf_path
@@ -443,46 +472,52 @@ class PipelineWorker(QtCore.QThread):
                                 )
                             
                             track_pixels = np.count_nonzero(track_skeleton)
-                            print(f"✅ Track detection complete: {track_pixels} pixels")
-                            print(f"   Track skeleton shape: {track_skeleton.shape}")
-                            
-                            # ✅ Calculate track bounds
+                            if DEBUG_TRACK:
+                                print(f"Track detection complete: {track_pixels} pixels")
+                                print(f"Track skeleton shape: {track_skeleton.shape}")
+
+                            #  Calculate track bounds
                             if track_skeleton is not None and track_pixels > 0:
                                 track_bounds = get_track_bounds(track_skeleton)
-                                print(f"   Track bounds: Y=[{track_bounds['y_min']}, {track_bounds['y_max']}] (height={track_bounds['height']}px)")
-                                print(f"                 X=[{track_bounds['x_min']}, {track_bounds['x_max']}] (width={track_bounds['width']}px)")
-                            
-                            print(f"{'='*70}\n")
-                            
+                                if DEBUG_TRACK:
+                                    print(f"Track bounds: Y=[{track_bounds['y_min']}, {track_bounds['y_max']}] (height={track_bounds['height']}px)")
+                                    print(f"X=[{track_bounds['x_min']}, {track_bounds['x_max']}] (width={track_bounds['width']}px)")
+
+                            if DEBUG_TRACK:
+                                print(f"{'='*70}\n")
+
                         except Exception as e:
                             import traceback
-                            print(f"❌ Track detection failed: {e}")
+                            if DEBUG_TRACK:
+                                print(f"Track detection failed: {e}")
                             traceback.print_exc()
-                            self.status.emit(f"[track] ⚠️ Track detection failed: {e}")
+                            self.status.emit(f"[track]  Track detection failed: {e}")
                             track_skeleton = None
-                            track_bounds = None  # ✅ Ensure track_bounds is None on failure
+                            track_bounds = None  #  Ensure track_bounds is None on failure
                     
                     # ========================================
                     # STEP: FAHRTRICHTUNG DETECTION (GKS ONLY)
                     # ========================================
-                    print(f"\n{'='*70}")
-                    print(f"🧭 FAHRTRICHTUNG DETECTION - Page {pidx} (GKS-based only)")
-                    print(f"{'='*70}")
-                    
+                    if DEBUG_LINKING:
+                        print(f"\n{'='*70}")
+                        print(f" FAHRTRICHTUNG DETECTION - Page {pidx} (GKS-based only)")
+                        print(f"{'='*70}")
+
                     signal_dets = [a for a, _, _, _, _, _, _ in anchor_results if a["name"] == "signal"]
                     gks_dets = [a for a, _, _, _, _, _, _ in anchor_results if a["name"] == "gks_gesteuert"]
                     fahrtrichtung_map = {}
-                    
-                    print(f"   Signals to process: {len(signal_dets)}")
-                    print(f"   GKS boxes available: {len(gks_dets)}")
 
-                    # ✅ Accumulate GKS with page info for Tier 3/4 fallbacks
+                    if DEBUG_LINKING:
+                        print(f"Signals to process: {len(signal_dets)}")
+                        print(f"GKS boxes available: {len(gks_dets)}")
+
+                    #  Accumulate GKS with page info for Tier 3/4 fallbacks
                     for gks_det in gks_dets:
                         gks_copy = gks_det.copy()
                         gks_copy['page'] = pidx
                         all_gks_dets.append(gks_copy)
 
-                    # ✅ GKS-based detection ONLY (no track fallback yet)
+                    #  GKS-based detection ONLY (no track fallback yet)
                     for signal_det in signal_dets:
                         signal_text = None
                         for a, _, name_txt, _, _, _, _ in anchor_results:
@@ -495,34 +530,39 @@ class PipelineWorker(QtCore.QThread):
                         fahrtrichtung = detect_fahrtrichtung(
                             signal_det, 
                             gks_dets, 
-                            track_skeleton=None,  # ✅ Don't use track yet
-                            track_bounds=None,    # ✅ NEW: Pass track_bounds (None for now)
+                            track_skeleton=None,  #  Don't use track yet
+                            track_bounds=None,    #  NEW: Pass track_bounds (None for now)
                             max_distance=250
                         )
                         
                         if fahrtrichtung:
-                            # ✅ CHANGE 1: Store as dict with source tracking
+                            #  CHANGE 1: Store as dict with source tracking
                             fahrtrichtung_map[id(signal_det)] = {
                                 'fahrtrichtung': fahrtrichtung,
                                 'source': 'gks'
                             }
-                            print(f"   ✅ Signal '{signal_text}': Fahrtrichtung = {fahrtrichtung} (GKS)")
+                            if DEBUG_LINKING:
+                                print(f"Signal '{signal_text}': Fahrtrichtung = {fahrtrichtung} (GKS)")
                         else:
-                            print(f"   ⚠️ Signal '{signal_text}': No Fahrtrichtung from GKS")
-                    
-                    print(f"\n{'='*70}")
-                    print(f"   Total Fahrtrichtung from GKS: {len(fahrtrichtung_map)}/{len(signal_dets)}")
-                    print(f"{'='*70}\n")
-                                
-                    # ✅ NEW: Haltepunkt-Signal-Coordinate grouping detection
-                    print(f"\n{'='*70}")
-                    print(f"🏢 HALTEPUNKT GROUP DETECTION - Page {pidx}")
-                    print(f"{'='*70}")
+                            if DEBUG_LINKING:
+                                print(f"Signal '{signal_text}': No Fahrtrichtung from GKS")
+
+                    if DEBUG_LINKING:
+                        print(f"\n{'='*70}")
+                        print(f"Total Fahrtrichtung from GKS: {len(fahrtrichtung_map)}/{len(signal_dets)}")
+                        print(f"{'='*70}\n")
+
+                    #  NEW: Haltepunkt-Signal-Coordinate grouping detection
+                    if DEBUG_LINKING:
+                        print(f"\n{'='*70}")
+                        print(f" HALTEPUNKT GROUP DETECTION - Page {pidx}")
+                        print(f"{'='*70}")
 
                     haltepunkt_dets = [a for a, _, _, _, _, _, _ in anchor_results if a["name"] == "haltepunkt"]
                     haltepunkt_groups = {}
-                    
-                    print(f"   Haltepunkt detections: {len(haltepunkt_dets)}")
+
+                    if DEBUG_LINKING:
+                        print(f"Haltepunkt detections: {len(haltepunkt_dets)}")
                     
                     # Prepare coordinate detections with their OCR text
                     coord_dets_with_text = []
@@ -543,7 +583,7 @@ class PipelineWorker(QtCore.QThread):
                         }
                         coord_dets_with_text.append(c_with_text)
 
-                    # ✅ NEW: Track which signal detections are haltepunkt-referenced
+                    #  NEW: Track which signal detections are haltepunkt-referenced
                     haltepunkt_referenced_signals = set()
 
                     # Detect groups for each haltepunkt
@@ -557,28 +597,32 @@ class PipelineWorker(QtCore.QThread):
                         
                         if group:
                             haltepunkt_groups[id(haltepunkt_det)] = group
-                            
-                            # ✅ Mark the signal detection to skip
+
+                            #  Mark the signal detection to skip
                             if group.get('signal_det'):
                                 haltepunkt_referenced_signals.add(id(group['signal_det']))
-                                print(f"   ✅ Haltepunkt group: signal='{group['signal']}' (will skip signal processing)")
+                                if DEBUG_LINKING:
+                                    print(f"Haltepunkt group: signal='{group['signal']}' (will skip signal processing)")
                             else:
-                                print(f"   ✅ Haltepunkt group: signal='{group['signal']}', coordinate='{group.get('coordinate', '')}'")
+                                if DEBUG_LINKING:
+                                    print(f"Haltepunkt group: signal='{group['signal']}', coordinate='{group.get('coordinate', '')}'")
 
-                    print(f"   Total groups detected: {len(haltepunkt_groups)}")
-                    print(f"   Signals to skip: {len(haltepunkt_referenced_signals)}")
-                    print(f"{'='*70}\n")
-                    
+                    if DEBUG_LINKING:
+                        print(f"Total groups detected: {len(haltepunkt_groups)}")
+                        print(f"Signals to skip: {len(haltepunkt_referenced_signals)}")
+                        print(f"{'='*70}\n")
+
                     # Linking + rows
                     used_coord_ids = set()
                     learned_patterns = {}
 
-                    # ✅ STEP 1: Build a map of GKS → coordinate FIRST
+                    #  STEP 1: Build a map of GKS → coordinate FIRST
                     gks_coord_map = {}
 
-                    print(f"\n{'='*70}")
-                    print(f"🔗 STEP 1: Pre-linking GKS boxes to coordinates")
-                    print(f"{'='*70}")
+                    if DEBUG_LINKING:
+                        print(f"\n{'='*70}")
+                        print(f" STEP 1: Pre-linking GKS boxes to coordinates")
+                        print(f"{'='*70}")
 
                     for (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf) in anchor_results:
                         if a["name"] in ["gks_festkodiert", "gks_gesteuert"]:
@@ -602,22 +646,26 @@ class PipelineWorker(QtCore.QThread):
                                     coord_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', coord_txt)
                                     coord_txt = re.sub(r'\s*[|/\\]\s*$', '', coord_txt)
                                     coord_txt = ' '.join(coord_txt.split()).strip()
-                                    print(f"   GKS '{name_txt}' → coordinate '{coord_txt}'")
+                                    if DEBUG_LINKING:
+                                        print(f"GKS '{name_txt}' → coordinate '{coord_txt}'")
 
-                    print(f"   Total GKS linked: {len(gks_coord_map)}")
-                    print(f"{'='*70}\n")
+                    if DEBUG_LINKING:
+                        print(f"Total GKS linked: {len(gks_coord_map)}")
+                        print(f"{'='*70}\n")
 
                     # ========================================
-                    # ✅ STEP 1B: Pre-link SVERBINDER to coordinates
+                    #  STEP 1B: Pre-link SVERBINDER to coordinates
                     # ========================================
-                    print(f"\n{'='*70}")
-                    print(f"🔗 STEP 1B: Pre-linking Sverbinder to coordinates")
-                    print(f"{'='*70}")
+                    if DEBUG_LINKING:
+                        print(f"\n{'='*70}")
+                        print(f" STEP 1B: Pre-linking Sverbinder to coordinates")
+                        print(f"{'='*70}")
 
                     sverbinder_coord_map = {}
                     sverbinder_dets = [a for a, _, _, _, _, _, _ in anchor_results if a["name"] == "sverbinder"]
 
-                    print(f"   Sverbinder detections: {len(sverbinder_dets)}")
+                    if DEBUG_LINKING:
+                        print(f"Sverbinder detections: {len(sverbinder_dets)}")
 
                     for sverbinder_det in sverbinder_dets:
                         available_coords = [c for c in coords if id(c) not in used_coord_ids]
@@ -640,40 +688,89 @@ class PipelineWorker(QtCore.QThread):
                                 coord_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', coord_txt)
                                 coord_txt = re.sub(r'\s*[|/\\]\s*$', '', coord_txt)
                                 coord_txt = ' '.join(coord_txt.split()).strip()
-                                print(f"   Sverbinder → coordinate '{coord_txt}'")
+                                if DEBUG_LINKING:
+                                    print(f"Sverbinder → coordinate '{coord_txt}'")
 
-                    print(f"   Total Sverbinder linked: {len(sverbinder_coord_map)}")
-                    print(f"{'='*70}\n")
+                    if DEBUG_LINKING:
+                        print(f"Total Sverbinder linked: {len(sverbinder_coord_map)}")
+                        print(f"{'='*70}\n")
 
-                    print(f"\n{'='*70}")
-                    print(f"🔗 STEP 2: Linking all elements (including haltetafel)")
-                    print(f"{'='*70}")
+                    # ========================================
+                    #  STEP 1C: Pre-link HALTEPUNKT to coordinates (soft-claim)
+                    # ========================================
+                    if DEBUG_LINKING:
+                        print(f"\n{'='*70}")
+                        print(f" STEP 1C: Pre-linking Haltepunkt to coordinates (soft-claim)")
+                        print(f"{'='*70}")
 
-                    # ✅ STEP 2: Now process ALL elements (including haltetafel)
+                    haltepunkt_coord_ids = set()  # Soft-claimed by haltepunkt
+                    haltepunkt_coord_map = {}  # Map haltepunkt ID -> coordinate
+
+                    for haltepunkt_det in haltepunkt_dets:
+                        group = haltepunkt_groups.get(id(haltepunkt_det))
+
+                        # Try to get coordinate from group detection first
+                        if group and group.get('coordinate'):
+                            coord_txt = group['coordinate']
+                            # Find the coordinate detection
+                            for c in coords:
+                                meta = coord_meta.get(id(c), {})
+                                if meta.get('text') == coord_txt:
+                                    haltepunkt_coord_ids.add(id(c))
+                                    haltepunkt_coord_map[id(haltepunkt_det)] = c
+                                    if DEBUG_LINKING:
+                                        print(f"Haltepunkt (group) → '{coord_txt}' (soft-claimed)")
+                                    break
+                        else:
+                            # Direct linking fallback - exclude sverbinder coords
+                            sverbinder_coord_id_set = set(id(c) for c in sverbinder_coord_map.values())
+                            available_coords = [c for c in coords if id(c) not in used_coord_ids and id(c) not in sverbinder_coord_id_set]
+
+                            linked = link_anchor_to_coord(haltepunkt_det, available_coords, learned_patterns)
+
+                            if linked is not None:
+                                haltepunkt_coord_ids.add(id(linked))
+                                haltepunkt_coord_map[id(haltepunkt_det)] = linked
+
+                                meta = coord_meta.get(id(linked), {})
+                                coord_txt = meta.get("text", "?")
+                                if DEBUG_LINKING:
+                                    print(f"Haltepunkt (direct) → '{coord_txt}' (soft-claimed)")
+
+                    if DEBUG_LINKING:
+                        print(f"Total Haltepunkt soft-claimed: {len(haltepunkt_coord_ids)}")
+                        print(f"{'='*70}\n")
+
+                        print(f"\n{'='*70}")
+                        print(f" STEP 2: Linking all elements (including haltetafel)")
+                        print(f"{'='*70}")
+
+                    #  STEP 2: Now process ALL elements (including haltetafel)
                     for (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf) in anchor_results:
                         row_id = len(all_rows)
                         fahrtrichtung = None
-                        fahrtrichtung_source = 'none'  # ✅ CHANGE 2: Default source
+                        fahrtrichtung_source = 'none'  #  CHANGE 2: Default source
                         
-                        # ✅ NEW: SKIP if this signal is haltepunkt-referenced
+                        #  NEW: SKIP if this signal is haltepunkt-referenced
                         if a["name"] == "signal" and id(a) in haltepunkt_referenced_signals:
-                            print(f"   ⏭️  SKIPPING signal '{name_txt}' (haltepunkt-referenced)")
-                            continue  # ✅ Don't process this signal at all
+                            if DEBUG_LINKING:
+                                print(f"SKIPPING signal '{name_txt}' (haltepunkt-referenced)")
+                            continue  #  Don't process this signal at all
                         
                         if a["name"] == "signal":
-                            # ✅ CHANGE 2: Extract fahrtrichtung and source from map
+                            #  CHANGE 2: Extract fahrtrichtung and source from map
                             fahr_data = fahrtrichtung_map.get(id(a))
                             if fahr_data:
                                 if isinstance(fahr_data, dict):
-                                    # ✅ NEW FORMAT: {'fahrtrichtung': 'A', 'source': 'gks'}
+                                    #  NEW FORMAT: {'fahrtrichtung': 'A', 'source': 'gks'}
                                     fahrtrichtung = fahr_data.get('fahrtrichtung')
                                     fahrtrichtung_source = fahr_data.get('source', 'gks')
                                 else:
-                                    # ✅ OLD FORMAT: Just the string 'A' or 'B' (backward compatibility)
+                                    #  OLD FORMAT: Just the string 'A' or 'B' (backward compatibility)
                                     fahrtrichtung = fahr_data
                                     fahrtrichtung_source = 'gks'
                         
-                        # ✅ SPECIAL HANDLING FOR HALTEPUNKT
+                        #  SPECIAL HANDLING FOR HALTEPUNKT
                         if a["name"] == "haltepunkt":
                             group = haltepunkt_groups.get(id(a))
                             haltepunkt_counter = sum(1 for r in all_rows if r['cls'] == 'haltepunkt') + 1
@@ -702,46 +799,26 @@ class PipelineWorker(QtCore.QThread):
                                         cbbox = (c["x1"], c["y1"], c["x2"], c["y2"])
                                         break
                                 
-                                print(f"   ✅ Haltepunkt '{haltepunkt_name}' → '{coord_txt}' (from group detection)")
-                            
+                                if DEBUG_LINKING:
+                                    print(f"Haltepunkt '{haltepunkt_name}' → '{coord_txt}' (from group detection)")
+
                             # ========================================
-                            # STEP 2: Fallback - try direct linking (exclude sverbinder coords)
+                            # STEP 2: Use pre-linked coordinate from STEP 1C
                             # ========================================
                             else:
-                                print(f"   ⚠️ Haltepunkt '{haltepunkt_name}' - no coordinate from group, trying direct linking")
-                                
-                                # ✅ Build blacklist: coordinates already linked to sverbinder (from pre-linking)
-                                # Extract the IDs of the coordinate dicts (not the dicts themselves)
-                                sverbinder_coord_ids = set()
-                                for coord_det in sverbinder_coord_map.values():
-                                    sverbinder_coord_ids.add(id(coord_det))
+                                # Get the pre-linked coordinate from haltepunkt_coord_map
+                                pre_linked = haltepunkt_coord_map.get(id(a))
 
-                                if sverbinder_coord_ids:
-                                    print(f"      🚫 Blacklisting {len(sverbinder_coord_ids)} sverbinder coordinates")
-                                    # Find the actual coordinate dicts to print their text
-                                    for c in coords:
-                                        if id(c) in sverbinder_coord_ids:
-                                            meta = coord_meta.get(id(c), {})
-                                            coord_txt_bl = meta.get('text', '?')
-                                            print(f"         - '{coord_txt_bl}'")
-
-                                # ✅ Filter out sverbinder coordinates (by ID)
-                                available_coords = [c for c in coords if id(c) not in sverbinder_coord_ids]
-
-                                print(f"      Available coordinates: {len(available_coords)} (excluded {len(sverbinder_coord_ids)} sverbinder coords)")
-                                
-                                linked = link_anchor_to_coord(a, available_coords, learned_patterns)
-                                
-                                if linked is not None:
-                                    # ✅ DON'T add to used_coord_ids (it's shared, not claimed)
-                                    
-                                    meta = coord_meta.get(id(linked), {})
+                                if pre_linked is not None:
+                                    meta = coord_meta.get(id(pre_linked), {})
                                     coord_txt, coord_val, gi = meta.get("text"), meta.get("value"), meta.get("gi")
-                                    cbbox = (linked["x1"], linked["y1"], linked["x2"], linked["y2"])
-                                    
-                                    print(f"   ✅ Haltepunkt '{haltepunkt_name}' → '{coord_txt}' (direct linking)")
+                                    cbbox = (pre_linked["x1"], pre_linked["y1"], pre_linked["x2"], pre_linked["y2"])
+
+                                    if DEBUG_LINKING:
+                                        print(f"Haltepunkt '{haltepunkt_name}' → '{coord_txt}' (from pre-linking)")
                                 else:
-                                    print(f"   ⚠️ Haltepunkt '{haltepunkt_name}' → NO COORDINATE")
+                                    if DEBUG_LINKING:
+                                        print(f"Haltepunkt '{haltepunkt_name}' → NO COORDINATE")
                             
                             # ========================================
                             # STEP 3: Create row
@@ -776,14 +853,14 @@ class PipelineWorker(QtCore.QThread):
                                 ocr_region_source=ocr_position,
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=None,
-                                _fahrtrichtung_source='none'  # ✅ CHANGE 3
+                                _fahrtrichtung_source='none'  #  CHANGE 3
                             ))
                             # Debug: Verify OCR coords were stored
-                            if ocr_bbox:
-                                print(f"   💾 Stored OCR coords for row {row_id}: ocr_x1={ocr_bbox[0]:.0f}, ocr_y1={ocr_bbox[1]:.0f}, ocr_x2={ocr_bbox[2]:.0f}, ocr_y2={ocr_bbox[3]:.0f}")
+                            if ocr_bbox and DEBUG_LINKING:
+                                print(f" Stored OCR coords for row {row_id}: ocr_x1={ocr_bbox[0]:.0f}, ocr_y1={ocr_bbox[1]:.0f}, ocr_x2={ocr_bbox[2]:.0f}, ocr_y2={ocr_bbox[3]:.0f}")
                             continue
                         
-                        # ✅ SPECIAL HANDLING FOR WEICHEN_BLOCK
+                        #  SPECIAL HANDLING FOR WEICHEN_BLOCK
                         if a["name"] == "weichen_block":
                             coord_text_combined = " | ".join(weichen_coords) if weichen_coords else None
                             
@@ -811,11 +888,11 @@ class PipelineWorker(QtCore.QThread):
                                 ocr_region_source=ocr_position,
                                 notes="", weichen_coordinates=weichen_coords,
                                 fahrtrichtung=None,
-                                _fahrtrichtung_source='none'  # ✅ CHANGE 3
+                                _fahrtrichtung_source='none'  #  CHANGE 3
                             ))
                             continue
                         
-                        # ✅ NEW: SPECIAL HANDLING FOR HALTETAFEL
+                        #  NEW: SPECIAL HANDLING FOR HALTETAFEL
                         if a["name"] == "haltetafel":
                             # First try normal coordinate linking
                             available_coords = [c for c in coords if id(c) not in used_coord_ids]
@@ -829,7 +906,8 @@ class PipelineWorker(QtCore.QThread):
                                 if linked:
                                     meta = coord_meta.get(id(linked), {})
                                     coord_txt = meta.get("text", "?")
-                                    print(f"   ✅ Haltetafel inherited coordinate from GKS: '{coord_txt}'")
+                                    if DEBUG_LINKING:
+                                        print(f"Haltetafel inherited coordinate from GKS: '{coord_txt}'")
                             
                             # Process coordinate
                             coord_txt, coord_val, gi = None, None, None
@@ -877,14 +955,14 @@ class PipelineWorker(QtCore.QThread):
                                 ocr_region_source=ocr_position,
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=None,
-                                _fahrtrichtung_source='none'  # ✅ CHANGE 3
+                                _fahrtrichtung_source='none'  #  CHANGE 3
                             ))
                             # Debug: Verify OCR coords were stored
-                            if ocr_bbox:
-                                print(f"   💾 Stored OCR coords for row {row_id}: ocr_x1={ocr_bbox[0]:.0f}, ocr_y1={ocr_bbox[1]:.0f}, ocr_x2={ocr_bbox[2]:.0f}, ocr_y2={ocr_bbox[3]:.0f}")
+                            if ocr_bbox and DEBUG_LINKING:
+                                print(f" Stored OCR coords for row {row_id}: ocr_x1={ocr_bbox[0]:.0f}, ocr_y1={ocr_bbox[1]:.0f}, ocr_x2={ocr_bbox[2]:.0f}, ocr_y2={ocr_bbox[3]:.0f}")
                             continue
                         
-                        # ✅ SPECIAL HANDLING FOR SVERBINDER (use pre-linked coordinate)
+                        #  SPECIAL HANDLING FOR SVERBINDER (use pre-linked coordinate)
                         if a["name"] == "sverbinder":
                             # Retrieve the already-linked coordinate from STEP 1B
                             linked = sverbinder_coord_map.get(id(a))
@@ -929,11 +1007,11 @@ class PipelineWorker(QtCore.QThread):
                                 ocr_region_source=ocr_position,
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=fahrtrichtung,
-                                _fahrtrichtung_source=fahrtrichtung_source  # ✅ CHANGE 3
+                                _fahrtrichtung_source=fahrtrichtung_source  #  CHANGE 3
                             ))
                             continue
                         
-                        # ✅ SKIP GKS (already processed in STEP 1)
+                        #  SKIP GKS (already processed in STEP 1)
                         if a["name"] in ["gks_festkodiert", "gks_gesteuert"]:
                             # Retrieve the already-linked coordinate
                             linked = gks_coord_map.get(id(a))
@@ -976,11 +1054,11 @@ class PipelineWorker(QtCore.QThread):
                                 ocr_region_source=ocr_position,
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=fahrtrichtung,
-                                _fahrtrichtung_source=fahrtrichtung_source  # ✅ CHANGE 3
+                                _fahrtrichtung_source=fahrtrichtung_source  #  CHANGE 3
                             ))
                             continue
                         
-                        # ✅ SPECIAL HANDLING FOR ISOLIERSTOSS (with fallback)
+                        #  SPECIAL HANDLING FOR ISOLIERSTOSS (with fallback)
                         if a["name"] == "isolierstoß":
                             # First: Try normal linking (mode="above")
                             available_coords = [c for c in coords if id(c) not in used_coord_ids]
@@ -989,7 +1067,7 @@ class PipelineWorker(QtCore.QThread):
                             # If normal linking fails, try fallback (search all around for unlinked coords)
                             if linked is None:
                                 if DEBUG_ANGLE_ROUTING:
-                                    print(f"\n   ⚠️ Isolierstoß: Normal linking failed, trying fallback...")
+                                    print(f"\n    Isolierstoß: Normal linking failed, trying fallback...")
 
                                 # Fallback: search in all directions for nearest unlinked coordinate
                                 linked = link_isolierstoss_fallback(a, coords, used_coord_ids, max_radius=300)
@@ -1017,7 +1095,7 @@ class PipelineWorker(QtCore.QThread):
                                 cbbox = (linked["x1"], linked["y1"], linked["x2"], linked["y2"])
 
                                 if DEBUG_ANGLE_ROUTING:
-                                    print(f"   ✅ Isolierstoß → coordinate '{coord_txt}'")
+                                    print(f"Isolierstoß → coordinate '{coord_txt}'")
 
                             element_for_uuid = {
                                 'cls': a["name"],
@@ -1049,8 +1127,12 @@ class PipelineWorker(QtCore.QThread):
                             ))
                             continue
 
-                        # ✅ EXISTING CODE FOR OTHER CLASSES
-                        available_coords = [c for c in coords if id(c) not in used_coord_ids]
+                        #  EXISTING CODE FOR OTHER CLASSES
+                        # For signals: also exclude haltepunkt soft-claimed coordinates
+                        if a["name"] == "signal":
+                            available_coords = [c for c in coords if id(c) not in used_coord_ids and id(c) not in haltepunkt_coord_ids]
+                        else:
+                            available_coords = [c for c in coords if id(c) not in used_coord_ids]
                         linked = link_anchor_to_coord(a, available_coords, learned_patterns)
                         
                         coord_txt, coord_val, gi = None, None, None
@@ -1101,7 +1183,7 @@ class PipelineWorker(QtCore.QThread):
                             ocr_region_source=ocr_position,
                             notes="", weichen_coordinates=[],
                             fahrtrichtung=fahrtrichtung,
-                            _fahrtrichtung_source=fahrtrichtung_source  # ✅ CHANGE 3
+                            _fahrtrichtung_source=fahrtrichtung_source  #  CHANGE 3
                         ))
 
                     for c in coords:
@@ -1132,7 +1214,7 @@ class PipelineWorker(QtCore.QThread):
                             ocr_region_source=None,
                             notes="", weichen_coordinates=[],
                             fahrtrichtung=None,
-                            _fahrtrichtung_source='none'  # ✅ CHANGE 3
+                            _fahrtrichtung_source='none'  #  CHANGE 3
                         ))
                         
                     emit_progress(pidx - 1, W['raster'] + W['prep'] + W['det'] + W['ocr_c'] + W['ocr_a'] + W['link'])
@@ -1160,42 +1242,46 @@ class PipelineWorker(QtCore.QThread):
             if self.run_analysis:
                 self.status.emit(f"[done] Total rows: {len(df_all)}")
                 
-                print(f"\n{'='*70}")
-                print(f"🔄 MERGING DUPLICATE SIGNALS")
-                print(f"{'='*70}")
+                if DEBUG_LINKING:
+                    print(f"\n{'='*70}")
+                    print(f" MERGING DUPLICATE SIGNALS")
+                    print(f"{'='*70}")
                 original_len = len(all_rows)
 
-                # ✅ Merge WITHOUT track fallback
+                #  Merge WITHOUT track fallback
                 all_rows = merge_duplicate_signals(
                     all_rows,
-                    track_skeleton=None,  # ✅ Don't pass track skeleton to merge
+                    track_skeleton=None,  #  Don't pass track skeleton to merge
                     gks_dets=gks_dets
                 )
                 df_all = pd.DataFrame(all_rows)
 
                 merged_len = len(all_rows)
-                if original_len != merged_len:
-                    print(f"   Merge complete: {original_len} → {merged_len} (saved {original_len - merged_len} rows)")
-                print(f"{'='*70}\n")
+                if DEBUG_LINKING:
+                    if original_len != merged_len:
+                        print(f"Merge complete: {original_len} → {merged_len} (saved {original_len - merged_len} rows)")
+                    print(f"{'='*70}\n")
                 
                 # ========================================
-                # ✅ TRACK FALLBACK FOR MERGED SIGNALS (MAJORITY VOTE)
+                #  TRACK FALLBACK FOR MERGED SIGNALS (MAJORITY VOTE)
                 # ========================================
 
                 if track_skeleton is not None:
-                    print(f"\n{'='*70}")
-                    print(f"🛤️  TRACK FALLBACK - Filling missing Fahrtrichtung (MAJORITY VOTE)")
-                    print(f"{'='*70}")
-                    
-                    # ✅ Find signals that need track fallback (only those WITHOUT Fahrtrichtung)
+                    if DEBUG_TRACK:
+                        print(f"\n{'='*70}")
+                        print(f"  TRACK FALLBACK - Filling missing Fahrtrichtung (MAJORITY VOTE)")
+                        print(f"{'='*70}")
+
+                    #  Find signals that need track fallback (only those WITHOUT Fahrtrichtung)
                     signals_needing_fallback = [
-                        row for row in all_rows 
-                        if row['cls'] == 'signal' 
+                        row for row in all_rows
+                        if row['cls'] == 'signal'
                         and not row.get('_hidden')
-                        and not row.get('fahrtrichtung')  # ✅ Only fill missing values
+                        and not row.get('fahrtrichtung')  #  Only fill missing values
                     ]
-                    
-                    print(f"   Signals without Fahrtrichtung: {len(signals_needing_fallback)}")
+
+                    if DEBUG_TRACK:
+                        print(f"Signals without Fahrtrichtung: {len(signals_needing_fallback)}")
                     
                     fallback_success = 0
                     fallback_failed = 0
@@ -1217,28 +1303,31 @@ class PipelineWorker(QtCore.QThread):
                             len(signal_text_upper[1:]) >= 3):
                             continue
 
-                        print(f"\n   🛤️  Trying track fallback for '{signal_text}'")
-                        
+                        if DEBUG_TRACK:
+                            print(f"\n     Trying track fallback for '{signal_text}'")
+
                         # ========================================
-                        # ✅ MAJORITY VOTE - Check ALL signal instances
+                        #  MAJORITY VOTE - Check ALL signal instances
                         # ========================================
-                        
+
                         signal_positions = row.get('_signal_positions', {})
-                        
+
                         if signal_positions:
-                            print(f"      📊 Found {len(signal_positions)} signal instances - using MAJORITY VOTE")
+                            if DEBUG_TRACK:
+                                print(f"Found {len(signal_positions)} signal instances - using MAJORITY VOTE")
                             
                             votes = []  # List of (instance_name, fahrtrichtung)
                             
                             for instance_name, pos_data in signal_positions.items():
-                                # ✅ SKIP haltepunkt-referenced signal instances
+                                #  SKIP haltepunkt-referenced signal instances
                                 # These are the actual signal detections that were near haltepunkt markers
                                 # We only want the coordinate_signal and bare haltepunkt_signal for voting
                                 if instance_name == 'haltepunkt_signal':
-                                    print(f"         {instance_name}: skipped (haltepunkt-referenced)")
+                                    if DEBUG_TRACK:
+                                        print(f"{instance_name}: skipped (haltepunkt-referenced)")
                                     continue
                                 
-                                # ✅ Calculate center from THIS instance's bounding box
+                                #  Calculate center from THIS instance's bounding box
                                 instance_cx = (pos_data['ax1'] + pos_data['ax2']) / 2
                                 instance_cy = (pos_data['ay1'] + pos_data['ay2']) / 2
                                 
@@ -1248,8 +1337,8 @@ class PipelineWorker(QtCore.QThread):
                                     'y1': pos_data['ay1'],
                                     'x2': pos_data['ax2'],
                                     'y2': pos_data['ay2'],
-                                    'cx': instance_cx,  # ✅ Use THIS instance's center
-                                    'cy': instance_cy,  # ✅ Use THIS instance's center
+                                    'cx': instance_cx,  #  Use THIS instance's center
+                                    'cy': instance_cy,  #  Use THIS instance's center
                                     'text': signal_text,
                                     'angle': row.get('angle', 0.0),
                                     'angle_raw': row.get('angle_raw', row.get('angle', 0.0)),
@@ -1262,50 +1351,58 @@ class PipelineWorker(QtCore.QThread):
                                     instance_det,
                                     gks_dets=[],
                                     track_skeleton=track_skeleton,
-                                    track_bounds=track_bounds,  # ✅ NEW: Pass track bounds
+                                    track_bounds=track_bounds,  #  NEW: Pass track bounds
                                     track_sample_distance=300,
                                     track_search_radius=500
                                 )
                                 
                                 if fahr:
                                     votes.append((instance_name, fahr))
-                                    print(f"         {instance_name}: {fahr}")
+                                    if DEBUG_TRACK:
+                                        print(f"{instance_name}: {fahr}")
                                 else:
-                                    print(f"         {instance_name}: undetermined")
-                            
+                                    if DEBUG_TRACK:
+                                        print(f"{instance_name}: undetermined")
+
                             # Count votes
                             if votes:
                                 vote_counts = Counter([v[1] for v in votes])
-                                
-                                print(f"      📊 Vote results: {dict(vote_counts)}")
-                                
+
+                                if DEBUG_TRACK:
+                                    print(f"Vote results: {dict(vote_counts)}")
+
                                 # Get majority
                                 if len(vote_counts) == 1:
                                     # Unanimous
                                     fahrtrichtung_from_track = votes[0][1]
-                                    print(f"      ✅ UNANIMOUS: All instances agree on '{fahrtrichtung_from_track}'")
+                                    if DEBUG_TRACK:
+                                        print(f"UNANIMOUS: All instances agree on '{fahrtrichtung_from_track}'")
                                 else:
                                     # Majority wins
                                     majority_fahr, majority_count = vote_counts.most_common(1)[0]
                                     total_votes = len(votes)
-                                    
+
                                     if majority_count > total_votes / 2:
                                         fahrtrichtung_from_track = majority_fahr
-                                        print(f"      ✅ MAJORITY: '{majority_fahr}' ({majority_count}/{total_votes} votes)")
+                                        if DEBUG_TRACK:
+                                            print(f"MAJORITY: '{majority_fahr}' ({majority_count}/{total_votes} votes)")
                                     else:
                                         # Tie - use PRIMARY instance as tiebreaker
                                         fahrtrichtung_from_track = None
-                                        print(f"      ⚠️ TIE: No clear majority - fallback failed")
+                                        if DEBUG_TRACK:
+                                            print(f"TIE: No clear majority - fallback failed")
                             else:
                                 # No votes - all instances failed
                                 fahrtrichtung_from_track = None
-                                print(f"      ❌ All instances failed track detection")
-                        
+                                if DEBUG_TRACK:
+                                    print(f"All instances failed track detection")
+
                         else:
                             # ========================================
                             # FALLBACK: No _signal_positions (single instance)
                             # ========================================
-                            print(f"      ⚠️ No _signal_positions found - using PRIMARY instance only")
+                            if DEBUG_TRACK:
+                                print(f"No _signal_positions found - using PRIMARY instance only")
                             
                             signal_det_for_track = {
                                 'x1': row['ax1'],
@@ -1322,13 +1419,13 @@ class PipelineWorker(QtCore.QThread):
                             }
                             
                             fahrtrichtung_from_track = detect_fahrtrichtung(
-                            signal_det_for_track,
-                            gks_dets=[],
-                            track_skeleton=track_skeleton,
-                            track_bounds=track_bounds,  # ✅ NEW: Pass track bounds
-                            track_sample_distance=300,
-                            track_search_radius=500
-                        )
+                                signal_det_for_track,
+                                gks_dets=[],
+                                track_skeleton=track_skeleton,
+                                track_bounds=track_bounds,
+                                track_sample_distance=300,
+                                track_search_radius=500
+                            )
                         # ========================================
                         # Apply result
                         # ========================================
@@ -1336,7 +1433,8 @@ class PipelineWorker(QtCore.QThread):
                             row['fahrtrichtung'] = fahrtrichtung_from_track
                             row['_fahrtrichtung_source'] = 'track'
                             fallback_success += 1
-                            print(f"      ✅ SUCCESS: Fahrtrichtung '{fahrtrichtung_from_track}' (track)")
+                            if DEBUG_TRACK:
+                                print(f"SUCCESS: Fahrtrichtung '{fahrtrichtung_from_track}' (track)")
                         else:
                             # ========================================
                             # TIER 3: GKS Relaxed Column Search (dy ≤ 600px)
@@ -1357,7 +1455,8 @@ class PipelineWorker(QtCore.QThread):
                                 'angle_raw': row.get('angle_raw', row.get('angle', 0.0))
                             }
 
-                            print(f"      🔍 Trying TIER 3 (GKS relaxed, dy≤600px)...")
+                            if DEBUG_TRACK:
+                                print(f"Trying TIER 3 (GKS relaxed, dy≤600px)...")
                             tier3_result, tier3_gks = detect_fahrtrichtung_gks_relaxed(
                                 signal_det_tier34,
                                 page_gks_dets,
@@ -1372,12 +1471,14 @@ class PipelineWorker(QtCore.QThread):
                                 row['fahrtrichtung'] = tier3_result
                                 row['_fahrtrichtung_source'] = 'gks_relaxed'
                                 fallback_success += 1
-                                print(f"      ✅ SUCCESS: Fahrtrichtung '{tier3_result}' (gks_relaxed)")
+                                if DEBUG_TRACK:
+                                    print(f"SUCCESS: Fahrtrichtung '{tier3_result}' (gks_relaxed)")
                             else:
                                 # ========================================
                                 # TIER 4: Euclidean Nearest GKS (dist ≤ 800px)
                                 # ========================================
-                                print(f"      🔍 Trying TIER 4 (Euclidean nearest, dist≤800px)...")
+                                if DEBUG_TRACK:
+                                    print(f"Trying TIER 4 (Euclidean nearest, dist≤800px)...")
                                 tier4_result, tier4_gks = detect_fahrtrichtung_gks_nearest(
                                     signal_det_tier34,
                                     page_gks_dets,
@@ -1391,48 +1492,56 @@ class PipelineWorker(QtCore.QThread):
                                     row['fahrtrichtung'] = tier4_result
                                     row['_fahrtrichtung_source'] = 'gks_nearest'
                                     fallback_success += 1
-                                    print(f"      ✅ SUCCESS: Fahrtrichtung '{tier4_result}' (gks_nearest)")
+                                    if DEBUG_TRACK:
+                                        print(f"SUCCESS: Fahrtrichtung '{tier4_result}' (gks_nearest)")
                                 else:
                                     row['_fahrtrichtung_source'] = 'none'
                                     fallback_failed += 1
-                                    print(f"      ❌ FAILED: All 4 tiers failed")
-                    
-                    print(f"\n{'='*70}")
-                    print(f"   Track fallback results:")
-                    print(f"      Success: {fallback_success}")
-                    print(f"      Failed: {fallback_failed}")
-                    print(f"{'='*70}\n")
+                                    if DEBUG_TRACK:
+                                        print(f"FAILED: All 4 tiers failed")
+
+                    if DEBUG_TRACK:
+                        print(f"\n{'='*70}")
+                        print(f"Track fallback results:")
+                        print(f"Success: {fallback_success}")
+                        print(f"Failed: {fallback_failed}")
+                        print(f"{'='*70}\n")
                     
                     # Rebuild DataFrame with updated Fahrtrichtung
                     df_all = pd.DataFrame(all_rows)
                 
                 # Rebuild page_dfs from merged data
-                print(f"\n🔄 Rebuilding page_dfs from merged data...")
+                if DEBUG_LINKING:
+                    print(f"\n Rebuilding page_dfs from merged data...")
                 page_dfs = {}
                 if not df_all.empty and 'page' in df_all.columns:
                     for page_num in df_all['page'].unique():
                         page_num_int = int(page_num)
                         page_dfs[page_num_int] = df_all[df_all['page'] == page_num].copy()
 
-                        if '_all_bboxes' in page_dfs[page_num_int].columns:
-                            signals_with_multi = page_dfs[page_num_int][page_dfs[page_num_int]['_all_bboxes'].notna()]
-                            print(f"   Page {page_num_int}: {len(signals_with_multi)} signals with _all_bboxes")
-                        else:
-                            print(f"   ⚠️ Page {page_num_int}: _all_bboxes column missing!")
+                        if DEBUG_LINKING:
+                            if '_all_bboxes' in page_dfs[page_num_int].columns:
+                                signals_with_multi = page_dfs[page_num_int][page_dfs[page_num_int]['_all_bboxes'].notna()]
+                                print(f"Page {page_num_int}: {len(signals_with_multi)} signals with _all_bboxes")
+                            else:
+                                print(f"Page {page_num_int}: _all_bboxes column missing!")
                 else:
-                    print(f"   ⚠️ No data to rebuild (df_all is empty)")
+                    if DEBUG_LINKING:
+                        print(f"No data to rebuild (df_all is empty)")
 
-                print(f"✅ Rebuilt {len(page_dfs)} page DataFrames\n")
+                if DEBUG_LINKING:
+                    print(f"Rebuilt {len(page_dfs)} page DataFrames\n")
 
-            # ✅ ADD link_coord_row_id TRACKING
+            #  ADD link_coord_row_id TRACKING
             # After all processing is complete, map anchors to their linked coordinates
             # Use the dataframe itself - find anchors that have coord_text matching a coordinate
             required_cols = ['cls', 'coord_text', 'cx1', 'cy1', 'row_id', 'page']
             has_required_cols = all(col in df_all.columns for col in required_cols)
             if self.run_analysis and not df_all.empty and has_required_cols:
-                print(f"\n{'='*70}")
-                print(f"🔗 ADDING link_coord_row_id TRACKING")
-                print(f"{'='*70}")
+                if DEBUG_LINKING:
+                    print(f"\n{'='*70}")
+                    print(f" ADDING link_coord_row_id TRACKING")
+                    print(f"{'='*70}")
 
                 # Create link_coord_row_id column
                 df_all['link_coord_row_id'] = None
@@ -1444,7 +1553,8 @@ class PipelineWorker(QtCore.QThread):
                     (df_all['cx1'].notna())             # Has coordinate bbox
                 ]
 
-                print(f"   Found {len(linked_anchors)} anchors with linked coordinates")
+                if DEBUG_LINKING:
+                    print(f"Found {len(linked_anchors)} anchors with linked coordinates")
 
                 link_count = 0
                 for idx in linked_anchors.index:
@@ -1467,22 +1577,24 @@ class PipelineWorker(QtCore.QThread):
                         df_all.at[idx, 'link_coord_row_id'] = coord_row_id
                         link_count += 1
 
-                print(f"   ✅ Added {link_count} link_coord_row_id references")
+                if DEBUG_LINKING:
+                    print(f"Added {link_count} link_coord_row_id references")
 
-                # Rebuild page_dfs to include link_coord_row_id
-                print(f"   🔄 Updating page_dfs with link_coord_row_id...")
+                    # Rebuild page_dfs to include link_coord_row_id
+                    print(f" Updating page_dfs with link_coord_row_id...")
                 for page_num in df_all['page'].unique():
                     page_num_int = int(page_num)
                     page_dfs[page_num_int] = df_all[df_all['page'] == page_num].copy()
 
-                print(f"{'='*70}\n")
+                if DEBUG_LINKING:
+                    print(f"{'='*70}\n")
 
             self.progress.emit(100)
-            self.done.emit(df_all, page_dfs, track_skeleton if self.detect_tracks else None, None)
+            self.done.emit(df_all, page_dfs, track_skeleton if self.detect_tracks else None, None, self.uncertain_detections)
             
         except Exception as e:
             import traceback
             tb_str = traceback.format_exc()
             self.status.emit(f"[error] {e}\n{tb_str}")
             df_err = pd.DataFrame([{"error": str(e)}])
-            self.done.emit(df_err, {}, None, e)
+            self.done.emit(df_err, {}, None, e, [])

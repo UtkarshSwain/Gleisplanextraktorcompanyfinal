@@ -7,6 +7,7 @@ Includes context menu for quick actions (change class, re-run OCR, delete)
 from PyQt5 import QtCore, QtGui, QtWidgets
 from typing import Optional, Tuple, TYPE_CHECKING
 import numpy as np
+from config import debug_print
 
 if TYPE_CHECKING:
     from ui.workspace_widget import WorkspaceWidget
@@ -67,7 +68,7 @@ class ResizeHandle(QtWidgets.QGraphicsRectItem):
         if change == QtWidgets.QGraphicsItem.ItemPositionChange:
             # Constrain handle movement and update parent bbox
             new_pos = value
-            print(f"   🖱️ Handle {self.handle_type} moved to {new_pos}")
+            debug_print('ui_bbox', f"Handle {self.handle_type} moved to {new_pos}")
             self.parent_bbox.handle_moved(self.handle_type, new_pos)
             return new_pos
         return super().itemChange(change, value)
@@ -75,7 +76,7 @@ class ResizeHandle(QtWidgets.QGraphicsRectItem):
     def mouseReleaseEvent(self, event):
         """Notify parent bbox when handle is released to trigger OCR"""
         super().mouseReleaseEvent(event)
-        print(f"   ✅ Handle {self.handle_type} released - triggering parent OCR")
+        debug_print('ui_bbox', f"Handle {self.handle_type} released - triggering parent OCR")
         # Trigger OCR on parent bbox
         self.parent_bbox.on_handle_released()
 
@@ -147,14 +148,14 @@ class ResizableBBoxItem(QtWidgets.QGraphicsRectItem):
 
     def _show_handles(self):
         """Show resize handles when selected"""
-        print(f"🔧 Showing {len(self.handles)} handles for row_id {self.row_id}")
+        debug_print('ui_bbox', f"Showing {len(self.handles)} handles for row_id {self.row_id}")
         for handle_type, handle in self.handles.items():
             handle.setVisible(True)
-            print(f"   ✅ {handle_type}: visible={handle.isVisible()}, pos={handle.pos()}")
+            debug_print('ui_bbox', f"{handle_type}: visible={handle.isVisible()}, pos={handle.pos()}")
 
     def _hide_handles(self):
         """Hide resize handles when not selected"""
-        print(f"🔧 Hiding handles for row_id {self.row_id}")
+        debug_print('ui_bbox', f"Hiding handles for row_id {self.row_id}")
         for handle in self.handles.values():
             handle.setVisible(False)
 
@@ -220,9 +221,9 @@ class ResizableBBoxItem(QtWidgets.QGraphicsRectItem):
 
             # Check if bbox actually changed
             if new_rect != self.original_rect:
-                print(f"🔄 Bbox resized for row_id {self.row_id}")
-                print(f"   Old: {self.original_rect}")
-                print(f"   New: {new_rect}")
+                debug_print('ui_bbox', f"Bbox resized for row_id {self.row_id}")
+                debug_print('ui_bbox', f"Old: {self.original_rect}")
+                debug_print('ui_bbox', f"New: {new_rect}")
 
                 # Trigger OCR update in workspace
                 self.workspace.on_bbox_resized(
@@ -233,7 +234,7 @@ class ResizableBBoxItem(QtWidgets.QGraphicsRectItem):
                     new_rect.height()
                 )
             else:
-                print(f"   ℹ️ Bbox unchanged, skipping OCR")
+                debug_print('ui_bbox', f"Bbox unchanged, skipping OCR")
 
     def mouseReleaseEvent(self, event):
         """When mouse released after resizing, trigger OCR"""
@@ -305,7 +306,7 @@ class OCRRegionResizeHandle(QtWidgets.QGraphicsRectItem):
         if change == QtWidgets.QGraphicsItem.ItemPositionChange:
             # Constrain handle movement and update parent bbox
             new_pos = value
-            print(f"   🖱️ OCR Handle {self.handle_type} moved to {new_pos}")
+            debug_print('ui_bbox', f"OCR Handle {self.handle_type} moved to {new_pos}")
             self.parent_bbox.handle_moved(self.handle_type, new_pos)
             return new_pos
         return super().itemChange(change, value)
@@ -313,7 +314,7 @@ class OCRRegionResizeHandle(QtWidgets.QGraphicsRectItem):
     def mouseReleaseEvent(self, event):
         """Notify parent bbox when handle is released to trigger OCR"""
         super().mouseReleaseEvent(event)
-        print(f"   ✅ OCR Handle {self.handle_type} released - triggering OCR re-run")
+        debug_print('ui_bbox', f"OCR Handle {self.handle_type} released - triggering OCR re-run")
         # Trigger OCR on parent bbox
         self.parent_bbox.on_handle_released()
 
@@ -385,14 +386,14 @@ class ResizableOCRBBoxItem(QtWidgets.QGraphicsRectItem):
 
     def _show_handles(self):
         """Show resize handles when selected"""
-        print(f"🔧 Showing OCR region handles for row_id {self.row_id}")
+        print(f" Showing OCR region handles for row_id {self.row_id}")
         for handle_type, handle in self.handles.items():
             handle.setVisible(True)
-            print(f"   ✅ {handle_type}: visible={handle.isVisible()}, pos={handle.pos()}")
+            print(f"{handle_type}: visible={handle.isVisible()}, pos={handle.pos()}")
 
     def _hide_handles(self):
         """Hide resize handles when not selected"""
-        print(f"🔧 Hiding OCR region handles for row_id {self.row_id}")
+        print(f" Hiding OCR region handles for row_id {self.row_id}")
         for handle in self.handles.values():
             handle.setVisible(False)
 
@@ -459,9 +460,9 @@ class ResizableOCRBBoxItem(QtWidgets.QGraphicsRectItem):
 
             # Check if bbox actually changed
             if new_rect != self.original_rect:
-                print(f"🔄 OCR region resized for row_id {self.row_id}")
-                print(f"   Old: {self.original_rect}")
-                print(f"   New: {new_rect}")
+                print(f" OCR region resized for row_id {self.row_id}")
+                print(f"Old: {self.original_rect}")
+                print(f"New: {new_rect}")
 
                 # Queue OCR re-run with delay (allows adjusting multiple edges)
                 self.workspace.queue_ocr_bbox_resize(
@@ -475,7 +476,7 @@ class ResizableOCRBBoxItem(QtWidgets.QGraphicsRectItem):
                 # Update original rect so subsequent adjustments are tracked correctly
                 self.original_rect = new_rect
             else:
-                print(f"   ℹ️ OCR region unchanged, skipping OCR re-run")
+                print(f"OCR region unchanged, skipping OCR re-run")
 
     def mouseReleaseEvent(self, event):
         """When mouse released after resizing, trigger OCR re-run"""
@@ -618,7 +619,7 @@ class ResizablePolygonBBoxItem(QtWidgets.QGraphicsPolygonItem):
             new_poly = self.polygon()
 
             if new_poly != self.original_polygon:
-                print(f"🔄 Rotated bbox resized for row_id {self.row_id}")
+                print(f" Rotated bbox resized for row_id {self.row_id}")
 
                 # Get actual polygon points (4 corners)
                 poly_points = [(new_poly.at(i).x(), new_poly.at(i).y()) for i in range(4)]
@@ -638,7 +639,7 @@ class ResizablePolygonBBoxItem(QtWidgets.QGraphicsPolygonItem):
                     poly_points=poly_points  # Pass actual polygon points
                 )
             else:
-                print(f"   ℹ️ Polygon unchanged, skipping OCR")
+                print(f"Polygon unchanged, skipping OCR")
 
     def mouseReleaseEvent(self, event):
         """Trigger OCR when done resizing"""

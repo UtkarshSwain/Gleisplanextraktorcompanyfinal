@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
 from typing import List, Dict, Optional, Tuple
 import numpy as np
 from pathlib import Path
+from utils.dpi_utils import get_adaptive_window_size, center_window
 
 
 class ClickableGraphicsView(QGraphicsView):
@@ -89,7 +90,11 @@ class LayoutWizardDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Layout Configuration Wizard")
-        self.setMinimumSize(1200, 800)
+
+        # Adaptive sizing for different DPI settings
+        w, h = get_adaptive_window_size(1200, 800, max_screen_pct=0.85)
+        self.setMinimumSize(w, h)
+        center_window(self)
 
         # Wizard state
         self.wizard = None  # LayoutWizard instance
@@ -183,7 +188,7 @@ class LayoutWizardDialog(QDialog):
         layout.setAlignment(Qt.AlignCenter)
 
         # Title
-        title = QLabel("🚂 New Layout Configuration Wizard")
+        title = QLabel(" New Layout Configuration Wizard")
         title.setStyleSheet("font-size: 24px; font-weight: bold;")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
@@ -241,7 +246,7 @@ class LayoutWizardDialog(QDialog):
         layout.addWidget(instructions)
 
         # Drop area
-        self.drop_area = QLabel("📄 Drop Gleisplan files here\n\nor click to browse")
+        self.drop_area = QLabel(" Drop Gleisplan files here\n\nor click to browse")
         self.drop_area.setAlignment(Qt.AlignCenter)
         self.drop_area.setStyleSheet("""
             QLabel {
@@ -660,7 +665,7 @@ class LayoutWizardDialog(QDialog):
         layout.addWidget(self.summary_text)
 
         # Generate button
-        self.btn_generate = QPushButton("🎉 Generate Profile")
+        self.btn_generate = QPushButton(" Generate Profile")
         self.btn_generate.setStyleSheet("""
             QPushButton {
                 background: #4CAF50;
@@ -727,13 +732,13 @@ Detected Parameters:
             )
 
             profile_path = Path("profiles") / f"{self.profile_name}.yaml"
-            self.generate_status.setText(f"✅ Profile saved to: {profile_path}")
+            self.generate_status.setText(f" Profile saved to: {profile_path}")
             self.generate_status.setStyleSheet("color: green; font-size: 16px;")
 
             self.profile_created.emit(str(profile_path))
 
         except Exception as e:
-            self.generate_status.setText(f"❌ Error: {str(e)}")
+            self.generate_status.setText(f" Error: {str(e)}")
             self.generate_status.setStyleSheet("color: red;")
 
     # =========================================================================

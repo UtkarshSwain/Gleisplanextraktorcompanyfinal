@@ -17,33 +17,60 @@ import os
 # SYSTEM SETTINGS
 # ============================================================================
 
-# Path configurations - set these via environment variables or edit directly
-# For company laptops where tools are not in system PATH
-
-# Poppler path for PDF processing (pdf2image)
-# Examples:
-#   Windows: "C:/Program Files/poppler-24.02.0/Library/bin"
-#   Linux:   "/usr/bin" or "/opt/poppler/bin"
-#   macOS:   "/opt/homebrew/bin" (if installed via Homebrew)
+# External tool paths (set to None to use system PATH, or specify full path)
+# Example for company laptop:
+#   TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+#   POPPLER_PATH = r"C:\Program Files\poppler-24.02.0\Library\bin"
+TESSERACT_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\tesseract\tesseract.exe"
 POPPLER_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\poppler-25.12.0\Library\bin"
 
-# Tesseract path for OCR (if using Tesseract engine)
-# Examples:
-#   Windows: "C:/Program Files/Tesseract-OCR/tesseract.exe"
-#   Linux:   "/usr/bin/tesseract"
-#   macOS:   "/opt/homebrew/bin/tesseract"
-TESSERACT_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\tesseract\tesseract.exe"
+# ============================================================================
+# DEBUG FLAGS - Set to True to enable debug output for specific modules
+# Debug output writes to debug.txt (overwritten each run)
+# ============================================================================
 
-# Set Tesseract command if path is provided
-if TESSERACT_PATH:
-    try:
-        import pytesseract
-        pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
-    except ImportError:
-        pass  # pytesseract not installed, ignore
+# Enables debug output for signal text recognition using PaddleOCR and Tesseract, including extraction attempts and confidence scores.
+DEBUG_SIGNALS = True
 
-DEBUG_SIGNALS = False
-DEBUG_ANGLE_ROUTING = False
+# Enables debug output for angle calculations used in text orientation detection, coordinate OCR rotation attempts, and perspective cropping.
+DEBUG_ANGLE_ROUTING = True
+
+# Enables debug output for general OCR operations including PaddleOCR initialization, weichen block text extraction, GKS box recognition, and text cleaning.
+DEBUG_OCR = True
+
+# Enables debug output for coordinate-to-symbol linking, Fahrtrichtung detection based on GKS positions, haltetafel/haltepunkt linking, and signal merging logic.
+DEBUG_LINKING = True
+
+# Enables debug output for track skeleton detection, track bounds calculation, and Fahrtrichtung fallback when GKS-based detection fails.
+DEBUG_TRACK = True
+
+# Enables debug output for custom symbol detection from the database, OCR processing for custom symbols, and text region detection around detected symbols.
+DEBUG_CUSTOM_SYMBOLS = True
+
+# Enables debug output for YOLO model loading, class order verification, and detection counts per class during object detection.
+DEBUG_YOLO = True
+
+# Enables debug output for UI bounding box resize handles, tracking handle movements and coordinate updates when resizing detection boxes.
+DEBUG_UI_BBOX = True
+
+# Debug output helper - writes to debug.txt
+_DEBUG_FILE = None
+
+def debug_print(category: str, message: str):
+    """Print debug message to debug.txt if category is enabled."""
+    global _DEBUG_FILE
+
+    # Check if category is enabled
+    flag_name = f"DEBUG_{category.upper()}"
+    if not globals().get(flag_name, False):
+        return
+
+    # Open file on first use (overwrites previous debug.txt)
+    if _DEBUG_FILE is None:
+        _DEBUG_FILE = open('debug.txt', 'w', encoding='utf-8')
+
+    _DEBUG_FILE.write(f"[{category.upper()}] {message}\n")
+    _DEBUG_FILE.flush()
 
 # ============================================================================
 # PROCESSING PARAMETERS - MAXIMUM ACCURACY FOR CPU
@@ -161,7 +188,7 @@ CLASS_THRESH = {
     "weichengruppeende": 0.32,   # ↓ Very good
     
     # STRONG PERFORMERS (mAP50: 0.975-0.99) - Moderate-low thresholds
-    "signal": 0.85,              # ↓ TTA will help with edge cases
+    "signal": 0.80,              # ↓ TTA will help with edge cases
     "isolierstoß": 0.09,         # ↓ Was 0.00! Now reasonable
     "haltetafel": 0.38,          # Moderate (6 background FPs)
     "haltepunkt": 0.32,          # ↓ Good performer
@@ -173,8 +200,23 @@ CLASS_THRESH = {
     "gks_gesteuert": 0.7,        # Lower performer
     
     # Alias
-    "weichenende": 0.28,
+    "weichenende": 0.4,
 }
+
+# ============================================================================
+# UNCERTAIN DETECTION THRESHOLDS - FOR LOW-CONFIDENCE REVIEW
+# ============================================================================
+# Detections between UNCERTAIN threshold and CLASS_THRESH are shown for user review
+# This catches symbols YOLO detected but wasn't confident about
+
+UNCERTAIN_THRESH_MULTIPLIER = 0.5  # Uncertain if conf >= CLASS_THRESH * 0.5
+
+# Per-class minimum uncertain thresholds (lower = catch more uncertain detections)
+MIN_UNCERTAIN_THRESH = {
+    "coordinate": 0.01,   # Very low - catch almost all coordinate detections
+    "isolierstoß": 0.01,  # Very low - catch almost all isolierstoß detections
+}
+MIN_UNCERTAIN_THRESH_DEFAULT = 0.10  # Default for all other classes
 
 # ============================================================================
 # NMS THRESHOLDS - STRICTER FOR CPU (MAXIMUM PRECISION)
@@ -247,7 +289,7 @@ CARDINAL_PARAMS = {
     }
 }
 
-# ✅ Both point to same params (no distinction)
+#  Both point to same params (no distinction)
 HORIZONTAL_PARAMS = CARDINAL_PARAMS
 VERTICAL_PARAMS = CARDINAL_PARAMS
 
@@ -259,14 +301,14 @@ ANGULAR_PARAMS = {
         "weichenende": 4,
         "haltetafel": 4,
         "prellblock": 4,
-        # ⬇️ angular GKS benefit most from extra pad
+        # ⬇ angular GKS benefit most from extra pad
         "gks_gesteuert": 6,
         "gks_festkodiert": 6,
     },
     "expansion_factor": {
         "coordinate": (1.0, 1.0),
         "signal": (1.0, 1.05),
-        # ⬇️ tiny expansion so perspective warp has full digits
+        # ⬇ tiny expansion so perspective warp has full digits
         "gks_gesteuert": (0.75, 0.75),
         "gks_festkodiert": (0.75, 0.75),
     }
@@ -330,11 +372,11 @@ def validate_config():
             errors.append(f"LINK_RULES references unknown class: '{cls}'")
     
     if errors:
-        print("⚠️ Configuration warnings:")
+        print(" Configuration warnings:")
         for error in errors:
             print(f"  - {error}")
     else:
-        print("✓ Configuration validated successfully")
+        print(" Configuration validated successfully")
 
 validate_config()
 

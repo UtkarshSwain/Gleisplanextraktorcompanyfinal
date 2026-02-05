@@ -51,7 +51,7 @@ class DraggableTabBar(QtWidgets.QTabBar):
                     # Check if this tab can be detached (not a placeholder)
                     tab_text = self.tabText(tab_index)
                     
-                    if not tab_text.startswith("🪟"):  # Not a placeholder
+                    if not tab_text.startswith(""):  # Not a placeholder
                         self.drag_initiated = True
                         
                         # Emit signal with global position

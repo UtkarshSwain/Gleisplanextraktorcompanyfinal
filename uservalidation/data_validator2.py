@@ -33,7 +33,7 @@ class ValidationIssue:
         if self.context is None:
             self.context = {}
     
-    # ✅ ADD THIS PROPERTY (for compatibility with dialog)
+    #  ADD THIS PROPERTY (for compatibility with dialog)
     @property
     def correction_confidence(self) -> float:
         """Alias for confidence (for dialog compatibility)"""
@@ -45,7 +45,7 @@ class ValidationResult:
     total_issues: int
     issues: List[ValidationIssue]
     df: pd.DataFrame
-    auto_corrections: List[tuple] = None  # ✅ ADD THIS
+    auto_corrections: List[tuple] = None  #  ADD THIS
     
     def __post_init__(self):
         if self.auto_corrections is None:
@@ -76,7 +76,7 @@ class ValidationResult:
             'errors': len(self.get_by_severity('error')),
             'warnings': len(self.get_by_severity('warning')),
             'info': len(self.get_by_severity('info')),
-            'auto_correctable': len(auto_correctable_issues),  # ✅ This is now a number
+            'auto_correctable': len(auto_correctable_issues),  #  This is now a number
             'high_confidence_fixes': len(high_conf),
             'medium_confidence_fixes': len(med_conf),
             'corrections_applied': len(self.auto_corrections),
@@ -147,33 +147,33 @@ class EnhancedDataValidator:
         """
         self.issues.clear()
 
-        # ✅ ESSENTIAL CHECKS
+        #  ESSENTIAL CHECKS
         self.issues.extend(self.check_missing_coordinates())
-        # ✅ DISABLED: Duplicate IDs are expected in railway layouts
+        #  DISABLED: Duplicate IDs are expected in railway layouts
         # self.issues.extend(self.check_duplicate_ids())
-        # ✅ DISABLED: check_coordinate_format() - no standalone coordinates (filtered out)
+        #  DISABLED: check_coordinate_format() - no standalone coordinates (filtered out)
         # self.issues.extend(self.check_coordinate_format())
         self.issues.extend(self.check_signal_format())
-        # ✅ DISABLED: check_gks_format() - replaced by check_gks_enhanced() with better auto-correction
+        #  DISABLED: check_gks_format() - replaced by check_gks_enhanced() with better auto-correction
         # self.issues.extend(self.check_gks_format())
         self.issues.extend(self.check_fahrtrichtung_validity())
 
-        # ✅ ADDITIONAL CHECKS
-        # ✅ DISABLED: Duplicate signals are expected in railway layouts
+        #  ADDITIONAL CHECKS
+        #  DISABLED: Duplicate signals are expected in railway layouts
         # self.issues.extend(self.check_signal_duplicates())
         self.issues.extend(self.check_confidence_thresholds(min_confidence=0.3))
-        # ✅ DISABLED: check_coordinate_values() - checks standalone coordinates which are filtered out
+        #  DISABLED: check_coordinate_values() - checks standalone coordinates which are filtered out
         # self.issues.extend(self.check_coordinate_values())
 
-        # ✅ NEW ENHANCED CHECKS
+        #  NEW ENHANCED CHECKS
         self.issues.extend(self.check_empty_text_fields())
         self.issues.extend(self.check_multiple_spaces())
         # Disabled per user request: weichen_block excluded from validation
         # self.issues.extend(self.check_weichen_block_structure())
-        self.issues.extend(self.check_gks_enhanced())  # ✅ Replaces check_gks_format() with auto-correction
-        self.issues.extend(self.check_coordinate_structure())  # ✅ Replaces check_coordinate_format() for linked coords
+        self.issues.extend(self.check_gks_enhanced())  #  Replaces check_gks_format() with auto-correction
+        self.issues.extend(self.check_coordinate_structure())  #  Replaces check_coordinate_format() for linked coords
         
-        # ✅ Track corrections
+        #  Track corrections
         corrections_log = []
         
         # Apply auto-corrections if requested
@@ -185,7 +185,7 @@ class EnhancedDataValidator:
             total_issues=len(self.issues),
             issues=self.issues,
             df=self.df,
-            auto_corrections=corrections_log  # ✅ ADD THIS
+            auto_corrections=corrections_log  #  ADD THIS
         )
     
     # ========================================================================
@@ -232,7 +232,7 @@ class EnhancedDataValidator:
                         'anchor_text': row.get('anchor_text', ''),
                         'position': (float(row['xc']), float(row['yc'])) if pd.notna(row.get('xc')) else None,
                         'can_jump': True,
-                        # ✅ Add manual correction actions
+                        #  Add manual correction actions
                         'suggested_action': 'manual_link',
                         'alternative_actions': ['review'],
                         'action_description': 'Koordinate manuell verknüpfen. Aktiviert den "Koordinate manuell verknüpfen" Button.',
@@ -287,7 +287,7 @@ class EnhancedDataValidator:
             if not coord_text:
                 continue
             
-            # ✅ CHECK 1: Lowercase letters (except 'l' in "Gl")
+            #  CHECK 1: Lowercase letters (except 'l' in "Gl")
             temp_text = coord_text
             temp_text = re.sub(r'G[l]\.', 'GL.', temp_text)
             temp_text = re.sub(r'G[l](?=\d)', 'GL', temp_text)
@@ -316,7 +316,7 @@ class EnhancedDataValidator:
                 ))
                 continue
             
-            # ✅ CHECK 2: Validate numeric part
+            #  CHECK 2: Validate numeric part
             numeric_part_match = re.match(r'^(-?\d+[.,]\d+)', coord_text)
             
             if not numeric_part_match:
@@ -357,7 +357,7 @@ class EnhancedDataValidator:
                 ))
                 continue
             
-            # ✅ CHECK 3: Validate brackets
+            #  CHECK 3: Validate brackets
             bracket_part = coord_text[len(numeric_part):].strip()
             
             if bracket_part:
@@ -416,7 +416,7 @@ class EnhancedDataValidator:
                         'expected_pattern': 'Buchstaben+Zahlen (z.B. A101)',
                         'position': (float(row['xc']), float(row['yc'])) if pd.notna(row.get('xc')) else None,
                         'can_jump': True,
-                        # ✅ Bbox resize as primary for format issues
+                        #  Bbox resize as primary for format issues
                         'suggested_action': 'bbox_resize' if not auto_correctable else 'review',
                         'alternative_actions': ['manual_ocr_horizontal', 'manual_edit'],
                         'action_description': 'Signal-Format ungültig. Passen Sie die Erkennungsfläche an.',
@@ -465,7 +465,7 @@ class EnhancedDataValidator:
                         'expected_format': '3-4 Ziffern',
                         'position': (float(row['xc']), float(row['yc'])) if pd.notna(row.get('xc')) else None,
                         'can_jump': True,
-                        # ✅ Bbox resize as primary for format issues
+                        #  Bbox resize as primary for format issues
                         'suggested_action': 'bbox_resize' if not auto_correctable else 'review',
                         'alternative_actions': ['manual_ocr_horizontal', 'manual_edit'],
                         'action_description': 'GKS-Format ungültig (muss 3-4 Ziffern sein). Passen Sie die Erkennungsfläche an.',
@@ -484,7 +484,7 @@ class EnhancedDataValidator:
             anchor_text = row.get('anchor_text', '') or ''
             anchor_text_upper = anchor_text.upper().strip()
 
-            # ✅ Signals that DON'T require Fahrtrichtung:
+            #  Signals that DON'T require Fahrtrichtung:
             # 1. V-signals (Vorsignale) - e.g., V1, V2, VA1
             # 2. Single letter + 3+ digits - e.g., A123, U456, B789
             #    (Fahrtrichtung detection parameters don't work for these)
@@ -547,7 +547,7 @@ class EnhancedDataValidator:
                         'allowed_values': ['A', 'B'],
                         'position': (float(row['xc']), float(row['yc'])) if pd.notna(row.get('xc')) else None,
                         'can_jump': True,
-                        # ✅ Manual edit for non-auto-correctable cases
+                        #  Manual edit for non-auto-correctable cases
                         'suggested_action': 'manual_edit' if not auto_correctable else 'review',
                         'alternative_actions': ['review'],
                         'action_description': 'Fahrtrichtung muss A oder B sein. Bearbeiten Sie den Wert in der Tabelle.',
@@ -629,7 +629,7 @@ class EnhancedDataValidator:
         """Check if confidence values are above threshold"""
         issues = []
 
-        # ✅ Classes to exclude from low confidence warnings
+        #  Classes to exclude from low confidence warnings
         excluded_classes = ['isolierstoß', 'isolierstoss']  # Often have low conf naturally
 
         if 'conf' not in self.df.columns:
@@ -638,7 +638,7 @@ class EnhancedDataValidator:
         low_conf = self.df[self.df['conf'] < min_confidence]
 
         for _, row in low_conf.iterrows():
-            # ✅ Skip excluded classes
+            #  Skip excluded classes
             if row['cls'].lower() in excluded_classes:
                 continue
 
@@ -657,7 +657,7 @@ class EnhancedDataValidator:
                     'threshold': min_confidence,
                     'position': (float(row['xc']), float(row['yc'])) if pd.notna(row.get('xc')) else None,
                     'can_jump': True,
-                    # ✅ Low confidence suggests deleting or manual review
+                    #  Low confidence suggests deleting or manual review
                     'suggested_action': 'delete',
                     'alternative_actions': ['review', 'bbox_resize'],
                     'action_description': f'YOLO hat niedrige Konfidenz ({row["conf"]:.0%}). Möglicherweise Falscherkennung - löschen oder überprüfen.',
@@ -693,7 +693,7 @@ class EnhancedDataValidator:
                         'coord_text': row.get('coord_text', ''),
                         'position': (float(row['xc']), float(row['yc'])) if pd.notna(row.get('xc')) else None,
                         'can_jump': True,
-                        # ✅ Large coordinate values - likely OCR error
+                        #  Large coordinate values - likely OCR error
                         'suggested_action': 'bbox_resize',
                         'alternative_actions': ['manual_ocr_horizontal', 'manual_edit'],
                         'action_description': f'Koordinatenwert ist ungewöhnlich groß ({coord_val:.1f}). Passen Sie die Erkennungsfläche an.',
@@ -703,7 +703,7 @@ class EnhancedDataValidator:
         return issues
 
     # ========================================================================
-    # ✅ NEW ENHANCED VALIDATION CHECKS
+    #  NEW ENHANCED VALIDATION CHECKS
     # ========================================================================
 
     def check_empty_text_fields(self) -> List[ValidationIssue]:
@@ -933,7 +933,7 @@ class EnhancedDataValidator:
         2. Must contain decimal dot (NO AUTO-FIX)
         3. Must have at least 3 digits (NO AUTO-FIX)
 
-        ✅ UPDATED: Only validates linked coordinates (cls != 'coordinate')
+         UPDATED: Only validates linked coordinates (cls != 'coordinate')
         """
         issues = []
 

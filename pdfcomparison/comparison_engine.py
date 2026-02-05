@@ -73,7 +73,7 @@ class LayoutComparisonEngine:
         """Default comparison configuration"""
         return {
             # Matching thresholds
-            'coordinate_tolerance': 0.001,  # 1mm in km
+            'coordinate_tolerance': 0.0001,  # 0.1m (10cm) in km - only truly identical positions
             'spatial_distance_threshold': 200,  # pixels
             'text_similarity_threshold': 0.85,  # Levenshtein
             
@@ -92,8 +92,8 @@ class LayoutComparisonEngine:
             'critical_fields': {
                 # OCR classes - track by anchor_text
                 'signal': {
-                    'identifier': 'anchor_text',  # ✅ What identifies this element
-                    'tracked_fields': ['coord_value', 'fahrtrichtung']  # ✅ What to track for changes
+                    'identifier': 'anchor_text',  #  What identifies this element
+                    'tracked_fields': ['coord_value', 'fahrtrichtung']  #  What to track for changes
                 },
                 'gks_gesteuert': {
                     'identifier': 'anchor_text',
@@ -179,7 +179,7 @@ class LayoutComparisonEngine:
         Compare two layout DataFrames and return detailed changes.
         """
         print("\n" + "="*70)
-        print("🔍 LAYOUT COMPARISON ENGINE")
+        print("LAYOUT COMPARISON ENGINE")
         print("="*70)
         
         # Convert DataFrames to dictionaries
@@ -237,17 +237,17 @@ class LayoutComparisonEngine:
         print(f"  Spatial matches: {len(spatial_matches)}")
         print(f"  Total matches: {len(matches)}")
         
-        # ✅ DEBUG: Show sample of matched elements
+        #  DEBUG: Show sample of matched elements
         if len(matches) > 0:
-            print(f"\n📊 Sample of matched elements:")
+            print(f"\nSample of matched elements:")
             for i, (old_key, new_key) in enumerate(list(matches.items())[:5]):
                 old_elem = dict_old[old_key]
                 new_elem = dict_new[new_key]
                 print(f"  {i+1}. {old_elem.get('cls')} on page {old_elem.get('page')}")
                 old_anchor = str(old_elem.get('anchor_text') or 'N/A')[:30]
                 new_anchor = str(new_elem.get('anchor_text') or 'N/A')[:30]
-                print(f"     Old: {old_anchor}")
-                print(f"     New: {new_anchor}")
+                print(f"Old: {old_anchor}")
+                print(f"New: {new_anchor}")
 
                 # Check distance (with None safety)
                 old_cx = old_elem.get('obb_cx') or 0
@@ -255,7 +255,7 @@ class LayoutComparisonEngine:
                 new_cx = new_elem.get('obb_cx') or 0
                 new_cy = new_elem.get('obb_cy') or 0
                 distance = ((old_cx - new_cx)**2 + (old_cy - new_cy)**2)**0.5
-                print(f"     Distance: {distance:.2f} pixels")
+                print(f"Distance: {distance:.2f} pixels")
         
         # Classify changes
         changes = self._classify_changes(matches, dict_old, dict_new)
@@ -264,7 +264,7 @@ class LayoutComparisonEngine:
         summary = self._generate_summary(changes)
         
         print("\n" + "="*70)
-        print("✅ COMPARISON COMPLETE")
+        print("COMPARISON COMPLETE")
         print("="*70 + "\n")
         
         return {
@@ -288,17 +288,22 @@ class LayoutComparisonEngine:
             dict: Mapping of detection_id to element properties
         """
         result = {}
-        
-        for idx, row in df.iterrows():  # ✅ Changed: use idx
+
+        for idx, row in df.iterrows():  #  Changed: use idx
+            # Skip hidden/merged rows - they are secondary instances that should not be compared
+            hidden_val = row.get('_hidden')
+            if hidden_val is True or (isinstance(hidden_val, float) and not math.isnan(hidden_val) and hidden_val):
+                continue
+
             detection_id = row.get('detection_id')
-            
+
             if not detection_id:
                 continue
                 
             result[detection_id] = {
                 'cls': row.get('cls'),
                 'page': row.get('page'),
-                'row_id': idx,  # ✅ ADD THIS
+                'row_id': row.get('row_id'),  # Use actual row_id column, not dataframe index
                 'anchor_text': row.get('anchor_text'),
                 'coord_text': row.get('coord_text'),
                 'coord_value': row.get('coord_value'),
@@ -347,7 +352,7 @@ class LayoutComparisonEngine:
         identifier_str = str(identifier or '').strip()
         
         # Get coordinate text (for context)
-        coord_text = str(element.get('coord_text') or '').strip()  # ✅ Safe
+        coord_text = str(element.get('coord_text') or '').strip()  #  Safe
         
         # ============================================================
         # Format label based on class type
@@ -547,9 +552,12 @@ class LayoutComparisonEngine:
 
     def _is_auto_generated_name(self, anchor_text: str, cls: str) -> bool:
         """
-        Check if an anchor_text is auto-generated (e.g., "sverbinder 7", "gm_block 3").
+        Check if an anchor_text is auto-generated (not meaningful for matching).
 
-        Auto-generated names follow the pattern: "{class_name} {number}"
+        Returns True for:
+        - Pattern: "{class_name} {number}" (e.g., "sverbinder 7")
+        - Fixed names: "GM", "PB" (for gm_block, prellblock)
+        - Haltepunkt with signal: "haltepunkt 1 (MB456)"
 
         Args:
             anchor_text: The anchor text to check
@@ -565,7 +573,19 @@ class LayoutComparisonEngine:
 
         anchor_text = str(anchor_text).strip()
 
-        # Pattern: class name (with underscores replaced by spaces or kept) followed by a number
+        # FIXED NAMES - always auto-generated (not meaningful identifiers)
+        if cls == 'gm_block' and anchor_text.upper() == 'GM':
+            return True
+        if cls == 'prellblock' and anchor_text.upper() == 'PB':
+            return True
+
+        # HALTEPUNKT with signal name in brackets
+        if cls == 'haltepunkt':
+            # Pattern: "haltepunkt {number}" OR "haltepunkt {number} ({signal})"
+            if re.match(r'^haltepunkt\s*\d+(\s*\([^)]+\))?$', anchor_text, re.IGNORECASE):
+                return True
+
+        # STANDARD PATTERN: "{class_name} {number}"
         # Examples: "sverbinder 7", "gm_block 3", "gm block 3", "isolierstoß 2", "gm_block5"
         cls_variants = [
             cls,                          # Original: "gm_block"
@@ -580,6 +600,31 @@ class LayoutComparisonEngine:
                 return True
 
         return False
+
+    def _extract_haltepunkt_signal_name(self, anchor_text: str) -> Optional[str]:
+        """
+        Extract signal name from haltepunkt anchor_text.
+
+        Format: "haltepunkt {counter} ({signal_name})"
+        Example: "haltepunkt 1 (MB456)" → "MB456"
+
+        Args:
+            anchor_text: The haltepunkt anchor text
+
+        Returns:
+            Signal name if found, None otherwise
+        """
+        import re
+
+        if not anchor_text:
+            return None
+
+        # Pattern: anything inside parentheses at the end
+        match = re.search(r'\(([^)]+)\)\s*$', anchor_text)
+        if match:
+            return match.group(1).strip()
+
+        return None
 
     def _match_symbol_element(self, row1: Dict, row2: Dict) -> float:
         """
@@ -599,9 +644,55 @@ class LayoutComparisonEngine:
         score = 0.0
         cls = row1.get('cls', '')
 
-        # ✅ CHECK anchor_text: detect auto-generated vs user-defined
+        #  CHECK anchor_text: detect auto-generated vs user-defined
         anchor1 = str(row1.get('anchor_text') or '').strip()
         anchor2 = str(row2.get('anchor_text') or '').strip()
+
+        # ================================================================
+        # SPECIAL HANDLING for haltepunkt class
+        # Haltepunkt anchor_text format: "haltepunkt {counter} ({signal_name})"
+        # The signal_name in brackets is the real identifier (e.g., "MB456")
+        # ================================================================
+        if cls == 'haltepunkt':
+            signal1 = self._extract_haltepunkt_signal_name(anchor1)
+            signal2 = self._extract_haltepunkt_signal_name(anchor2)
+
+            if signal1 and signal2:
+                # Both have signal names - use as primary identifier
+                if signal1 == signal2:
+                    # Same signal name = same haltepunkt, just counter changed
+                    # High score - will match
+                    score = 0.9
+
+                    # Add tiered spatial proximity bonus (consistent with symbol matching)
+                    cx1 = row1.get('obb_cx') or row1.get('cx') or 0
+                    cy1 = row1.get('obb_cy') or row1.get('cy') or 0
+                    cx2 = row2.get('obb_cx') or row2.get('cx') or 0
+                    cy2 = row2.get('obb_cy') or row2.get('cy') or 0
+
+                    try:
+                        distance = ((float(cx1) - float(cx2))**2 + (float(cy1) - float(cy2))**2)**0.5
+                    except (ValueError, TypeError):
+                        distance = 9999
+
+                    # Tiered spatial bonus (consistent with _match_symbol_element)
+                    if distance < 50:
+                        spatial_bonus = 0.10
+                    elif distance < 150:
+                        spatial_bonus = 0.07
+                    elif distance < 300:
+                        spatial_bonus = 0.04
+                    elif distance < 500:
+                        spatial_bonus = 0.02
+                    else:
+                        spatial_bonus = 0.0
+
+                    return min(score + spatial_bonus, 1.0)
+                else:
+                    # Different signal names = different haltepunkts
+                    return 0.0
+
+            # If only one has signal name, or neither has, fall through to standard matching
 
         auto1 = self._is_auto_generated_name(anchor1, cls)
         auto2 = self._is_auto_generated_name(anchor2, cls)
@@ -618,25 +709,85 @@ class LayoutComparisonEngine:
                 if anchor1 != anchor2:
                     return 0.0
 
-        # ✅ PRIMARY: coord_text match (most important for gm_block, sverbinder, etc.)
+        #  PRIMARY: coord_value match (most important for gm_block, sverbinder, etc.)
+        # Use numeric coord_value with tolerance, not exact string match
+        # This allows matching elements that moved slightly (e.g., 5.8548 → 5.8549)
         text1 = str(row1.get('coord_text') or '').strip()
         text2 = str(row2.get('coord_text') or '').strip()
+        val1 = row1.get('coord_value')
+        val2 = row2.get('coord_value')
 
-        if text1 and text2:
+        # Try numeric comparison first (with 0.04 km = ±20m tolerance for matching)
+        COORD_MATCH_TOLERANCE = 0.04  # ±20 meters (40m total range) - elements within this are same element
+
+        # Check for valid coord_values (not None AND not NaN)
+        val1_valid = val1 is not None and not (isinstance(val1, float) and math.isnan(val1))
+        val2_valid = val2 is not None and not (isinstance(val2, float) and math.isnan(val2))
+
+        if val1_valid and val2_valid:
+            try:
+                numeric_diff = abs(float(val1) - float(val2))
+                # Tiered scoring based on coordinate difference
+                # Closer matches get higher scores (Hungarian algorithm prefers these)
+                if numeric_diff < 0.001:  # < 1m = essentially same position
+                    score += 0.85
+                elif numeric_diff < 0.01:  # < 10m = very close
+                    score += 0.8
+                elif numeric_diff < 0.02:  # < 20m = close
+                    score += 0.75
+                elif numeric_diff < COORD_MATCH_TOLERANCE:  # < 40m = same element, moved more
+                    score += 0.7
+                else:
+                    # > 40m difference = different elements
+                    return 0.0
+            except (ValueError, TypeError):
+                # Fallback to string comparison
+                if text1 == text2:
+                    score += 0.8
+                elif text1 and text2:
+                    return 0.0
+        elif text1 and text2:
             if text1 == text2:
                 # Same coord_text = very likely same element
-                # This is strong enough to match even with large spatial shifts
                 score += 0.8
             else:
                 # Different coord_text = different elements, no match
                 return 0.0
         elif not text1 and not text2:
-            # Both have no coord_text - rely on spatial proximity only
-            # Give a base score so very close elements can still match
-            score += 0.5
+            # Both have no coord_text - use TIERED spatial matching
+            # This allows fallback matching with decreasing confidence
+            cx1 = row1.get('obb_cx') or row1.get('cx') or 0
+            cy1 = row1.get('obb_cy') or row1.get('cy') or 0
+            cx2 = row2.get('obb_cx') or row2.get('cx') or 0
+            cy2 = row2.get('obb_cy') or row2.get('cy') or 0
 
-        # ✅ SECONDARY: Spatial proximity (CONTINUOUS - closer is ALWAYS better)
-        # This ensures when multiple elements have same coord_text, the closest pair matches
+            try:
+                distance = ((float(cx1) - float(cx2))**2 + (float(cy1) - float(cy2))**2)**0.5
+            except (ValueError, TypeError):
+                distance = 9999
+
+            # Tiered scoring based on distance
+            # Hungarian algorithm will prefer higher scores (closer matches)
+            if distance < 50:
+                # Tier 1: Very close - high confidence (same PDF re-processed)
+                score += 0.8
+            elif distance < 150:
+                # Tier 2: Medium distance - good confidence (minor layout shift)
+                score += 0.6
+            elif distance < 300:
+                # Tier 3: Far - lower confidence (larger layout changes)
+                score += 0.4
+            else:
+                # Too far apart - no match
+                return 0.0
+        else:
+            # One has coord_text, other doesn't - shouldn't match
+            # (one is linked to coordinate, other isn't)
+            return 0.0
+
+        #  SECONDARY: Spatial proximity bonus (TIERED)
+        # This ensures when multiple elements have same coord_value, the closest pair matches
+        # Combined with coord_value tiers, this creates a robust matching system
         cx1 = row1.get('obb_cx') or row1.get('cx') or 0
         cy1 = row1.get('obb_cy') or row1.get('cy') or 0
         cx2 = row2.get('obb_cx') or row2.get('cx') or 0
@@ -647,10 +798,20 @@ class LayoutComparisonEngine:
         except (ValueError, TypeError):
             distance = 9999
 
-        # Continuous distance scoring using inverse function
-        # distance=0 → 0.2, distance=100 → 0.167, distance=500 → 0.1, distance=1000 → 0.067
-        # This ensures closer matches are ALWAYS preferred, preventing cross-matching
-        spatial_bonus = 0.2 * (500 / (distance + 500))
+        # Tiered spatial bonus - adds to coord_value score
+        # Example: coord within 10m (0.8) + spatial < 50px (0.15) = 0.95 (very confident match)
+        # Example: coord within 30m (0.7) + spatial < 300px (0.05) = 0.75 (good match)
+        if distance < 50:
+            spatial_bonus = 0.15  # Very close spatially
+        elif distance < 150:
+            spatial_bonus = 0.10  # Reasonably close
+        elif distance < 300:
+            spatial_bonus = 0.05  # Medium distance
+        elif distance < 500:
+            spatial_bonus = 0.02  # Far but still adds small bonus
+        else:
+            spatial_bonus = 0.0   # Too far for any bonus
+
         score += spatial_bonus
 
         return min(score, 1.0)
@@ -742,7 +903,7 @@ class LayoutComparisonEngine:
             'unchanged': []
         }
         
-        # ✅ FIXED: matches is now {old_id: new_id}, not {key: {old_key, new_key}}
+        #  FIXED: matches is now {old_id: new_id}, not {key: {old_key, new_key}}
         matched_old = set(matches.keys())
         matched_new = set(matches.values())
         
@@ -874,17 +1035,38 @@ class LayoutComparisonEngine:
         new_id_str = str(new_identifier or '').strip()
 
         if old_id_str != new_id_str:
-            # ✅ Identifier changed
-            
+            #  Identifier changed
+
             # For non-OCR symbols: coord_text change = symbol renumbered
+            # BUT: Skip if the numeric coord_values are within tolerance (same logical position)
+            # This prevents "5.8500" vs "5.8501" from being flagged as "renumbered"
             if identifier_field == 'coord_text':
-                field_changes[identifier_field] = {
-                    'old': old_identifier,
-                    'new': new_identifier,
-                    'change_type': 'symbol_renumbered',  # ✅ More specific
-                    'severity': 'MAJOR',
-                    'description': f'Symbol renumbered: {old_id_str} → {new_id_str}'
-                }
+                # Check if coord_values are numerically close
+                old_coord_val = old_row.get('coord_value')
+                new_coord_val = new_row.get('coord_value')
+
+                # Use matching tolerance (40m) not change detection tolerance (1m)
+                RENUMBER_TOLERANCE = 0.04  # 40m - same as matching tolerance
+                coords_numerically_same = False
+
+                if old_coord_val is not None and new_coord_val is not None:
+                    try:
+                        if not (isinstance(old_coord_val, float) and math.isnan(old_coord_val)):
+                            if not (isinstance(new_coord_val, float) and math.isnan(new_coord_val)):
+                                if abs(float(old_coord_val) - float(new_coord_val)) < RENUMBER_TOLERANCE:
+                                    coords_numerically_same = True
+                    except (ValueError, TypeError):
+                        pass
+
+                # Only flag as "renumbered" if coordinates are genuinely different
+                if not coords_numerically_same:
+                    field_changes[identifier_field] = {
+                        'old': old_identifier,
+                        'new': new_identifier,
+                        'change_type': 'symbol_renumbered',  #  More specific
+                        'severity': 'MAJOR',
+                        'description': f'Symbol renumbered: {old_id_str} → {new_id_str}'
+                    }
             
             # For OCR classes: anchor_text change = element relabeled
             elif identifier_field == 'anchor_text':
@@ -915,8 +1097,17 @@ class LayoutComparisonEngine:
             # Special handling for coord_value
             if field == 'coord_value':
                 if not self._coords_equal(old_val, new_val):
-                    # Use 'is not None' instead of truthy check (0.0 is a valid coordinate!)
-                    delta = abs(new_val - old_val) if (new_val is not None and old_val is not None) else None
+                    # Calculate delta - must check for BOTH None AND NaN
+                    delta = None
+                    if old_val is not None and new_val is not None:
+                        # Also check for NaN (NaN passes 'is not None' check!)
+                        old_is_nan = isinstance(old_val, float) and math.isnan(old_val)
+                        new_is_nan = isinstance(new_val, float) and math.isnan(new_val)
+                        if not old_is_nan and not new_is_nan:
+                            try:
+                                delta = abs(float(new_val) - float(old_val))
+                            except (ValueError, TypeError):
+                                delta = None
 
                     field_changes[field] = {
                         'old': old_val,
@@ -924,7 +1115,7 @@ class LayoutComparisonEngine:
                         'delta': delta,
                         'delta_meters': delta * 1000 if delta is not None else None,
                         'description': f'{old_id_str} moved by {delta * 1000:.1f}m' if delta is not None else None,
-                        'element_identifier': old_id_str  # ✅ Track which element moved
+                        'element_identifier': old_id_str  #  Track which element moved
                     }
             
             # Text/categorical fields
@@ -933,7 +1124,7 @@ class LayoutComparisonEngine:
                     field_changes[field] = {
                         'old': old_val,
                         'new': new_val,
-                        'element_identifier': old_id_str  # ✅ Track which element changed
+                        'element_identifier': old_id_str  #  Track which element changed
                     }
         
         # ============================================================
@@ -959,7 +1150,7 @@ class LayoutComparisonEngine:
                     'new': new_angle,
                     'delta': angle_diff,
                     'direction': 'clockwise' if new_angle_norm > old_angle_norm else 'counter-clockwise',
-                    'element_identifier': old_id_str  # ✅ Track which element rotated
+                    'element_identifier': old_id_str  #  Track which element rotated
                 }
         
         # ============================================================
@@ -969,7 +1160,7 @@ class LayoutComparisonEngine:
         if cls != 'coordinate':
             spatial_change = self._detect_spatial_change(old_row, new_row)
             if spatial_change:
-                spatial_change['element_identifier'] = old_id_str  # ✅ Track which element moved
+                spatial_change['element_identifier'] = old_id_str  #  Track which element moved
         
         return (field_changes if field_changes else None, spatial_change)
     
@@ -1009,7 +1200,7 @@ class LayoutComparisonEngine:
             'movement_vector': (dx, dy),
             'distance': distance,
             'direction': direction
-            # ✅ element_identifier will be added by _detect_changes()
+            #  element_identifier will be added by _detect_changes()
         }
         
     def _angle_to_direction(self, angle: float) -> str:

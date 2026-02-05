@@ -5,13 +5,25 @@ from PIL import Image
 import re
 import threading
 import logging
-from config import DEBUG_ANGLE_ROUTING,PADDLEOCR_PARAMS, DEBUG_SIGNALS, SIG_LINE_THICK, SIG_USE_TIGHTEN, SIGNAL_TEXT_HEIGHT_HINT, SIG_SCORE_MIN, CLASS_ID_PATTERNS, COORD_RE, CARDINAL_PARAMS, NUMERIC_OK
+from config import DEBUG_ANGLE_ROUTING, DEBUG_OCR, DEBUG_CUSTOM_SYMBOLS, PADDLEOCR_PARAMS, DEBUG_SIGNALS, SIG_LINE_THICK, SIG_USE_TIGHTEN, SIGNAL_TEXT_HEIGHT_HINT, SIG_SCORE_MIN, CLASS_ID_PATTERNS, COORD_RE, CARDINAL_PARAMS, NUMERIC_OK, TESSERACT_PATH
 from core.image_processing import perspective_crop_from_det, rotated_crop_from_det, rotated_crop_pil, _upscale_if_tiny,_remove_long_lines_oriented, _pil_to_gray_np, _enhance_contrast, _binarize_for_text, _invert, crop_pil, _deskew_small
 from utils.helpers import _is_cardinal,_debug_angle
 from typing import List, Dict, Tuple, Optional, Any
 from core.linking import LINK_RULES, name_windows_for
-import os 
+import os
 
+# ============================================================================
+# TESSERACT PATH CONFIGURATION
+# ============================================================================
+# Configure Tesseract path if specified in config (for company laptops)
+if TESSERACT_PATH:
+    try:
+        import pytesseract
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+        if DEBUG_OCR:
+            print(f"[OCR] Tesseract path configured: {TESSERACT_PATH}")
+    except ImportError:
+        pass  # pytesseract not installed, will fail later if needed
 
 # ============================================================================
 # PADDLEOCR HELPER FUNCTIONS
@@ -127,7 +139,7 @@ def paddleocr_recognize(
         
     except Exception as e:
         if DEBUG_SIGNALS:
-            print(f"⚠️ PaddleOCR error ({cls_name}): {e}")
+            print(f" PaddleOCR error ({cls_name}): {e}")
         return "", 0.0
 
 
@@ -176,7 +188,7 @@ def paddleocr_recognize_multiline(
         if not texts:
             return "", 0.0
 
-        # ✅ Join with newlines to preserve multi-line structure for weichen_block
+        #  Join with newlines to preserve multi-line structure for weichen_block
         final_text = "\n".join(texts)
         final_conf = sum(confs) / len(confs)
 
@@ -194,7 +206,7 @@ def paddleocr_recognize_multiline(
 
     except Exception as e:
         if DEBUG_SIGNALS:
-            print(f"⚠️ PaddleOCR multiline error ({cls_name}): {e}")
+            print(f" PaddleOCR multiline error ({cls_name}): {e}")
         return "", 0.0
 
 
@@ -242,7 +254,8 @@ try:
     PADDLEOCR_AVAILABLE = True
 except ImportError:
     PADDLEOCR_AVAILABLE = False
-    print("⚠️ PaddleOCR not available. Install: pip install paddleocr paddlepaddle")
+    if DEBUG_OCR:
+        print(" PaddleOCR not available. Install: pip install paddleocr paddlepaddle")
 
 _PADDLE_OCR_INSTANCE = None
 
@@ -287,10 +300,12 @@ def get_paddleocr_instance():
                     cpu_threads=max(2, min(12, os.cpu_count() or 4)),  # ← DYNAMIC
                 )
                     
-                    print(f"✅ PaddleOCR initialized: threads=4, mkldnn=True")
-                    
+                    if DEBUG_OCR:
+                        print(f"PaddleOCR initialized: threads=4, mkldnn=True")
+
                 except Exception as e:
-                    print(f"❌ Failed to initialize PaddleOCR: {e}")
+                    if DEBUG_OCR:
+                        print(f"Failed to initialize PaddleOCR: {e}")
                     _PADDLE_OCR_INSTANCE = None
     
     return _PADDLE_OCR_INSTANCE
@@ -323,7 +338,7 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
         pad = 9   # ↑ +1 for edge cases
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"\n📦 COORD ANGULAR: {w:.0f}×{h:.0f}px | raw={ang_raw:.1f}° norm={ang_normalized:.1f}° | pad={pad}")
+        print(f"\n COORD ANGULAR: {w:.0f}×{h:.0f}px | raw={ang_raw:.1f}° norm={ang_normalized:.1f}° | pad={pad}")
     
     best_txt, best_sc = "", -1.0
     
@@ -332,7 +347,7 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
     # ========================================================================
     try:
         pil_crop = perspective_crop_from_det(det, bgr_color, pad=pad)
-    except Exception:
+    except Exception as e:
         pil_crop = rotated_crop_from_det(det, bgr_color, pad=pad)
     
     if pil_crop.width < 5 or pil_crop.height < 5:
@@ -340,25 +355,25 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
     
     # Upscale
     pil_crop = _upscale_if_tiny(pil_crop, min_side=80, scale=3)
-    
+
     if DEBUG_ANGLE_ROUTING:
-        print(f"   → Crop size: {pil_crop.width}×{pil_crop.height}px")
+        print(f"→ Crop size: {pil_crop.width}×{pil_crop.height}px")
     
     # ========================================================================
     # STEP 2: Line removal for angular text (GENTLER for brackets)
     # ========================================================================
     if not _is_cardinal(ang_normalized):
-        # ✅ GENTLER line removal - slightly more conservative for edge cases
+        #  GENTLER line removal - slightly more conservative for edge cases
         pil_pass1 = _remove_long_lines_oriented(pil_crop, ang_raw, frac_len=0.32, thickness=2)   # ↑ 0.30→0.32
         pil_pass2 = _remove_long_lines_oriented(pil_pass1, ang_raw, frac_len=0.27, thickness=6)  # ↑ 0.25→0.27
         pil_final = _remove_long_lines_oriented(pil_pass2, ang_raw, frac_len=0.22, thickness=10) # ↑ 0.20→0.22
 
         if DEBUG_ANGLE_ROUTING:
-            print(f"   → Applied 3-pass line removal (gentler)")
+            print(f"→ Applied 3-pass line removal (gentler)")
     else:
         pil_final = pil_crop
         if DEBUG_ANGLE_ROUTING:
-            print(f"   → No line removal (near-cardinal)")
+            print(f"→ No line removal (near-cardinal)")
     
     # ========================================================================
     # STEP 3: Preprocessing variants
@@ -372,7 +387,7 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
         variants = [g2, g1, g0]
     else:
         variants = [g2, _invert(g2), g1, g0]
-    
+
     bases = [Image.fromarray(v) for v in variants]
     rotations = [0, 90, 180, 270]
     
@@ -380,31 +395,31 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
     # STEP 4: PaddleOCR with 3-step cleaning + OPTIMIZED MERGING
     # ========================================================================
     paddle = get_paddleocr_instance()
-    
+
     if paddle is None:
         if DEBUG_ANGLE_ROUTING:
-            print(f"   ❌ PaddleOCR not available")
+            print(f"PaddleOCR not available")
         return ""
-    
+
     if DEBUG_ANGLE_ROUTING:
-        print(f"   → Running PaddleOCR...")
-    
+        print(f"→ Running PaddleOCR...")
+
     try:
         for base_idx, base in enumerate(bases):
             for rot in rotations:
                 test_img = base.rotate(rot, expand=True, fillcolor=255) if rot != 0 else base
                 test_arr = np.array(test_img)
-                
+
                 if len(test_arr.shape) == 2:
                     test_arr = cv2.cvtColor(test_arr, cv2.COLOR_GRAY2BGR)
-                
+
                 # Run PaddleOCR
                 results = paddle.ocr(test_arr, cls=False)
-                
+
                 if not results or not results[0]:
                     continue
-                
-                # ✅ Collect ALL detections with their positions
+
+                #  Collect ALL detections with their positions
                 all_detections = []
                 for line in results[0]:
                     if line is None:
@@ -427,16 +442,16 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
                 if not all_detections:
                     continue
                 
-                # ✅ Sort detections by X-position (left to right)
+                #  Sort detections by X-position (left to right)
                 all_detections.sort(key=lambda d: d['x_pos'])
-                
-                # ✅ Quick quality check - skip if all detections are low confidence
+
+                #  Quick quality check - skip if all detections are low confidence
                 if all(d['conf'] < 0.40 for d in all_detections):
                     if DEBUG_ANGLE_ROUTING:
-                        print(f"      [var={base_idx} rot={rot:3d}°] → SKIP: All detections low confidence")
+                        print(f"[var={base_idx} rot={rot:3d}°] → SKIP: All detections low confidence")
                     continue
                 
-                # ✅ OPTIMIZED: Smart candidate generation with pre-filtering
+                #  OPTIMIZED: Smart candidate generation with pre-filtering
                 candidates = []
                 
                 # Quick check: Do we have a number and a bracket?
@@ -501,7 +516,7 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
                                 'is_merged': True
                             })
                 
-                # ✅ Process all candidates
+                #  Process all candidates
                 for cand in candidates:
                     text = cand['text']
                     conf = cand['conf']
@@ -509,17 +524,17 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
                     
                     if DEBUG_ANGLE_ROUTING:
                         marker = "[MERGED]" if is_merged else "[SINGLE]"
-                        print(f"      [var={base_idx} rot={rot:3d}°] {marker} RAW: '{text}' (conf={conf:.2f})")
+                        print(f"[var={base_idx} rot={rot:3d}°] {marker} RAW: '{text}' (conf={conf:.2f})")
                     
                     # STEP 1: Remove overlap garbage (SKIP for merged candidates)
                     if is_merged:
                         txt_clean = text
                     else:
                         txt_clean = _clean_coordinate_overlap(text)
-                        
+
                         if not txt_clean:
                             if DEBUG_ANGLE_ROUTING:
-                                print(f"         → SKIPPED: No valid coordinate pattern")
+                                print(f"→ SKIPPED: No valid coordinate pattern")
                             continue
                     
                     # STEP 2: Fix bracket mistakes
@@ -527,33 +542,33 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
                     
                     if DEBUG_ANGLE_ROUTING:
                         if txt_fixed != text:
-                            print(f"         → CLEANED: '{text}' → '{txt_fixed}'")
+                            print(f"→ CLEANED: '{text}' → '{txt_fixed}'")
                     
                     # STEP 3: Score
                     sc = _score_coord_text(txt_fixed)
                     
                     if DEBUG_ANGLE_ROUTING and sc > 0:
-                        print(f"         → SCORE: {sc:.2f}")
+                        print(f"→ SCORE: {sc:.2f}")
                     
                     if sc > best_sc:
                         best_txt, best_sc = txt_fixed, sc
                         if DEBUG_ANGLE_ROUTING:
-                            print(f"         → NEW BEST!")
+                            print(f"→ NEW BEST!")
                         
-                        # ✅ Smart early exit - only for complete coordinates
+                        #  Smart early exit - only for complete coordinates
                         has_brackets = '(' in txt_fixed and ')' in txt_fixed
                         
                         if has_brackets and sc >= 2.0 and conf >= 0.50:
                             if DEBUG_ANGLE_ROUTING:
-                                print(f"      ✅ EARLY EXIT (complete): '{best_txt}'")
-                            # ✅ FINAL CLEANING before return
+                                print(f"EARLY EXIT (complete): '{best_txt}'")
+                            #  FINAL CLEANING before return
                             best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
                             best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
                             return best_txt.strip()
                         elif not has_brackets and sc >= 2.5 and conf >= 0.80:
                             if DEBUG_ANGLE_ROUTING:
-                                print(f"      ✅ EARLY EXIT (high conf simple): '{best_txt}'")
-                            # ✅ FINAL CLEANING before return
+                                print(f"EARLY EXIT (high conf simple): '{best_txt}'")
+                            #  FINAL CLEANING before return
                             best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
                             best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
                             return best_txt.strip()
@@ -561,25 +576,25 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
             # Check if we have a good result after each base variant
             if best_txt and best_sc >= 1.0:
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"   ✅ RESULT: '{best_txt}' (score:{best_sc:.2f})")
-                # ✅ FINAL CLEANING before return
+                    print(f"RESULT: '{best_txt}' (score:{best_sc:.2f})")
+                #  FINAL CLEANING before return
                 best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
                 best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
                 return best_txt.strip()
                         
     except Exception as e:
         if DEBUG_ANGLE_ROUTING:
-            print(f"      [PaddleOCR] → EXCEPTION: {e}")
+            print(f"[PaddleOCR] → EXCEPTION: {e}")
             import traceback
             traceback.print_exc()
     
     if DEBUG_ANGLE_ROUTING:
         if best_txt:
-            print(f"   ⚠️ FINAL: '{best_txt}' (score:{best_sc:.2f})")
+            print(f"FINAL: '{best_txt}' (score:{best_sc:.2f})")
         else:
-            print(f"   ❌ FAILED")
-    
-    # ✅ FINAL CLEANING before return
+            print(f"FAILED")
+
+    #  FINAL CLEANING before return
     if best_txt:
         best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
         best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
@@ -592,16 +607,23 @@ def _clean_coordinate_overlap(text: str) -> str:
     """
     if not text:
         return ""
-    
+
     import re
-    
+
     original_text = text
-    
-    # ✅ ONLY print if DEBUG_ANGLE_ROUTING
+
+    # PRE-FIX: Common OCR errors where 0 is misread as O/Q
+    # Only fix at positions where it looks like a coordinate number
+    # Pattern: Q or O followed by comma/period and digits = likely "0,xxxx"
+    text = re.sub(r'^[QOqo]([,.])', r'0\1', text)  # Start: Q,0294 -> 0,0294
+    text = re.sub(r'^-[QOqo]([,.])', r'-0\1', text)  # Negative: -Q,0294 -> -0,0294
+    text = re.sub(r'([,.])[QOqo]([,.\d])', r'\g<1>0\2', text)  # Middle: 0,Q294 -> 0,0294
+
+    #  ONLY print if DEBUG_ANGLE_ROUTING
     if DEBUG_ANGLE_ROUTING:
-        print(f"      [clean_overlap] Input: '{text}'")
+        print(f"[clean_overlap] Input: '{original_text}' (after OCR fix: '{text}')")
     
-    # ✅ MOVED: Pre-clean AFTER pattern matching (not before!)
+    #  MOVED: Pre-clean AFTER pattern matching (not before!)
     # This preserves brackets during pattern detection
     
     # Pattern 1a: Complete bracketed coordinate
@@ -611,12 +633,12 @@ def _clean_coordinate_overlap(text: str) -> str:
     if bracket_complete_match:
         result = bracket_complete_match.group(0).replace(',', '.')
         
-        # ✅ NOW clean trailing alphabet AFTER extraction
+        #  NOW clean trailing alphabet AFTER extraction
         result = re.sub(r'\s*[a-zA-Z]\s*$', '', result)
         result = re.sub(r'\s*[|/\\]\s*$', '', result)
         
         if DEBUG_ANGLE_ROUTING:
-            print(f"      [clean_overlap] ✅ Pattern 1a (complete bracket): '{original_text}' → '{result}'")
+            print(f"[clean_overlap] Pattern 1a (complete bracket): '{original_text}' → '{result}'")
         
         return result
     
@@ -631,12 +653,12 @@ def _clean_coordinate_overlap(text: str) -> str:
         if ')' not in result:
             result += ')'
         
-        # ✅ NOW clean trailing alphabet AFTER extraction
+        #  NOW clean trailing alphabet AFTER extraction
         result = re.sub(r'\s*[a-zA-Z]\s*$', '', result)
         result = re.sub(r'\s*[|/\\]\s*$', '', result)
         
         if DEBUG_ANGLE_ROUTING:
-            print(f"      [clean_overlap] ✅ Pattern 1b (incomplete bracket, added closing): '{original_text}' → '{result}'")
+            print(f"[clean_overlap] Pattern 1b (incomplete bracket, added closing): '{original_text}' → '{result}'")
         
         return result
     
@@ -647,18 +669,18 @@ def _clean_coordinate_overlap(text: str) -> str:
     if simple_match:
         result = simple_match.group(0).replace(',', '.')
         
-        # ✅ Clean trailing alphabet for simple coordinates too
+        #  Clean trailing alphabet for simple coordinates too
         result = re.sub(r'\s*[a-zA-Z]\s*$', '', result)
         result = re.sub(r'\s*[|/\\]\s*$', '', result)
         
         if DEBUG_ANGLE_ROUTING:
-            print(f"      [clean_overlap] ✅ Pattern 2 (simple number): '{original_text}' → '{result}'")
+            print(f"[clean_overlap] Pattern 2 (simple number): '{original_text}' → '{result}'")
         
         return result
     
     # No valid coordinate pattern found
     if DEBUG_ANGLE_ROUTING:
-        print(f"      [clean_overlap] ❌ NO VALID PATTERN in: '{text}'")
+        print(f"[clean_overlap] NO VALID PATTERN in: '{text}'")
     
     return ""
 
@@ -677,17 +699,17 @@ def _score_coord_text(txt: str) -> float:
     # Quick validation
     if not _looks_like_coordinate(txt):
         if DEBUG_ANGLE_ROUTING:
-            print(f"      [score] ❌ Not a coordinate: '{txt}'")
+            print(f"[score] Not a coordinate: '{txt}'")
         return 0.0
     
-    # ✅ HANDLE BRACKETED COORDINATES like "0.0734(Gl.112)"
+    #  HANDLE BRACKETED COORDINATES like "0.0734(Gl.112)"
     if '(' in txt and ')' in txt:
         try:
             main_part = txt.split('(')[0].strip()
             bracket_part = txt.split('(')[1].split(')')[0].strip()
         except:
             if DEBUG_ANGLE_ROUTING:
-                print(f"      [score] ⚠️ Malformed bracket: '{txt}'")
+                print(f"[score]  Malformed bracket: '{txt}'")
             return 0.5  # Malformed
         
         # Score main coordinate part (e.g., "0.0734")
@@ -708,18 +730,18 @@ def _score_coord_text(txt: str) -> float:
         total_score = main_score + bracket_score
         
         if DEBUG_ANGLE_ROUTING:
-            print(f"      [score] Bracketed: '{txt}' → main={main_score:.2f}, bracket={bracket_score:.2f}, total={total_score:.2f}")
+            print(f"[score] Bracketed: '{txt}' → main={main_score:.2f}, bracket={bracket_score:.2f}, total={total_score:.2f}")
         
         return total_score
     
-    # ✅ SIMPLE COORDINATE (no brackets) - ORIGINAL LOGIC
+    #  SIMPLE COORDINATE (no brackets) - ORIGINAL LOGIC
     digit_count = sum(c.isdigit() for c in txt)
     has_dot = '.' in txt
     has_comma = ',' in txt
     
     if digit_count < 1:
         if DEBUG_ANGLE_ROUTING:
-            print(f"      [score] ❌ No digits: '{txt}'")
+            print(f"[score] No digits: '{txt}'")
         return 0.0
     
     score = 1.0
@@ -729,7 +751,7 @@ def _score_coord_text(txt: str) -> float:
         score += 0.3
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"      [score] Simple: '{txt}' → {score:.2f}")
+        print(f"[score] Simple: '{txt}' → {score:.2f}")
     
     return max(0.0, score)
 
@@ -744,7 +766,7 @@ def _fix_coordinate_brackets(text: str) -> str:
     
     import re
     
-    original_text = text  # ✅ Save for debug
+    original_text = text  #  Save for debug
     
     # 1. Replace comma with dot (German decimal separator)
     text = text.replace(',', '.')
@@ -759,7 +781,7 @@ def _fix_coordinate_brackets(text: str) -> str:
     result = text.strip()
     
     if DEBUG_ANGLE_ROUTING and result != original_text:
-        print(f"      [fix_brackets] '{original_text}' → '{result}'")
+        print(f"[fix_brackets] '{original_text}' → '{result}'")
     
     return result
 
@@ -775,7 +797,7 @@ def _looks_like_coordinate(text: str) -> bool:
     # Must start with a digit or minus sign
     if not (text[0].isdigit() or text[0] == '-'):
         if DEBUG_ANGLE_ROUTING:
-            print(f"      [looks_like] ❌ Doesn't start with digit/minus: '{text}'")
+            print(f"[looks_like] Doesn't start with digit/minus: '{text}'")
         return False
     
     # Must contain at least one digit and one dot
@@ -784,18 +806,18 @@ def _looks_like_coordinate(text: str) -> bool:
     
     if not (has_digit and has_dot):
         if DEBUG_ANGLE_ROUTING:
-            print(f"      [looks_like] ❌ Missing digit or dot: '{text}' (has_digit={has_digit}, has_dot={has_dot})")
+            print(f"[looks_like] Missing digit or dot: '{text}' (has_digit={has_digit}, has_dot={has_dot})")
         return False
     
     # If it has brackets, they must be paired
     if '(' in text or ')' in text:
         if not ('(' in text and ')' in text):
             if DEBUG_ANGLE_ROUTING:
-                print(f"      [looks_like] ❌ Unpaired brackets: '{text}'")
+                print(f"[looks_like] Unpaired brackets: '{text}'")
             return False
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"      [looks_like] ✅ Valid: '{text}'")
+        print(f"[looks_like] Valid: '{text}'")
     
     return True
 
@@ -812,7 +834,7 @@ def ocr_weichen_block(anchor: dict, bgr_color: np.ndarray) -> str:
     h = float(anchor.get("obb_h", anchor["y2"] - anchor["y1"]))
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"\n📦 WEICHEN BLOCK: {w:.0f}×{h:.0f}px")
+        print(f"\n WEICHEN BLOCK: {w:.0f}×{h:.0f}px")
     
     # Minimal padding
     pad = 0   
@@ -826,7 +848,7 @@ def ocr_weichen_block(anchor: dict, bgr_color: np.ndarray) -> str:
     
     if pil_crop.width < 10 or pil_crop.height < 10:
         if DEBUG_ANGLE_ROUTING:
-            print(f"   ❌ Crop too small: {pil_crop.width}×{pil_crop.height}")
+            print(f"Crop too small: {pil_crop.width}×{pil_crop.height}")
         return ""
     
     # Store original height
@@ -846,7 +868,7 @@ def ocr_weichen_block(anchor: dict, bgr_color: np.ndarray) -> str:
     crop_height_scaled = pil_crop.height
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"   → Crop: {pil_crop.width}×{pil_crop.height}px (pad={pad}px, scale={scale}x)")
+        print(f"→ Crop: {pil_crop.width}×{pil_crop.height}px (pad={pad}px, scale={scale}x)")
     
     # Preprocessing
     g = _pil_to_gray_np(pil_crop)
@@ -861,14 +883,14 @@ def ocr_weichen_block(anchor: dict, bgr_color: np.ndarray) -> str:
     
     if paddle is None:
         if DEBUG_ANGLE_ROUTING:
-            print(f"   ❌ PaddleOCR not available")
+            print(f"PaddleOCR not available")
         return ""
     
     best_lines = []
     best_score = 0.0
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"   → Running PaddleOCR...")
+        print(f"→ Running PaddleOCR...")
     
     try:
         for var_name, img_arr in variants:
@@ -881,11 +903,11 @@ def ocr_weichen_block(anchor: dict, bgr_color: np.ndarray) -> str:
             
             if not results or not results[0]:
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"      [{var_name}] No text detected")
+                    print(f"[{var_name}] No text detected")
                 continue
             
             if DEBUG_ANGLE_ROUTING:
-                print(f"      [{var_name}] Detected {len(results[0])} text lines")
+                print(f"[{var_name}] Detected {len(results[0])} text lines")
             
             # Collect ALL text lines with positions
             all_text_lines = []
@@ -911,11 +933,11 @@ def ocr_weichen_block(anchor: dict, bgr_color: np.ndarray) -> str:
                 })
                 
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"         Line y={y_pos:.1f}: '{text_clean}' (conf={conf:.2f})")
+                    print(f"Line y={y_pos:.1f}: '{text_clean}' (conf={conf:.2f})")
             
             if not all_text_lines:
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"      [{var_name}] No valid text lines after cleaning")
+                    print(f"[{var_name}] No valid text lines after cleaning")
                 continue
             
             # Sort by Y-position (top to bottom)
@@ -924,51 +946,51 @@ def ocr_weichen_block(anchor: dict, bgr_color: np.ndarray) -> str:
             # Find first line starting with "W"
             first_w_index = None
             for idx, line_info in enumerate(all_text_lines):
-                if line_info['text'].upper().startswith('W'):
+                if (line_info.get('text') or '').upper().startswith('W'):
                     first_w_index = idx
                     if DEBUG_ANGLE_ROUTING:
-                        print(f"      → First 'W' line found at index {idx}: '{line_info['text']}'")
+                        print(f"→ First 'W' line found at index {idx}: '{line_info['text']}'")
                     break
             
-            # ✅ SIMPLIFIED: Keep lines from first "W" onwards WITHOUT validation
+            #  SIMPLIFIED: Keep lines from first "W" onwards WITHOUT validation
             if first_w_index is not None:
                 valid_lines = all_text_lines[first_w_index:]
                 
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"      → Keeping {len(valid_lines)} lines from first 'W' onwards")
+                    print(f"→ Keeping {len(valid_lines)} lines from first 'W' onwards")
                     if first_w_index > 0:
-                        print(f"      → Discarded {first_w_index} lines before first 'W'")
+                        print(f"→ Discarded {first_w_index} lines before first 'W'")
                 
                 # Calculate score (no validation filtering)
                 total_conf = sum(l['conf'] for l in valid_lines)
                 avg_conf = total_conf / len(valid_lines)
                 score = len(valid_lines) * avg_conf
                 
-                filtered_lines = valid_lines  # ✅ Use all lines without validation
+                filtered_lines = valid_lines  #  Use all lines without validation
                 
             else:
                 # No line starting with "W" found
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"      → No line starting with 'W' found, using all lines")
+                    print(f"→ No line starting with 'W' found, using all lines")
                 
-                # ✅ FALLBACK: If no "W" line found, use all lines anyway
+                #  FALLBACK: If no "W" line found, use all lines anyway
                 filtered_lines = all_text_lines
                 total_conf = sum(l['conf'] for l in filtered_lines)
                 avg_conf = total_conf / len(filtered_lines)
                 score = len(filtered_lines) * avg_conf
             
             if DEBUG_ANGLE_ROUTING:
-                print(f"      → Score: {score:.2f} (lines={len(filtered_lines)})")
+                print(f"→ Score: {score:.2f} (lines={len(filtered_lines)})")
             
             if score > best_score:
                 best_score = score
                 best_lines = filtered_lines
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"      → NEW BEST!")
+                    print(f"→ NEW BEST!")
                     
     except Exception as e:
         if DEBUG_ANGLE_ROUTING:
-            print(f"      [PaddleOCR] → EXCEPTION: {e}")
+            print(f"[PaddleOCR] → EXCEPTION: {e}")
             import traceback
             traceback.print_exc()
     
@@ -977,14 +999,14 @@ def ocr_weichen_block(anchor: dict, bgr_color: np.ndarray) -> str:
         result = '\n'.join(line['text'] for line in best_lines)
         
         if DEBUG_ANGLE_ROUTING:
-            print(f"\n   ✅ RESULT ({len(best_lines)} lines):")
+            print(f"\n   RESULT ({len(best_lines)} lines):")
             for i, line in enumerate(best_lines):
-                print(f"      Line {i+1}: {line['text']}")
+                print(f"Line {i+1}: {line['text']}")
         
         return result
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"   ❌ FAILED: No text detected by PaddleOCR")
+        print(f"FAILED: No text detected by PaddleOCR")
     
     return ""
 
@@ -1007,7 +1029,7 @@ def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> 
     pad_vertical = max(4, min(10, int(box_min_side * 0.08)))  # Small vertical padding
 
     if DEBUG_ANGLE_ROUTING:
-        print(f"\n📍 COORD CARDINAL: {w:.0f}×{h:.0f}px → pad_left={pad_left}, pad_right={pad_right}")
+        print(f"\n COORD CARDINAL: {w:.0f}×{h:.0f}px → pad_left={pad_left}, pad_right={pad_right}")
 
     # Manual asymmetric crop (can't use crop_pil which does symmetric padding)
     H, W = bgr_color.shape[:2]
@@ -1044,7 +1066,7 @@ def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> 
         return ""
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"   → Running PaddleOCR...")
+        print(f"→ Running PaddleOCR...")
     
     try:
         for base_idx, base in enumerate(bases):
@@ -1061,7 +1083,7 @@ def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> 
                 if not results or not results[0]:
                     continue
                 
-                # ✅ Collect ALL detections with their positions
+                #  Collect ALL detections with their positions
                 all_detections = []
                 for line in results[0]:
                     if line is None:
@@ -1084,16 +1106,16 @@ def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> 
                 if not all_detections:
                     continue
                 
-                # ✅ Sort detections by X-position (left to right)
+                #  Sort detections by X-position (left to right)
                 all_detections.sort(key=lambda d: d['x_pos'])
                 
-                # ✅ Quick quality check
+                #  Quick quality check
                 if all(d['conf'] < 0.40 for d in all_detections):
                     if DEBUG_ANGLE_ROUTING:
-                        print(f"      [var={base_idx} rot={rot:3d}°] → SKIP: All detections low confidence")
+                        print(f"[var={base_idx} rot={rot:3d}°] → SKIP: All detections low confidence")
                     continue
                 
-                # ✅ OPTIMIZED: Smart candidate generation
+                #  OPTIMIZED: Smart candidate generation
                 candidates = []
                 
                 has_number = any(any(c.isdigit() for c in d['text']) for d in all_detections)
@@ -1150,7 +1172,7 @@ def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> 
                                 'is_merged': True
                             })
                 
-                # ✅ Process all candidates
+                #  Process all candidates
                 for cand in candidates:
                     text = cand['text']
                     conf = cand['conf']
@@ -1158,7 +1180,7 @@ def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> 
                     
                     if DEBUG_ANGLE_ROUTING:
                         marker = "[MERGED]" if is_merged else "[SINGLE]"
-                        print(f"      [var={base_idx} rot={rot:3d}°] {marker} RAW: '{text}' (conf={conf:.2f})")
+                        print(f"[var={base_idx} rot={rot:3d}°] {marker} RAW: '{text}' (conf={conf:.2f})")
                     
                     # STEP 1: Remove overlap garbage
                     if is_merged:
@@ -1168,7 +1190,7 @@ def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> 
                         
                         if not txt_clean:
                             if DEBUG_ANGLE_ROUTING:
-                                print(f"         → SKIPPED: No valid pattern")
+                                print(f"→ SKIPPED: No valid pattern")
                             continue
                     
                     # STEP 2: Fix bracket mistakes
@@ -1176,33 +1198,33 @@ def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> 
                     
                     if DEBUG_ANGLE_ROUTING:
                         if txt_fixed != text:
-                            print(f"         → CLEANED: '{text}' → '{txt_fixed}'")
+                            print(f"→ CLEANED: '{text}' → '{txt_fixed}'")
                     
                     # STEP 3: Score
                     sc = _score_coord_text(txt_fixed)
                     
                     if DEBUG_ANGLE_ROUTING and sc > 0:
-                        print(f"         → SCORE: {sc:.2f}")
+                        print(f"→ SCORE: {sc:.2f}")
                     
                     if sc > best_sc:
                         best_txt, best_sc = txt_fixed, sc
                         if DEBUG_ANGLE_ROUTING:
-                            print(f"         → NEW BEST!")
+                            print(f"→ NEW BEST!")
                         
-                        # ✅ Smart early exit
+                        #  Smart early exit
                         has_brackets = '(' in txt_fixed and ')' in txt_fixed
                         
                         if has_brackets and sc >= 2.0 and conf >= 0.50:
                             if DEBUG_ANGLE_ROUTING:
-                                print(f"      ✅ EARLY EXIT (complete): '{best_txt}'")
-                            # ✅ FINAL CLEANING
+                                print(f"EARLY EXIT (complete): '{best_txt}'")
+                            #  FINAL CLEANING
                             best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
                             best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
                             return best_txt.strip()
                         elif not has_brackets and sc >= 2.5 and conf >= 0.80:
                             if DEBUG_ANGLE_ROUTING:
-                                print(f"      ✅ EARLY EXIT (high conf simple): '{best_txt}'")
-                            # ✅ FINAL CLEANING
+                                print(f"EARLY EXIT (high conf simple): '{best_txt}'")
+                            #  FINAL CLEANING
                             best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
                             best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
                             return best_txt.strip()
@@ -1210,30 +1232,30 @@ def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> 
             # Check after each base variant
             if best_txt and best_sc >= 1.0:
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"   ✅ RESULT: '{best_txt}' (score:{best_sc:.2f})")
-                # ✅ FINAL CLEANING
+                    print(f"RESULT: '{best_txt}' (score:{best_sc:.2f})")
+                #  FINAL CLEANING
                 best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
                 best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
                 return best_txt.strip()
                 
     except Exception as e:
         if DEBUG_ANGLE_ROUTING:
-            print(f"      [PaddleOCR] → EXCEPTION: {e}")
+            print(f"[PaddleOCR] → EXCEPTION: {e}")
     
     if DEBUG_ANGLE_ROUTING:
         if best_txt:
-            print(f"   ⚠️ FINAL: '{best_txt}' (score:{best_sc:.2f})")
+            print(f"FINAL: '{best_txt}' (score:{best_sc:.2f})")
         else:
-            print(f"   ❌ FAILED")
+            print(f"FAILED")
     
     if best_txt:
-        # ✅ FINAL CLEANING PASS
+        #  FINAL CLEANING PASS
         best_txt = re.sub(r'\s*[a-zA-Z]\s*$', '', best_txt)
         best_txt = re.sub(r'\s*[|/\\]\s*$', '', best_txt)
         best_txt = best_txt.strip()
         
         if DEBUG_ANGLE_ROUTING:
-            print(f"   ✅ FINAL (after cleaning): '{best_txt}' (score:{best_sc:.2f})")
+            print(f"FINAL (after cleaning): '{best_txt}' (score:{best_sc:.2f})")
     
     return best_txt.strip()
 
@@ -1263,7 +1285,7 @@ def ocr_coordinate_unified(det: dict, bgr_color: np.ndarray, engine: str) -> str
     else:
         # Angular path (truly tilted, e.g., 30°, 45°, 60°)
         _debug_angle("OCR_COORD", det, "ANGULAR", "→ strong OCR (perspective+rotations)")
-        return ocr_coordinate_angular(det, bgr_color, engine)  # ✅ Fixed: was ocr_coordinate_angular
+        return ocr_coordinate_angular(det, bgr_color, engine)  #  Fixed: was ocr_coordinate_angular
 
 # ============================================================================
 # SIGNAL OCR (with angle branching)
@@ -1294,15 +1316,27 @@ _FINAL_ZERO_TAIL2_RE = re.compile(r'^([A-ZÄÖÜ]{1,4})\s*(\d{2})$')
 
 def _post_fix_missing_zero_middle(s: str) -> str:
     """
-    Final-pass only: if we ended with HEAD + exactly 2 digits, insert a middle '0'.
-    Example: 'AHR21' -> 'AHR201'. Otherwise, return unchanged.
+    DISABLED - This function caused incorrect OCR results.
+
+    Original purpose: If HEAD + exactly 2 digits, insert a middle '0'.
+    Example: 'AHR21' -> 'AHR201'
+
+    Problem: When OCR dropped a digit (AHR313 -> AHR31), this function
+    incorrectly "fixed" it to AHR301 instead of leaving it as AHR31.
+
+    The function is kept but disabled - all calls now return input unchanged.
+    User can manually correct OCR errors if needed.
     """
-    ss = _only_az09(s)
-    m = _FINAL_ZERO_TAIL2_RE.match(ss)
-    if not m:
-        return ss
-    head, tail2 = m.groups()
-    return f"{head}{tail2[0]}0{tail2[1]}"
+    # DISABLED: Return input unchanged to prevent incorrect "fixes"
+    return s
+
+    # Original code (disabled):
+    # ss = _only_az09(s)
+    # m = _FINAL_ZERO_TAIL2_RE.match(ss)
+    # if not m:
+    #     return ss
+    # head, tail2 = m.groups()
+    # return f"{head}{tail2[0]}0{tail2[1]}"
 
 
 def _merge_adjacent_tokens_easyocr(detail_items, anchor):
@@ -1405,7 +1439,7 @@ def ocr_signal_name(anchor: dict, bgr_color: np.ndarray, engine: str, overlay: O
     ang_normalized = float(anchor.get("angle", 0.0))
     ang_raw = float(anchor.get("angle_raw", ang_normalized))
 
-    # ✅ ADAPTIVE PADDING - Calculate based on box size
+    #  ADAPTIVE PADDING - Calculate based on box size
     w = float(anchor.get("obb_w", anchor["x2"] - anchor["x1"]))
     h = float(anchor.get("obb_h", anchor["y2"] - anchor["y1"]))
     box_min_side = min(w, h)
@@ -1416,8 +1450,8 @@ def ocr_signal_name(anchor: dict, bgr_color: np.ndarray, engine: str, overlay: O
     # Optional diagnostic output
     if DEBUG_ANGLE_ROUTING:
         padding_ratio = (sig_pad / box_min_side) * 100
-        print(f"🔷 {w:.0f}×{h:.0f}px (min:{box_min_side:.0f}) → pad={sig_pad} ({padding_ratio:.0f}%)", end="")
-    # ✅ END ADAPTIVE PADDING
+        print(f" {w:.0f}×{h:.0f}px (min:{box_min_side:.0f}) → pad={sig_pad} ({padding_ratio:.0f}%)", end="")
+    #  END ADAPTIVE PADDING
 
     # ========================================================================
     # STEP 1: Get crop based on orientation
@@ -1499,14 +1533,14 @@ def ocr_signal_name(anchor: dict, bgr_color: np.ndarray, engine: str, overlay: O
                             # Early exit on high confidence
                             if sc >= SIG_SCORE_MIN + 0.3:
                                 if DEBUG_ANGLE_ROUTING:
-                                    print(f" → '{best_txt}' ✅ (PaddleOCR)")
-                                return _post_fix_missing_zero_middle(best_txt)
+                                    print(f" → '{best_txt}' (PaddleOCR)")
+                                return best_txt  # DISABLED _post_fix_missing_zero_middle - causes AHR31→AHR301 bugs
         
         # If PaddleOCR found something good, return it
         if best_txt and best_sc >= SIG_SCORE_MIN - 0.2 and len(best_txt) >= 3:
             if DEBUG_ANGLE_ROUTING:
-                print(f" → '{best_txt}' ✅ (PaddleOCR)")
-            return _post_fix_missing_zero_middle(best_txt)
+                print(f" → '{best_txt}' (PaddleOCR)")
+            return best_txt  # DISABLED _post_fix_missing_zero_middle - causes AHR31→AHR301 bugs
 
     # ========================================================================
     # STEP 4: SECONDARY METHOD - Tesseract (if PaddleOCR failed)
@@ -1543,14 +1577,14 @@ def ocr_signal_name(anchor: dict, bgr_color: np.ndarray, engine: str, overlay: O
                                 # Early exit on high confidence
                                 if sc >= SIG_SCORE_MIN + 0.5:
                                     if DEBUG_ANGLE_ROUTING:
-                                        print(f" → '{best_txt}' ✅ (Tesseract)")
-                                    return _post_fix_missing_zero_middle(best_txt)
+                                        print(f" → '{best_txt}' (Tesseract)")
+                                    return best_txt  # DISABLED _post_fix_missing_zero_middle - causes AHR31→AHR301 bugs
         
         # If Tesseract found something good, return it
         if best_txt and best_sc >= SIG_SCORE_MIN and len(best_txt) >= 3:
             if DEBUG_ANGLE_ROUTING:
-                print(f" → '{best_txt}' ✅ (Tesseract)")
-            return _post_fix_missing_zero_middle(best_txt)
+                print(f" → '{best_txt}' (Tesseract)")
+            return best_txt  # DISABLED _post_fix_missing_zero_middle - causes AHR31→AHR301 bugs
     
     except Exception:
         pass
@@ -1597,11 +1631,11 @@ def ocr_signal_name(anchor: dict, bgr_color: np.ndarray, engine: str, overlay: O
     # ========================================================================
     if best_txt and best_sc >= SIG_SCORE_MIN and len(best_txt) >= 3:
         if DEBUG_ANGLE_ROUTING:
-            print(f" → '{best_txt}' ✅")
-        return _post_fix_missing_zero_middle(best_txt)
+            print(f" → '{best_txt}' ")
+        return best_txt  # DISABLED _post_fix_missing_zero_middle - causes AHR31→AHR301 bugs
     
     if DEBUG_ANGLE_ROUTING:
-        print(f" → FAILED ❌")
+        print(f" → FAILED ")
     
     return None
 
@@ -1837,7 +1871,7 @@ def ocr_generic_name(anchor: dict, bgr_color: np.ndarray, engine: str, allow_num
         wl = 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789./-_' if allow_numeric else 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ./-_'
         cfg = f"--psm 6 -l eng+deu -c tessedit_char_whitelist={wl}"
         
-        # ✓ FIX: Test rotations in smart order for Tesseract too
+        #  FIX: Test rotations in smart order for Tesseract too
         for v in variants_np:
             for rot_deg in rotations:  # Use smart-ordered rotations
                 test_img = Image.fromarray(v).rotate(rot_deg, expand=True, fillcolor=255) if rot_deg != 0 else Image.fromarray(v)
@@ -1866,8 +1900,8 @@ def ocr_numeric_cardinal_box(anchor: dict, bgr_color: np.ndarray) -> Optional[st
         h = float(anchor.get("obb_h", anchor["y2"] - anchor["y1"]))
         ang_raw = float(anchor.get("angle_raw", 0.0))
         ang_norm = float(anchor.get("angle", 0.0))
-        print(f"\n📦 GKS CARDINAL BOX: {w:.0f}×{h:.0f}px | angles: raw={ang_raw:.1f}° norm={ang_norm:.1f}°")
-        print(f"   → Class params: pad={pad}")
+        print(f"\n GKS CARDINAL BOX: {w:.0f}×{h:.0f}px | angles: raw={ang_raw:.1f}° norm={ang_norm:.1f}°")
+        print(f"→ Class params: pad={pad}")
     
     # 1) Crop
     try:
@@ -1881,7 +1915,7 @@ def ocr_numeric_cardinal_box(anchor: dict, bgr_color: np.ndarray) -> Optional[st
     base = base.resize((base.width * scale, base.height * scale), Image.LANCZOS)
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"   → Upscaled to: {base.width}×{base.height}px (scale={scale}x)")
+        print(f"→ Upscaled to: {base.width}×{base.height}px (scale={scale}x)")
 
     best, best_sc = None, -1.0
 
@@ -1889,11 +1923,11 @@ def ocr_numeric_cardinal_box(anchor: dict, bgr_color: np.ndarray) -> Optional[st
     
     if paddle is None:
         if DEBUG_ANGLE_ROUTING:
-            print(f"   ❌ PaddleOCR not available")
+            print(f"PaddleOCR not available")
         return None
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"   → Running PaddleOCR...")
+        print(f"→ Running PaddleOCR...")
     
     try:
         # LIGHT preprocessing - grayscale+CLAHE only (works best!)
@@ -1909,13 +1943,13 @@ def ocr_numeric_cardinal_box(anchor: dict, bgr_color: np.ndarray) -> Optional[st
             if len(test_arr.shape) == 2:
                 test_arr = cv2.cvtColor(test_arr, cv2.COLOR_GRAY2BGR)
             
-            # ✅ CRITICAL: Use thread lock for PaddleOCR
+            #  CRITICAL: Use thread lock for PaddleOCR
             with _PADDLE_OCR_LOCK:
                 results = paddle.ocr(test_arr, cls=False)
             
             if DEBUG_ANGLE_ROUTING:
                 n_det = len(results[0]) if results and results[0] else 0
-                print(f"      [grayscale+CLAHE rot={rot:3d}°] {n_det} detections")
+                print(f"[grayscale+CLAHE rot={rot:3d}°] {n_det} detections")
             
             if results and results[0]:
                 for line in results[0]:
@@ -1927,31 +1961,31 @@ def ocr_numeric_cardinal_box(anchor: dict, bgr_color: np.ndarray) -> Optional[st
                     t = ''.join(c for c in text if c.isdigit())
                     
                     if DEBUG_ANGLE_ROUTING and text:
-                        print(f"         raw='{text}' → clean='{t}' (conf={conf:.2f})")
+                        print(f"raw='{text}' → clean='{t}' (conf={conf:.2f})")
                     
                     if t and len(t) >= 3:
                         sc = score_name_token(t, conf=conf, allow_numeric=True, cls_name=cls_name)
                         if DEBUG_ANGLE_ROUTING:
-                            print(f"         score={sc:.2f}")
+                            print(f"score={sc:.2f}")
                         
                         if sc > best_sc:
                             best_sc, best = sc, t
                             if sc > 1.6 and conf > 0.60:
                                 if DEBUG_ANGLE_ROUTING:
-                                    print(f"      ✅ EARLY EXIT: '{best}'")
+                                    print(f"EARLY EXIT: '{best}'")
                                 return best
                                     
     except Exception as e:
         if DEBUG_ANGLE_ROUTING:
-            print(f"      ❌ EXCEPTION: {e}")
+            print(f"EXCEPTION: {e}")
             import traceback
             traceback.print_exc()
 
     if DEBUG_ANGLE_ROUTING:
         if best:
-            print(f"   ✅ RESULT: '{best}' (score:{best_sc:.2f})")
+            print(f"RESULT: '{best}' (score:{best_sc:.2f})")
         else:
-            print(f"   ❌ FAILED")
+            print(f"FAILED")
     
     return best
 
@@ -1971,7 +2005,7 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
     h = float(anchor.get("obb_h", anchor["y2"] - anchor["y1"]))
     box_min_side = min(w, h)
     
-    # ✅ GENEROUS PADDING for angular boxes (to capture all digits)
+    #  GENEROUS PADDING for angular boxes (to capture all digits)
     if box_min_side < 70:
         pad = 18  # Very generous
     elif box_min_side < 100:
@@ -1980,8 +2014,8 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
         pad = 14
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"\n📦 GKS ANGULAR BOX: {w:.0f}×{h:.0f}px | angles: raw={ang_raw:.1f}° norm={ang_norm:.1f}°")
-        print(f"   → Using pad={pad}px ({pad/box_min_side*100:.0f}% of min side)")
+        print(f"\n GKS ANGULAR BOX: {w:.0f}×{h:.0f}px | angles: raw={ang_raw:.1f}° norm={ang_norm:.1f}°")
+        print(f"→ Using pad={pad}px ({pad/box_min_side*100:.0f}% of min side)")
 
     # 1) Crop with generous padding
     try:
@@ -1995,14 +2029,14 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
     base = base.resize((base.width * scale, base.height * scale), Image.LANCZOS)
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"   → Upscaled to: {base.width}×{base.height}px (scale={scale}x)")
+        print(f"→ Upscaled to: {base.width}×{base.height}px (scale={scale}x)")
 
     best_txt = None
     best_sc = -1.0
     best_conf = 0.0
     best_rot = 0
     
-    # ✅ Track ALL 4-digit results
+    #  Track ALL 4-digit results
     four_digit_results = []
     
     test_rotations = [0, 90, 180, 270]
@@ -2011,11 +2045,11 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
     
     if paddle is None:
         if DEBUG_ANGLE_ROUTING:
-            print(f"   ❌ PaddleOCR not available")
+            print(f"PaddleOCR not available")
         return None
     
     if DEBUG_ANGLE_ROUTING:
-        print(f"   → Running PaddleOCR (testing ALL rotations)...")
+        print(f"→ Running PaddleOCR (testing ALL rotations)...")
     
     try:
         # LIGHT preprocessing
@@ -2023,7 +2057,7 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
         g_enhanced = _enhance_contrast(g)
         img = Image.fromarray(g_enhanced)
         
-        # ✅ TEST ALL ROTATIONS - NO EARLY EXIT
+        #  TEST ALL ROTATIONS - NO EARLY EXIT
         for rot_deg in test_rotations:
             test_img = img.rotate(rot_deg, expand=True, fillcolor=255) if rot_deg != 0 else img
             test_arr = np.array(test_img)
@@ -2037,7 +2071,7 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
             
             if DEBUG_ANGLE_ROUTING:
                 n_det = len(results[0]) if results and results[0] else 0
-                print(f"      [rot={rot_deg:3d}°] {n_det} detections")
+                print(f"[rot={rot_deg:3d}°] {n_det} detections")
             
             if results and results[0]:
                 for line in results[0]:
@@ -2049,22 +2083,22 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
                     t = ''.join(c for c in text if c.isdigit())
                     
                     if DEBUG_ANGLE_ROUTING and text:
-                        print(f"         raw='{text}' → clean='{t}' (conf={conf:.2f})")
+                        print(f"raw='{text}' → clean='{t}' (conf={conf:.2f})")
                     
                     if t and len(t) >= 3:
                         sc = score_name_token(t, conf=conf, allow_numeric=True, cls_name=cls_name)
                         
                         if DEBUG_ANGLE_ROUTING:
-                            print(f"         score={sc:.2f}, len={len(t)}")
+                            print(f"score={sc:.2f}, len={len(t)}")
                         
-                        # ✅ TRACK BEST OVERALL
+                        #  TRACK BEST OVERALL
                         if sc > best_sc:
                             best_sc = sc
                             best_txt = t
                             best_conf = conf
                             best_rot = rot_deg
                         
-                        # ✅ SEPARATELY TRACK 4-DIGIT RESULTS
+                        #  SEPARATELY TRACK 4-DIGIT RESULTS
                         if len(t) == 4:
                             four_digit_results.append({
                                 'text': t,
@@ -2073,40 +2107,40 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
                                 'rot': rot_deg
                             })
                             if DEBUG_ANGLE_ROUTING:
-                                print(f"         ✓ 4-digit candidate: '{t}'")
+                                print(f" 4-digit candidate: '{t}'")
                                     
     except Exception as e:
         if DEBUG_ANGLE_ROUTING:
-            print(f"      ❌ EXCEPTION: {e}")
+            print(f"EXCEPTION: {e}")
             import traceback
             traceback.print_exc()
 
-    # ✅ PREFER 4-DIGIT RESULTS (sort by score)
+    #  PREFER 4-DIGIT RESULTS (sort by score)
     if four_digit_results:
         # Sort by score descending
         four_digit_results.sort(key=lambda x: x['score'], reverse=True)
         best_4d = four_digit_results[0]
         
         if DEBUG_ANGLE_ROUTING:
-            print(f"\n   📊 Found {len(four_digit_results)} 4-digit results:")
+            print(f"\n   Found {len(four_digit_results)} 4-digit results:")
             for i, res in enumerate(four_digit_results):
-                marker = "👑" if i == 0 else "  "
-                print(f"      {marker} '{res['text']}' score={res['score']:.2f} conf={res['conf']:.2f} rot={res['rot']}°")
-            print(f"   ✅ BEST 4-DIGIT: '{best_4d['text']}' (score:{best_4d['score']:.2f}, rot:{best_4d['rot']}°)")
+                marker = "" if i == 0 else "  "
+                print(f"{marker} '{res['text']}' score={res['score']:.2f} conf={res['conf']:.2f} rot={res['rot']}°")
+            print(f"BEST 4-DIGIT: '{best_4d['text']}' (score:{best_4d['score']:.2f}, rot:{best_4d['rot']}°)")
         
         return best_4d['text']
     
-    # ✅ FALLBACK: Accept 3-digit if no 4-digit found and score is good
+    #  FALLBACK: Accept 3-digit if no 4-digit found and score is good
     if best_txt and len(best_txt) == 3 and best_sc > 1.5:
         if DEBUG_ANGLE_ROUTING:
-            print(f"   ⚠️ ACCEPTING 3-DIGIT: '{best_txt}' (score:{best_sc:.2f}, conf:{best_conf:.2f}, rot:{best_rot}°)")
+            print(f"ACCEPTING 3-DIGIT: '{best_txt}' (score:{best_sc:.2f}, conf:{best_conf:.2f}, rot:{best_rot}°)")
         return best_txt
     
     if DEBUG_ANGLE_ROUTING:
         if best_txt:
-            print(f"   ❌ REJECTED: '{best_txt}' (len={len(best_txt)}, score:{best_sc:.2f}) - expected 4 digits")
+            print(f"REJECTED: '{best_txt}' (len={len(best_txt)}, score:{best_sc:.2f}) - expected 4 digits")
         else:
-            print(f"   ❌ FAILED: No valid result")
+            print(f"FAILED: No valid result")
     
     return None
 
@@ -2129,42 +2163,42 @@ def ocr_anchor_name(anchor: dict, bgr_color: np.ndarray, engine: str) -> Optiona
     # GKS NUMERIC PLATES: Use specialized functions with normalized angle routing
     # ========================================================================
     if cls in {"gks_gesteuert", "gks_festkodiert"}:
-        ang_norm = float(anchor.get("angle", 0.0))  # ✓ Use NORMALIZED angle
+        ang_norm = float(anchor.get("angle", 0.0))  #  Use NORMALIZED angle
         ang_raw = float(anchor.get("angle_raw", ang_norm))
         
         if DEBUG_ANGLE_ROUTING:
             print(f"\n{'='*70}")
-            print(f"🔍 GKS OCR: {cls}")
-            print(f"   Angles: raw={ang_raw:.1f}° norm={ang_norm:.1f}°")
-            print(f"   Box: {anchor['x2']-anchor['x1']}×{anchor['y2']-anchor['y1']}px")
+            print(f"GKS OCR: {cls}")
+            print(f"Angles: raw={ang_raw:.1f}° norm={ang_norm:.1f}°")
+            print(f"Box: {anchor['x2']-anchor['x1']}×{anchor['y2']-anchor['y1']}px")
         
         # Route based on NORMALIZED angle
-        if _is_cardinal(ang_norm):  # ✓ Check normalized angle
+        if _is_cardinal(ang_norm):  #  Check normalized angle
             if DEBUG_ANGLE_ROUTING:
-                print(f"   → CARDINAL path (|norm|≤15°)")
+                print(f"→ CARDINAL path (|norm|≤15°)")
             
-            val = ocr_numeric_cardinal_box(anchor, bgr_color)  # ✓ Call cardinal function
+            val = ocr_numeric_cardinal_box(anchor, bgr_color)  #  Call cardinal function
             
             if val:
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"   ✅ SUCCESS: '{val}'")
+                    print(f"SUCCESS: '{val}'")
                 return val
             else:
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"   ❌ CARDINAL FAILED")
+                    print(f"CARDINAL FAILED")
         else:
             if DEBUG_ANGLE_ROUTING:
-                print(f"   → ANGULAR path (|norm|={abs(ang_norm):.1f}° > 15°)")
+                print(f"→ ANGULAR path (|norm|={abs(ang_norm):.1f}° > 15°)")
             
-            val = ocr_numeric_tilted_box(anchor, bgr_color)  # ✓ Call angular function
+            val = ocr_numeric_tilted_box(anchor, bgr_color)  #  Call angular function
             
             if val:
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"   ✅ SUCCESS: '{val}'")
+                    print(f"SUCCESS: '{val}'")
                 return val
             else:
                 if DEBUG_ANGLE_ROUTING:
-                    print(f"   ❌ ANGULAR FAILED")
+                    print(f"ANGULAR FAILED")
         
         if DEBUG_ANGLE_ROUTING:
             print(f"{'='*70}\n")
@@ -2371,11 +2405,11 @@ def ocr_custom_symbol_text(
     # Image dimensions
     img_h, img_w = bgr_color.shape[:2]
 
-    if DEBUG_ANGLE_ROUTING:
-        print(f"\n📝 CUSTOM SYMBOL OCR: text_position='{text_position}', angle={sym_angle:.1f}°")
-        print(f"   Symbol bbox: ({x1},{y1})-({x2},{y2}) size={sym_w}x{sym_h}")
+    if DEBUG_CUSTOM_SYMBOLS:
+        print(f"\n CUSTOM SYMBOL OCR: text_position='{text_position}', angle={sym_angle:.1f}°")
+        print(f"Symbol bbox: ({x1},{y1})-({x2},{y2}) size={sym_w}x{sym_h}")
         if text_region_offset:
-            print(f"   Using precise text_region_offset: {text_region_offset}")
+            print(f"Using precise text_region_offset: {text_region_offset}")
 
     # Try each position until we find text
     for current_position in positions_to_try:
@@ -2416,8 +2450,8 @@ def _ocr_custom_symbol_single_position(
     """
     import math
 
-    if DEBUG_ANGLE_ROUTING:
-        print(f"   Trying position: '{text_position}'")
+    if DEBUG_CUSTOM_SYMBOLS:
+        print(f"Trying position: '{text_position}'")
 
     # PRIORITY: Use precise text_region_offset if provided
     if text_region_offset and isinstance(text_region_offset, dict):
@@ -2428,7 +2462,8 @@ def _ocr_custom_symbol_single_position(
 
         # VALIDATION: Check for invalid dimensions
         if tw <= 0 or th <= 0:
-            print(f"   ⚠️ Invalid text_region_offset: width={tw}, height={th}. Falling back to position-based search.")
+            if DEBUG_CUSTOM_SYMBOLS:
+                print(f"Invalid text_region_offset: width={tw}, height={th}. Falling back to position-based search.")
             text_region_offset = None  # Force fallback to position-based search
         else:
             # IMPORTANT: Rotate the offset based on symbol rotation
@@ -2440,8 +2475,8 @@ def _ocr_custom_symbol_single_position(
                 dx, dy, tw, th, sym_angle
             )
 
-            if DEBUG_ANGLE_ROUTING:
-                print(f"   Manual offset rotation: ({dx},{dy}) @ {sym_angle:.1f}° → ({dx_rot},{dy_rot})")
+            if DEBUG_CUSTOM_SYMBOLS:
+                print(f"Manual offset rotation: ({dx},{dy}) @ {sym_angle:.1f}° → ({dx_rot},{dy_rot})")
 
             # Calculate text region center from symbol center + rotated offset
             txt_cx = sym_cx + dx_rot
@@ -2453,8 +2488,8 @@ def _ocr_custom_symbol_single_position(
             crop_x2 = min(img_w, int(txt_cx + tw_rot / 2))
             crop_y2 = min(img_h, int(txt_cy + th_rot / 2))
 
-            if DEBUG_ANGLE_ROUTING:
-                print(f"   Precise region: ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
+            if DEBUG_CUSTOM_SYMBOLS:
+                print(f"Precise region: ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
 
     # FALLBACK: Use direction-based search with LARGER area for auto-detection
     # PaddleOCR will find text boxes automatically, we just need to give it enough area
@@ -2484,8 +2519,8 @@ def _ocr_custom_symbol_single_position(
             effective_position = direction_map.get(text_position, text_position)
         # else: 0° or 315-360° - no change needed
 
-        if DEBUG_ANGLE_ROUTING:
-            print(f"   Rotation adjustment: {text_position} @ {sym_angle:.1f}° → {effective_position}")
+        if DEBUG_CUSTOM_SYMBOLS:
+            print(f"Rotation adjustment: {text_position} @ {sym_angle:.1f}° → {effective_position}")
 
         # Now use effective_position for search direction
         if effective_position == "left":
@@ -2531,8 +2566,8 @@ def _ocr_custom_symbol_single_position(
             crop_x2 = min(img_w, x2 - padding)
             crop_y2 = min(img_h, y2 - padding)
 
-            if DEBUG_ANGLE_ROUTING:
-                print(f"   INSIDE mode: tight crop ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
+            if DEBUG_CUSTOM_SYMBOLS:
+                print(f"INSIDE mode: tight crop ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
 
         else:
             # Default to left with symbol's exact vertical extent
@@ -2541,21 +2576,21 @@ def _ocr_custom_symbol_single_position(
             crop_y1 = max(0, y1)
             crop_y2 = min(img_h, y2)
 
-    if DEBUG_ANGLE_ROUTING:
-        print(f"   Search region: ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
+    if DEBUG_CUSTOM_SYMBOLS:
+        print(f"Search region: ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
 
     # Validate crop
     if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
-        if DEBUG_ANGLE_ROUTING:
-            print(f"   ❌ Invalid search region")
+        if DEBUG_CUSTOM_SYMBOLS:
+            print(f"Invalid search region")
         return "", None, text_position, 0.0
 
     crop_w = crop_x2 - crop_x1
     crop_h = crop_y2 - crop_y1
 
     if crop_w < 10 or crop_h < 10:
-        if DEBUG_ANGLE_ROUTING:
-            print(f"   ❌ Crop too small: {crop_w}x{crop_h}")
+        if DEBUG_CUSTOM_SYMBOLS:
+            print(f"Crop too small: {crop_w}x{crop_h}")
         return "", None, text_position, 0.0
 
     # Extract crop
@@ -2565,8 +2600,8 @@ def _ocr_custom_symbol_single_position(
     # Upscale if small
     pil_crop = _upscale_if_tiny(pil_crop, min_side=80, scale=2)
 
-    if DEBUG_ANGLE_ROUTING:
-        print(f"   Crop size: {pil_crop.width}x{pil_crop.height}")
+    if DEBUG_CUSTOM_SYMBOLS:
+        print(f"Crop size: {pil_crop.width}x{pil_crop.height}")
 
     # Preprocessing
     g0 = _pil_to_gray_np(pil_crop)
@@ -2576,8 +2611,8 @@ def _ocr_custom_symbol_single_position(
     paddle = get_paddleocr_instance()
 
     if paddle is None:
-        if DEBUG_ANGLE_ROUTING:
-            print(f"   ❌ PaddleOCR not available")
+        if DEBUG_CUSTOM_SYMBOLS:
+            print(f"PaddleOCR not available")
         return "", None, text_position, 0.0
 
     best_txt = ""
@@ -2594,8 +2629,8 @@ def _ocr_custom_symbol_single_position(
         results = paddle.ocr(test_arr, cls=False)
 
         if results and results[0]:
-            if DEBUG_ANGLE_ROUTING:
-                print(f"   Found {len(results[0])} text boxes")
+            if DEBUG_CUSTOM_SYMBOLS:
+                print(f"Found {len(results[0])} text boxes")
 
             for line in results[0]:
                 if line is None:
@@ -2629,9 +2664,9 @@ def _ocr_custom_symbol_single_position(
                 elif text_position == "below" and dy < 0:
                     is_correct_direction = False
 
-                if DEBUG_ANGLE_ROUTING:
-                    dir_ok = "✓" if is_correct_direction else "✗"
-                    print(f"   [{dir_ok}] '{text}' conf={conf:.2f} dist={distance:.0f}px dx={dx:.0f} dy={dy:.0f}")
+                if DEBUG_CUSTOM_SYMBOLS:
+                    dir_ok = "" if is_correct_direction else ""
+                    print(f"[{dir_ok}] '{text}' conf={conf:.2f} dist={distance:.0f}px dx={dx:.0f} dy={dy:.0f}")
 
                 # Pick the CLOSEST text in the correct direction
                 if is_correct_direction and distance < best_distance:
@@ -2641,8 +2676,8 @@ def _ocr_custom_symbol_single_position(
 
         # If no text found in correct direction, try without direction filter
         if not best_txt and results and results[0]:
-            if DEBUG_ANGLE_ROUTING:
-                print(f"   ⚠️ No text in '{text_position}' direction, taking closest...")
+            if DEBUG_CUSTOM_SYMBOLS:
+                print(f"No text in '{text_position}' direction, taking closest...")
             for line in results[0]:
                 if line is None:
                     continue
@@ -2659,14 +2694,14 @@ def _ocr_custom_symbol_single_position(
                     best_distance = distance
 
     except Exception as e:
-        if DEBUG_ANGLE_ROUTING:
-            print(f"   ⚠️ OCR error: {e}")
+        if DEBUG_CUSTOM_SYMBOLS:
+            print(f"OCR error: {e}")
 
-    if DEBUG_ANGLE_ROUTING:
+    if DEBUG_CUSTOM_SYMBOLS:
         if best_txt:
-            print(f"   ✅ RESULT: '{best_txt}' in region ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
+            print(f"RESULT: '{best_txt}' in region ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
         else:
-            print(f"   ❌ NO TEXT FOUND")
+            print(f"NO TEXT FOUND")
 
     # Return text, bbox coordinates, position used, and confidence
     if best_txt:

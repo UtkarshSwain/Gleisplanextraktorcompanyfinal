@@ -11,6 +11,7 @@ from typing import List, Dict, Tuple, Optional, Any
 import numpy as np
 import pandas as pd
 import os
+from utils.dpi_utils import get_adaptive_window_size, center_window, scale_value
 from pdfcomparison.dialogs import HelpDialog
 from core.pipelineworker import PipelineWorker
 import time
@@ -18,7 +19,7 @@ import cv2
 from core.image_processing import qpolygonf_from_pts
 # -------- Setup & Run (connects to REAL PipelineWorker signals) --------
 class SetupAndRunWindow(QtWidgets.QMainWindow):
-    processing_done = QtCore.pyqtSignal(pd.DataFrame, object, object, object, object, object, bool)  # df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, exception, from_database
+    processing_done = QtCore.pyqtSignal(pd.DataFrame, object, object, object, object, object, bool, list)  # df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, exception, from_database, uncertain_detections
     started_processing = QtCore.pyqtSignal()
     started_processing = QtCore.pyqtSignal()
     def __init__(self, main_app_ref: 'MainWindow'):
@@ -26,7 +27,11 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.main_app_ref = main_app_ref
         self.setWindowTitle("RailDoc Studio - Setup & Analyse")
-        self.resize(1000, 800)
+
+        # Adaptive window sizing for different DPI settings
+        w, h = get_adaptive_window_size(1000, 800, max_screen_pct=0.85)
+        self.resize(w, h)
+        center_window(self)
         self.pdf_path = None; self.model_path = None; self.ocr_engine = "paddleocr"
         self.view = InteractiveGraphicsView(self)
         self.view.setStyleSheet("""
@@ -156,6 +161,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                         font-weight: 700;
                         letter-spacing: 0.5px;
                         color: {self.theme_colors['text_primary']};
+                        padding: 4px 0px;
+                        min-height: {scale_value(24)}px;
                     """)
 
         # Update info banner (compact with Siemens blue accent)
@@ -308,7 +315,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         pdf_layout = self.pdf_frame.layout()
 
         self.btn_pdf = QtWidgets.QPushButton("DURCHSUCHEN")
-        self.btn_pdf.setMinimumHeight(36)
+        self.btn_pdf.setMinimumHeight(scale_value(36))
         self.btn_pdf.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         self.btn_pdf.setStyleSheet("""
             QPushButton {
@@ -341,7 +348,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         pdf_layout.addWidget(self.lbl_pdf)
 
         # Resolution warning for image files
-        self.lbl_resolution_hint = QtWidgets.QLabel("⚠ Bilder: min. 300 DPI empfohlen")
+        self.lbl_resolution_hint = QtWidgets.QLabel(" Bilder: min. 300 DPI empfohlen")
         self.lbl_resolution_hint.setStyleSheet("""
             font-size: 7pt;
             color: #f0a030;
@@ -367,7 +374,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         model_layout = self.model_frame.layout()
 
         self.btn_model = QtWidgets.QPushButton("DURCHSUCHEN")
-        self.btn_model.setMinimumHeight(36)
+        self.btn_model.setMinimumHeight(scale_value(36))
         self.btn_model.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         self.btn_model.setStyleSheet("""
             QPushButton {
@@ -411,7 +418,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         # OCR is hardcoded to paddleocr (set in __init__) - no UI selector needed
 
         self.btn_run = QtWidgets.QPushButton("ANALYSE STARTEN")
-        self.btn_run.setMinimumHeight(40)
+        self.btn_run.setMinimumHeight(scale_value(40))
         self.btn_run.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         self.btn_run.setStyleSheet("""
             QPushButton {
@@ -471,14 +478,14 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         main_layout.addWidget(self.analysis_info)
 
         # Graphics view - very small compact preview so step cards dominate the layout
-        self.view.setMaximumHeight(150)
-        self.view.setMinimumHeight(120)
+        self.view.setMaximumHeight(scale_value(150))
+        self.view.setMinimumHeight(scale_value(120))
         main_layout.addWidget(self.view)
 
         # Enhanced progress bar (Siemens blue) - increased height for better visibility
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
-        self.progress.setMinimumHeight(50)
+        self.progress.setMinimumHeight(scale_value(50))
         self.progress.setStyleSheet("""
             QProgressBar {
                 border: 1px solid #cbd5e0;
@@ -501,7 +508,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.log.setReadOnly(True)
         self.log.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
         self.log.setMaximumBlockCount(5000)
-        self.log.setMinimumHeight(150)
+        self.log.setMinimumHeight(scale_value(150))
         self.log.setStyleSheet("""
             QPlainTextEdit {
                 background: #2c3e50;
@@ -519,7 +526,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.btn_model.clicked.connect(self.on_select_model)
         self.btn_run.clicked.connect(self.on_run)
 
-        # ✅ NOW create menus and toolbar AFTER all widgets exist
+        #  NOW create menus and toolbar AFTER all widgets exist
         self._create_menus()
         self._create_toolbar()
 
@@ -551,18 +558,26 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                                        stop:0 #009999, stop:1 #00adef);
             color: white;
-            padding: 2px 8px;
+            padding: 4px 10px;
             border-radius: 4px;
             font-size: 8pt;
             font-weight: 700;
             letter-spacing: 0.5px;
         """)
-        header_layout.addWidget(step_badge)
+        step_badge.setAlignment(QtCore.Qt.AlignCenter)
+        header_layout.addWidget(step_badge, 0, QtCore.Qt.AlignVCenter)
 
         # Title next to badge
         title_label = QtWidgets.QLabel(title)
-        title_label.setStyleSheet("font-size: 11pt; font-weight: 700; letter-spacing: 0.5px;")
-        header_layout.addWidget(title_label)
+        title_label.setStyleSheet("""
+            font-size: 11pt;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            padding: 4px 0px;
+        """)
+        title_label.setMinimumHeight(scale_value(24))  # Ensure enough height for text
+        title_label.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
+        header_layout.addWidget(title_label, 0, QtCore.Qt.AlignVCenter)
         header_layout.addStretch()
         frame.step_title = title_label  # Store reference for theming
 
@@ -677,7 +692,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
         <p><i>Hinweis: Die erste Analyse kann einige Minuten dauern. Danach werden die Ergebnisse gespeichert und sind beim nächsten Öffnen sofort verfügbar.</i></p>
         """)
-        desc.setMinimumHeight(400)
+        desc.setMinimumHeight(scale_value(400))
         layout.addWidget(desc)
 
         # Checkbox to not show again
@@ -701,7 +716,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             # Check for Gleisplan files (PDF or images)
             if p_lower.endswith(self.GLEISPLAN_EXTENSIONS):
                 self.pdf_path = p
-                self.lbl_pdf.setText(f"✓ {os.path.basename(self.pdf_path)}")
+                self.lbl_pdf.setText(f" {os.path.basename(self.pdf_path)}")
                 self.lbl_pdf.setStyleSheet("color: #00a8b0; font-weight: 600; font-size: 9pt;")
                 self.on_status(f"Gleisplan geladen: {os.path.basename(self.pdf_path)}")
                 self._display_placeholder("Gleisplan geladen")
@@ -710,7 +725,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 self._update_resolution_warning(p)
             elif p_lower.endswith(".pt"):
                 self.model_path = p
-                self.lbl_model.setText(f"✓ {os.path.basename(self.model_path)}")
+                self.lbl_model.setText(f" {os.path.basename(self.model_path)}")
                 self.lbl_model.setStyleSheet("color: #00a8b0; font-weight: 600; font-size: 9pt;")
                 self.on_status(f"Modell geladen: {os.path.basename(self.model_path)}")
                 self._add_recent_model(p)
@@ -742,9 +757,9 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         )
         if fn:
             self.pdf_path = fn
-            self.lbl_pdf.setText(f"✓ {os.path.basename(fn)}")
+            self.lbl_pdf.setText(f" {os.path.basename(fn)}")
             self.lbl_pdf.setStyleSheet("color: #00a8b0; font-weight: 600; font-size: 9pt;")
-            self.on_status(f"✓ Gleisplan geladen: {os.path.basename(fn)}")
+            self.on_status(f" Gleisplan geladen: {os.path.basename(fn)}")
             self._display_placeholder("Gleisplan geladen")
             self._add_recent_pdf(fn)
             self._update_run_button_state()
@@ -753,11 +768,11 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Auswählen von YOLO .pt", "", "PyTorch Weights (*.pt)")
         if fn:
             self.model_path = fn
-            self.lbl_model.setText(f"✓ {os.path.basename(fn)}")
+            self.lbl_model.setText(f" {os.path.basename(fn)}")
             self.lbl_model.setStyleSheet("color: #00a8b0; font-weight: 600; font-size: 9pt;")
-            self.on_status(f"✓ Modell geladen: {os.path.basename(fn)}")
-            self._add_recent_model(fn)  # ✅ Track recent file
-            self._update_run_button_state()  # ✅ Update button state
+            self.on_status(f" Modell geladen: {os.path.basename(fn)}")
+            self._add_recent_model(fn)  #  Track recent file
+            self._update_run_button_state()  #  Update button state
     def on_ocr_changed(self, txt:str): self.ocr_engine = txt; self.on_status(f"OCR-Engine geändert zu: {txt}")
     def on_status(self, msg:str):
         ts = time.strftime("%H:%M:%S"); self.log.appendPlainText(f"[{ts}] {msg}")
@@ -813,7 +828,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         
         self.recent_pdfs_menu.clear()
         
-        # ✅ Add defensive check
+        #  Add defensive check
         if not hasattr(self, 'recent_pdfs') or not self.recent_pdfs:
             act = self.recent_pdfs_menu.addAction("(Keine kürzlich verwendeten Dateien)")
             act.setEnabled(False)
@@ -848,7 +863,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
         if is_image:
             # Show warning for image files
-            self.lbl_resolution_hint.setText("⚠ Bild: min. 300 DPI für optimale Erkennung")
+            self.lbl_resolution_hint.setText(" Bild: min. 300 DPI für optimale Erkennung")
             self.lbl_resolution_hint.setStyleSheet("""
                 font-size: 7pt;
                 color: #f0a030;
@@ -857,7 +872,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             self.lbl_resolution_hint.show()
         else:
             # Hide warning for PDFs (they are rendered at 500 DPI automatically)
-            self.lbl_resolution_hint.setText("✓ PDF wird bei 500 DPI gerendert")
+            self.lbl_resolution_hint.setText(" PDF wird bei 500 DPI gerendert")
             self.lbl_resolution_hint.setStyleSheet("""
                 font-size: 7pt;
                 color: #60a060;
@@ -886,8 +901,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         
         # Decide whether to load from DB or run full analysis
         if saved_result and not force_rerun:
-            # ✅ LOAD FROM DATABASE (FAST PATH)
-            self.on_status("✅ Gespeicherter Arbeitsbereich gefunden!")
+            #  LOAD FROM DATABASE (FAST PATH)
+            self.on_status(" Gespeicherter Arbeitsbereich gefunden!")
             self.on_status("Lade Daten aus Datenbank (schnell)...")
             
             QtWidgets.QApplication.instance().setOverrideCursor(QtCore.Qt.WaitCursor)
@@ -896,7 +911,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             self.menu_act_run.setEnabled(False)
             
             try:
-                # ✅ FIX: Unpack 3 values instead of 2
+                #  FIX: Unpack 3 values instead of 2
                 saved_data, saved_track_skeleton, saved_dimensions = saved_result
                 
                 # Convert saved data to DataFrame
@@ -926,7 +941,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 self._page_dfs.clear()
                 self._page_bgr_arrays.clear()
                 
-                # ✅ Build current dimensions for validation
+                #  Build current dimensions for validation
                 current_dimensions = {}
                 
                 for page_num, pil_img in enumerate(pages, start=1):
@@ -957,7 +972,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                     
                     self.on_status(f"Seite {page_num}/{len(pages)} geladen")
                 
-                # ✅ Validate dimensions match
+                #  Validate dimensions match
                 dimensions_match = True
                 if saved_dimensions:
                     for page_num, saved_dims in saved_dimensions.items():
@@ -968,7 +983,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                                 current_dims['height'] != saved_dims['height']):
                                 dimensions_match = False
                                 self.on_status(
-                                    f"⚠️ Seite {page_num_int}: Dimensionen stimmen nicht überein "
+                                    f" Seite {page_num_int}: Dimensionen stimmen nicht überein "
                                     f"(Gespeichert: {saved_dims['width']}x{saved_dims['height']}, "
                                     f"Aktuell: {current_dims['width']}x{current_dims['height']})"
                                 )
@@ -1004,7 +1019,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 self.act_run.setEnabled(True)
                 self.menu_act_run.setEnabled(True)
                 
-                self.on_status("✅ Erfolgreich aus Datenbank geladen!")
+                self.on_status(" Erfolgreich aus Datenbank geladen!")
 
                 # Display last page as preview
                 if self._page_base_pix:
@@ -1025,10 +1040,11 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                     self._page_bgr_arrays,
                     saved_track_skeleton,  # Use saved track skeleton
                     None,  # No exception
-                    True  # from_database=True
+                    True,  # from_database=True
+                    []  # No uncertain detections from database
                 )
                 
-                self.statusBar().showMessage("✅ Aus Datenbank geladen - Keine Analyse nötig!", 8000)
+                self.statusBar().showMessage(" Aus Datenbank geladen - Keine Analyse nötig!", 8000)
                 
             except Exception as e:
                 import traceback
@@ -1052,9 +1068,9 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 self._run_full_analysis()
         
         else:
-            # ✅ RUN FULL ANALYSIS (SLOW PATH)
+            #  RUN FULL ANALYSIS (SLOW PATH)
             if force_rerun:
-                self.on_status("🔄 Neu-Analyse erzwungen")
+                self.on_status(" Neu-Analyse erzwungen")
                 # Delete existing saved data to avoid confusion in workspace_widget
                 try:
                     from database_sqlite import delete_workspace_data
@@ -1256,7 +1272,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 self.menu_act_new_symbol.setEnabled(True)
 
     def _on_worker_done(self, df_all: pd.DataFrame, page_dfs: Dict[int, pd.DataFrame],
-                            track_skeleton: Optional[np.ndarray], exception: Optional[Exception]):
+                            track_skeleton: Optional[np.ndarray], exception: Optional[Exception],
+                            uncertain_detections: list = None):
             self.on_status("Analyse abgeschlossen.")
             QtWidgets.QApplication.instance().restoreOverrideCursor()
             self.btn_run.setEnabled(True)
@@ -1266,7 +1283,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             self.menu_act_stop.setEnabled(False)
 
             # Pass all dictionaries, track_skeleton, and the exception to the next window
-            self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception, False)  # from_database=False
+            self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception, False, uncertain_detections or [])  # from_database=False
 
     def closeEvent(self, e: QtGui.QCloseEvent):
         if hasattr(self, "worker") and self.worker.isRunning():
@@ -1989,7 +2006,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 self._page_bgr_arrays if hasattr(self, '_page_bgr_arrays') else {},
                 track_skeleton,
                 None,  # No exception
-                True  # from_database=True
+                True,  # from_database=True
+                []  # No uncertain detections from database
             )
 
             self.on_status(f"Arbeitsbereich '{layout_name}' erfolgreich geladen!")
