@@ -541,7 +541,74 @@ def link_anchor_to_coord(anchor, coords, learned_patterns=None):
             print(f"LINKED: {best.get('text', best.get('coord_text', '?'))}")
         else:
             print(f"NO MATCH")
-    
+
+    # Step-wise fallback for specific classes (weichengruppeende, weichenende)
+    # Only searches in AVAILABLE coordinates (not occupied by other classes)
+    if best is None:
+        fallback_steps = rule.get("fallback_dy_steps", [])
+        for step_multiplier in fallback_steps:
+            expanded_dy_max = dy_max_base * step_multiplier
+
+            if DEBUG_ANGLE_ROUTING:
+                print(f"\n→ STEP-WISE FALLBACK: trying dy_multiplier={step_multiplier} (dy_max={expanded_dy_max:.1f})")
+
+            step_best, step_best_score = None, (float('inf'), float('inf'), 0)
+
+            for c in coords:
+                # Calculate distance (same logic as main loop)
+                if is_angular:
+                    dx_abs, dy_abs = _get_oriented_distance(anchor, c, anchor_angle_raw)
+                    dist_euclidean = math.sqrt(dx_abs**2 + dy_abs**2)
+                    dx, dy = dx_abs, dy_abs
+                else:
+                    dx = abs(c["cx"] - anchor["cx"])
+                    dy = abs(c["cy"] - anchor["cy"])
+                    dist_euclidean = math.sqrt(dx**2 + dy**2)
+
+                # Vertical distance check with expanded tolerance
+                if dy > expanded_dy_max:
+                    continue
+
+                # Directional check
+                ok_dir = _check_direction(anchor, c, mode, is_angular, anchor_angle_raw, tilted_ok)
+                if not ok_dir:
+                    continue
+
+                # Horizontal tolerance (same as main loop)
+                dx_max_local = dx_multiplier * 0.6 * max(anchor["w"], c["w"])
+                if tight:
+                    dx_max_local = dx_multiplier * 0.45 * max(anchor["w"], c["w"])
+                dx_max_local = max(dx_max_local, 30)
+
+                if search_left and not is_angular:
+                    coord_is_left = c["cx"] < anchor["cx"]
+                    if coord_is_left:
+                        dx_max_local *= 1.3
+
+                if dx > dx_max_local:
+                    continue
+
+                # Calculate overlap and score
+                xo = max(0, min(anchor["x2"], c["x2"]) - max(anchor["x1"], c["x1"]))
+
+                if is_angular:
+                    score = (dist_euclidean, -xo, 0)
+                else:
+                    if prefer_horizontal:
+                        score = (dx, dy, -xo)
+                    else:
+                        score = (dy, dx, -xo)
+
+                if score < step_best_score:
+                    step_best_score, step_best = score, c
+
+            if step_best is not None:
+                best = step_best
+                if DEBUG_ANGLE_ROUTING:
+                    best_text = best.get('text', best.get('coord_text', '?'))
+                    print(f"→ STEP-WISE MATCH at step {step_multiplier}: '{best_text}'")
+                break  # Found match, stop expanding
+
     # Adaptive fallback
     if best is None and learned_patterns and anchor["name"] in learned_patterns:
         patterns = learned_patterns[anchor["name"]]

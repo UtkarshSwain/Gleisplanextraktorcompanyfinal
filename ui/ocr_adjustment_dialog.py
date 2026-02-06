@@ -14,6 +14,7 @@ from datetime import datetime
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PIL import Image
 import numpy as np
+from utils.dpi_utils import scale_value
 
 
 class OCRAdjustmentTracker:
@@ -160,7 +161,7 @@ class OCRAdjustmentDialog(QtWidgets.QDialog):
     def _setup_ui(self):
         """Setup dialog UI"""
         self.setWindowTitle("OCR-Region anpassen (Adjust OCR Region)")
-        self.setMinimumWidth(600)
+        self.setMinimumWidth(scale_value(600))
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -377,7 +378,7 @@ class AutoLearningSuggestionDialog(QtWidgets.QDialog):
     def _setup_ui(self):
         """Setup suggestion dialog UI"""
         self.setWindowTitle(" Verbesserungsvorschlag (Improvement Suggestion)")
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(scale_value(500))
 
         layout = QtWidgets.QVBoxLayout(self)
 

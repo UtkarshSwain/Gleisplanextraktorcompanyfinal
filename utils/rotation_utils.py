@@ -45,6 +45,9 @@ def transform_offset_forward(dx: float, dy: float, width: float, height: float, 
 
     Used when APPLYING a template offset to a rotated symbol.
 
+    Uses fast-path for exact quadrant angles (0°, 90°, 180°, 270°),
+    falls back to trigonometric rotation for other angles (45°, 135°, etc.).
+
     Args:
         dx: X offset from symbol center (at 0°)
         dy: Y offset from symbol center (at 0°)
@@ -55,19 +58,35 @@ def transform_offset_forward(dx: float, dy: float, width: float, height: float, 
     Returns:
         tuple: (transformed_dx, transformed_dy, transformed_width, transformed_height)
     """
-    quadrant = get_rotation_quadrant(angle)
+    # Normalize angle to 0-360
+    norm_angle = angle % 360
 
-    if quadrant == 90:
-        # Rotate 90° clockwise: (dx, dy) → (dy, -dx)
-        return dy, -dx, height, width
-    elif quadrant == 180:
-        # Rotate 180°: (dx, dy) → (-dx, -dy)
-        return -dx, -dy, width, height
-    elif quadrant == 270:
-        # Rotate 270° clockwise: (dx, dy) → (-dy, dx)
-        return -dy, dx, height, width
-    else:  # 0°
+    # FAST PATH: Use simple swap for exact quadrant angles (most common case)
+    # This avoids trigonometric functions when not needed
+    if norm_angle < 5 or norm_angle > 355:  # ~0°
         return dx, dy, width, height
+    elif 85 < norm_angle < 95:  # ~90°
+        return dy, -dx, height, width
+    elif 175 < norm_angle < 185:  # ~180°
+        return -dx, -dy, width, height
+    elif 265 < norm_angle < 275:  # ~270°
+        return -dy, dx, height, width
+
+    # ACCURATE PATH: Use trigonometry for non-quadrant angles (45°, 135°, etc.)
+    import math
+    rad = math.radians(-angle)
+    cos_a = math.cos(rad)
+    sin_a = math.sin(rad)
+
+    dx_rot = dx * cos_a - dy * sin_a
+    dy_rot = dx * sin_a + dy * cos_a
+
+    # Swap width/height for roughly 90° or 270° rotations
+    quadrant = get_rotation_quadrant(angle)
+    if quadrant in (90, 270):
+        return dx_rot, dy_rot, height, width
+    else:
+        return dx_rot, dy_rot, width, height
 
 
 def transform_offset_reverse(dx: float, dy: float, width: float, height: float, angle: float):
@@ -75,6 +94,8 @@ def transform_offset_reverse(dx: float, dy: float, width: float, height: float, 
     Transform offset and dimensions FROM current rotation TO 0° reference.
 
     Used when SAVING a user adjustment to template (reverse transformation).
+
+    Uses fast-path for exact quadrant angles, trigonometry for others.
 
     Args:
         dx: X offset from symbol center (at current rotation)
@@ -86,19 +107,34 @@ def transform_offset_reverse(dx: float, dy: float, width: float, height: float, 
     Returns:
         tuple: (reference_dx, reference_dy, reference_width, reference_height)
     """
-    quadrant = get_rotation_quadrant(angle)
+    # Normalize angle to 0-360
+    norm_angle = angle % 360
 
-    if quadrant == 90:
-        # Reverse 90°: (dx, dy) @ 90° → (-dy, dx) @ 0°
-        return -dy, dx, height, width
-    elif quadrant == 180:
-        # Reverse 180°: (dx, dy) @ 180° → (-dx, -dy) @ 0°
-        return -dx, -dy, width, height
-    elif quadrant == 270:
-        # Reverse 270°: (dx, dy) @ 270° → (dy, -dx) @ 0°
-        return dy, -dx, height, width
-    else:  # 0°
+    # FAST PATH: Use simple swap for exact quadrant angles
+    if norm_angle < 5 or norm_angle > 355:  # ~0°
         return dx, dy, width, height
+    elif 85 < norm_angle < 95:  # ~90° → reverse is -90°
+        return -dy, dx, height, width
+    elif 175 < norm_angle < 185:  # ~180°
+        return -dx, -dy, width, height
+    elif 265 < norm_angle < 275:  # ~270° → reverse is -270° = +90°
+        return dy, -dx, height, width
+
+    # ACCURATE PATH: Use trigonometry for non-quadrant angles
+    import math
+    rad = math.radians(angle)  # Positive angle for reverse
+    cos_a = math.cos(rad)
+    sin_a = math.sin(rad)
+
+    dx_ref = dx * cos_a - dy * sin_a
+    dy_ref = dx * sin_a + dy * cos_a
+
+    # Swap width/height for roughly 90° or 270° rotations
+    quadrant = get_rotation_quadrant(angle)
+    if quadrant in (90, 270):
+        return dx_ref, dy_ref, height, width
+    else:
+        return dx_ref, dy_ref, width, height
 
 
 def transform_edge_deltas(delta_x1: float, delta_y1: float,

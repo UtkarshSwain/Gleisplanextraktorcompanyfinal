@@ -6,11 +6,13 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QTabWidget, QWidget, QHeaderView, QMessageBox,
-    QGroupBox, QFormLayout, QSplitter, QTextEdit, QComboBox, QLineEdit
+    QGroupBox, QFormLayout, QSplitter, QTextEdit, QComboBox, QLineEdit,
+    QInputDialog
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from typing import Optional, List, Dict
 import json
+import shutil
 from pathlib import Path
 from utils.dpi_utils import get_adaptive_window_size, center_window
 
@@ -858,7 +860,11 @@ class DatabaseManagerDialog(QDialog):
 
             result = get_workspace_data(layout_name)
             if result:
-                data, skeleton, dimensions = result
+                # Handle both old format (3 values) and new format (5 values)
+                if len(result) == 3:
+                    data, skeleton, dimensions = result
+                else:
+                    data, skeleton, dimensions, _, _ = result
 
                 export_data = {
                     'layout_name': layout_name,
@@ -951,7 +957,6 @@ class DatabaseManagerDialog(QDialog):
             return
 
         # Second confirmation with typed confirmation
-        from PyQt5.QtWidgets import QInputDialog
         text, ok = QInputDialog.getText(
             self,
             "Bestätigung erforderlich",
@@ -965,8 +970,6 @@ class DatabaseManagerDialog(QDialog):
         # Perform deletion
         try:
             from database_sqlite import get_connection
-            from pathlib import Path
-            import shutil
 
             conn = get_connection()
             cursor = conn.cursor()

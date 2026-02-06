@@ -149,6 +149,24 @@ def init_db():
             for index_sql in sql_create_indexes:
                 cursor.execute(index_sql)
 
+            # Migration: Add new columns if they don't exist (for existing databases)
+            cursor.execute("PRAGMA table_info(workspaces)")
+            columns = {row['name'] for row in cursor.fetchall()}
+
+            if 'learned_patterns_json' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE workspaces ADD COLUMN learned_patterns_json TEXT;")
+                    print("  Added learned_patterns_json column")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+
+            if 'uncertain_detections_json' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE workspaces ADD COLUMN uncertain_detections_json TEXT;")
+                    print("  Added uncertain_detections_json column")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+
             print("Database tables are ready.")
     except Exception as e:
         print(f"Error initializing database: {e}")
@@ -235,17 +253,18 @@ def decompress_track_skeleton(compressed_str: str) -> Optional[np.ndarray]:
         return None
 
 
-def get_workspace_data(layout_name: str) -> Optional[Tuple[List[Dict], Optional[np.ndarray], Optional[Dict]]]:
+def get_workspace_data(layout_name: str) -> Optional[Tuple[List[Dict], Optional[np.ndarray], Optional[Dict], Optional[Dict], Optional[List]]]:
     """
-    Retrieves the saved workspace JSON data, track skeleton, and image dimensions.
+    Retrieves the saved workspace JSON data, track skeleton, image dimensions, and metadata.
 
     Returns:
-        Tuple of (data_list, track_skeleton, image_dimensions) or None if not found
+        Tuple of (data_list, track_skeleton, image_dimensions, learned_patterns, uncertain_detections) or None if not found
     """
     print(f"Checking database for workspace: {layout_name}")
 
     sql_query = """
-    SELECT w.edited_data_json, w.track_skeleton, w.image_dimensions
+    SELECT w.edited_data_json, w.track_skeleton, w.image_dimensions,
+           w.learned_patterns_json, w.uncertain_detections_json
     FROM workspaces w
     JOIN track_layouts t ON w.layout_id = t.id
     WHERE t.layout_name = ?;
@@ -289,7 +308,29 @@ def get_workspace_data(layout_name: str) -> Optional[Tuple[List[Dict], Optional[
             else:
                 print(f"  No image dimensions saved for this layout")
 
-            return workspace_data, track_skeleton, image_dimensions
+            # Parse learned_patterns (OCR learning data)
+            learned_patterns = None
+            learned_patterns_json = result.get('learned_patterns_json')
+            if learned_patterns_json:
+                try:
+                    learned_patterns = json.loads(learned_patterns_json)
+                    print(f"  Loaded {len(learned_patterns) if learned_patterns else 0} learned patterns")
+                except Exception as e:
+                    print(f"  Could not parse learned_patterns: {e}")
+                    learned_patterns = None
+
+            # Parse uncertain_detections (low-confidence items)
+            uncertain_detections = None
+            uncertain_detections_json = result.get('uncertain_detections_json')
+            if uncertain_detections_json:
+                try:
+                    uncertain_detections = json.loads(uncertain_detections_json)
+                    print(f"  Loaded {len(uncertain_detections) if uncertain_detections else 0} uncertain detections")
+                except Exception as e:
+                    print(f"  Could not parse uncertain_detections: {e}")
+                    uncertain_detections = None
+
+            return workspace_data, track_skeleton, image_dimensions, learned_patterns, uncertain_detections
         else:
             print(f"No saved data found for {layout_name}.")
             return None
@@ -297,15 +338,20 @@ def get_workspace_data(layout_name: str) -> Optional[Tuple[List[Dict], Optional[
 
 def save_workspace_data(layout_name: str, workspace_data: List[Dict],
                        track_skeleton: Optional[np.ndarray] = None,
-                       image_dimensions: Optional[dict] = None):
+                       image_dimensions: Optional[dict] = None,
+                       learned_patterns: Optional[dict] = None,
+                       uncertain_detections: Optional[list] = None):
     """
-    Saves (Inserts or Updates) the workspace data, track skeleton, and image dimensions.
+    Saves (Inserts or Updates) the workspace data, track skeleton, image dimensions,
+    and workspace-level metadata.
 
     Args:
         layout_name: Unique identifier for the layout
         workspace_data: List of detection dictionaries
         track_skeleton: Optional track centerline mask (numpy array)
         image_dimensions: Optional dict of {page_num: {'width': w, 'height': h}}
+        learned_patterns: Optional dict of OCR learning patterns
+        uncertain_detections: Optional list of low-confidence detections
     """
     sql_insert_layout = """
     INSERT OR IGNORE INTO track_layouts (layout_name)
@@ -315,13 +361,16 @@ def save_workspace_data(layout_name: str, workspace_data: List[Dict],
     sql_get_layout_id = "SELECT id FROM track_layouts WHERE layout_name = ?;"
 
     sql_upsert_workspace = """
-    INSERT INTO workspaces (layout_id, edited_data_json, track_skeleton, image_dimensions, last_modified)
-    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    INSERT INTO workspaces (layout_id, edited_data_json, track_skeleton, image_dimensions,
+                           learned_patterns_json, uncertain_detections_json, last_modified)
+    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT (layout_id)
     DO UPDATE SET
         edited_data_json = excluded.edited_data_json,
         track_skeleton = excluded.track_skeleton,
         image_dimensions = excluded.image_dimensions,
+        learned_patterns_json = excluded.learned_patterns_json,
+        uncertain_detections_json = excluded.uncertain_detections_json,
         last_modified = CURRENT_TIMESTAMP;
     """
 
@@ -365,6 +414,24 @@ def save_workspace_data(layout_name: str, workspace_data: List[Dict],
             print(f"Failed to serialize image dimensions: {e}")
             image_dimensions_json = None
 
+    # Serialize learned_patterns (OCR learning data)
+    learned_patterns_json = None
+    if learned_patterns:
+        try:
+            learned_patterns_json = json.dumps(learned_patterns, cls=NumpyEncoder)
+        except Exception as e:
+            print(f"Failed to serialize learned_patterns: {e}")
+            learned_patterns_json = None
+
+    # Serialize uncertain_detections (low-confidence items)
+    uncertain_detections_json = None
+    if uncertain_detections:
+        try:
+            uncertain_detections_json = json.dumps(uncertain_detections, cls=NumpyEncoder)
+        except Exception as e:
+            print(f"Failed to serialize uncertain_detections: {e}")
+            uncertain_detections_json = None
+
     print(f"Saving workspace for {layout_name}...")
 
     with db_cursor(commit=True) as cursor:
@@ -378,15 +445,17 @@ def save_workspace_data(layout_name: str, workspace_data: List[Dict],
             raise Exception(f"Could not create or find layout_id for {layout_name}")
         layout_id = layout_id_result['id']
 
-        # Upsert workspace data + track skeleton + image dimensions
+        # Upsert workspace data + track skeleton + image dimensions + metadata
         cursor.execute(sql_upsert_workspace, (
             layout_id,
             data_as_json_string,
             track_skeleton_compressed,
-            image_dimensions_json
+            image_dimensions_json,
+            learned_patterns_json,
+            uncertain_detections_json
         ))
 
-    print(f"Saved workspace for {layout_name} (track: {track_skeleton is not None}, dims: {image_dimensions is not None}).")
+    print(f"Saved workspace for {layout_name} (track: {track_skeleton is not None}, dims: {image_dimensions is not None}, patterns: {learned_patterns is not None}).")
 
 
 def delete_workspace_data(layout_name: str) -> bool:

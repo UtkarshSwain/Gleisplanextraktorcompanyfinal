@@ -449,11 +449,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
         """Build the workspace UI"""
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
-        
+        layout.setContentsMargins(scale_value(5), scale_value(5), scale_value(5), scale_value(5))
+
         # Top controls with modern styling
         top_layout = QtWidgets.QHBoxLayout()
-        top_layout.setSpacing(12)
+        top_layout.setSpacing(scale_value(12))
 
         # ADD UNDO/REDO BUTTONS with enhanced styling
         self.btn_undo = QtWidgets.QPushButton("↶ Rückgängig")
@@ -555,8 +555,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
         """)
 
         counter_layout = QtWidgets.QHBoxLayout(self.problem_counter_bar)
-        counter_layout.setContentsMargins(10, 6, 10, 6)
-        counter_layout.setSpacing(12)
+        counter_layout.setContentsMargins(scale_value(10), scale_value(6), scale_value(10), scale_value(6))
+        counter_layout.setSpacing(scale_value(12))
 
         # High risk (red) - "Sofort prüfen" - dark theme
         self.high_risk_btn = QtWidgets.QPushButton("0 Sofort prüfen")
@@ -782,7 +782,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         # Item details
         self.item_details_notes = QtWidgets.QPlainTextEdit()
         self.item_details_notes.setPlaceholderText("Details zum ausgewählten Element / Notizen...")
-        self.item_details_notes.setMaximumHeight(150) 
+        self.item_details_notes.setMaximumHeight(scale_value(150)) 
         self.item_details_notes.textChanged.connect(self.on_item_notes_changed)
         
         # Filter inputs
@@ -1133,126 +1133,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     df_all = df_all.drop_duplicates(subset='row_id', keep='first')
                     print(f"   After deduplication: {len(df_all)} rows")
 
-            # Skip database check if data already came from database
-            saved_result = None
-            if not from_database:
-                # Check if there's saved data in database
-                from database_sqlite import get_workspace_data
-                saved_result = get_workspace_data(self.layout_name)
+            # Database loading is now only done via Database Manager (from_database=True)
+            # No automatic DB check or prompt here anymore
 
-                if saved_result:
-                    try:
-                        saved_data, saved_track_skeleton, saved_dimensions = saved_result
-                    except ValueError as e:
-                        print(f" Error unpacking saved result: {e}")
-                        print(f"Result type: {type(saved_result)}")
-                        print(f"Result length: {len(saved_result) if isinstance(saved_result, (list, tuple)) else 'N/A'}")
-                        saved_result = None
-            else:
-                print(f"Skipping database check (data already from database)")
-
-            if saved_result:
-                #  Build current dimensions from incoming data (with safety checks)
-                current_dimensions = {}
-                try:
-                    for page_num, pix in page_base_pix.items():
-                        if pix is not None:
-                            current_dimensions[int(page_num)] = {
-                                'width': int(pix.width()),
-                                'height': int(pix.height())
-                            }
-                except Exception as e:
-                    print(f" Error building current dimensions: {e}")
-                    current_dimensions = {}
-                
-                #  Validate image dimensions match
-                dimensions_match = True
-                dimension_mismatch_details = []
-                
-                if saved_dimensions and current_dimensions:
-                    for page_num, saved_dims in saved_dimensions.items():
-                        # Convert page_num to int for comparison
-                        page_num_int = int(page_num)
-                        
-                        if page_num_int in current_dimensions:
-                            current_dims = current_dimensions[page_num_int]
-                            
-                            if (current_dims['width'] != saved_dims['width'] or 
-                                current_dims['height'] != saved_dims['height']):
-                                
-                                dimensions_match = False
-                                dimension_mismatch_details.append(
-                                    f"Seite {page_num_int}:\n"
-                                    f"  Gespeichert: {saved_dims['width']}x{saved_dims['height']}\n"
-                                    f"  Aktuell: {current_dims['width']}x{current_dims['height']}"
-                                )
-                                print(f" Page {page_num_int} dimension mismatch:")
-                                print(f"Saved: {saved_dims['width']}x{saved_dims['height']}")
-                                print(f"Current: {current_dims['width']}x{current_dims['height']}")
-                        else:
-                            print(f" Page {page_num_int} in saved data but not in current data")
-                elif saved_dimensions and not current_dimensions:
-                    print(" No current dimensions available (page_base_pix might be empty)")
-                    dimensions_match = False
-                elif not saved_dimensions:
-                    print(" No image dimensions saved in database")
-                    dimensions_match = False
-                
-                #  Show warning if dimensions don't match
-                if not dimensions_match:
-                    if dimension_mismatch_details:
-                        mismatch_text = "\n\n".join(dimension_mismatch_details)
-                    elif not saved_dimensions:
-                        mismatch_text = "Keine Dimensionen in Datenbank gespeichert"
-                    else:
-                        mismatch_text = "Bilddimensionen konnten nicht verglichen werden"
-                    
-                    reply = QtWidgets.QMessageBox.warning(
-                        self,
-                        "Dimensionskonflikt",
-                        f"Die gespeicherten Daten haben möglicherweise andere Bilddimensionen.\n\n"
-                        f"{mismatch_text}\n\n"
-                        f"Dies kann zu verschobenen Overlays führen.\n\n"
-                        f"Möchten Sie trotzdem die gespeicherten Daten laden?\n\n"
-                        f"'Ja' = Gespeicherte Daten laden (Overlays könnten verschoben sein)\n"
-                        f"'Nein' = Vollständige Neuanalyse durchführen",
-                        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                        QtWidgets.QMessageBox.No
-                    )
-                    
-                    if reply == QtWidgets.QMessageBox.No:
-                        # User chose to reprocess - don't use saved data
-                        print("User chose to reprocess - skipping database load")
-                        saved_result = None
-                
-                #  Ask if user wants to load saved data (if dimensions match or user accepted mismatch)
-                if saved_result:
-                    reply = QtWidgets.QMessageBox.question(
-                        self,
-                        "Gespeicherte Daten gefunden",
-                        f"Es gibt gespeicherte Daten für '{os.path.basename(self.layout_name)}'.\n\n"
-                        f"Möchten Sie die gespeicherten Daten laden statt der neuen Verarbeitung?",
-                        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
-                    )
-                    
-                    if reply == QtWidgets.QMessageBox.Yes:
-                        # Load from database
-                        print("Loading data from database...")
-                        df_all = pd.DataFrame(saved_data)
-                            #  ADD: Ensure _hidden column exists in loaded data
-                        if '_hidden' not in df_all.columns:
-                            df_all['_hidden'] = False
-                            print(f"Added missing _hidden column to database data")
-                        track_skeleton = saved_track_skeleton
-                        
-                        # Rebuild page_dfs from df_all
-                        page_dfs = {}
-                        if 'page' in df_all.columns:
-                            for page_num in df_all['page'].unique():
-                                page_dfs[int(page_num)] = df_all[df_all['page'] == page_num].copy()
-                        
-                        print(f"  Loaded {len(df_all)} rows from database")
-            
             #  CLEAR UNDO/REDO STACKS ON NEW LOAD
             self.undo_stack.clear()
             self.redo_stack.clear()
@@ -1273,8 +1156,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     self.df_all[col] = None
                 print(f"   Added missing OCR columns to loaded data: {missing_ocr_cols}")
 
-            self.page_base_pix = page_base_pix
+            # IMPORTANT: Deep copy all data structures to avoid sharing references with setup_window
+            # Without these copies, setup_window operations would affect this workspace's data
+            self.page_base_pix = {k: v.copy() for k, v in page_base_pix.items()}  # QPixmap.copy()
             self.page_dfs = {k: self._ensure_hidden_column(v.copy()) for k, v in page_dfs.items()}
+            self.page_bgr_arrays = {k: np.copy(v) for k, v in page_bgr_arrays.items()}  # Deep copy numpy arrays
 
             #  FIX: Ensure link_coord_row_id column exists in page_dfs too
             for page_num, page_df in self.page_dfs.items():
@@ -1285,8 +1171,6 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 for col in ocr_columns:
                     if col not in page_df.columns:
                         page_df[col] = None
-
-            self.page_bgr_arrays = page_bgr_arrays
 
             print(f"  Loaded into workspace: {len(self.df_all)} rows")
 
@@ -1393,9 +1277,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
             # self.page_spin.setMaximum(max_page)
             # self.page_spin.setValue(1)
             
-            # Store track skeleton
-            self.track_skeleton = track_skeleton
-            if track_skeleton is not None:
+            # Store track skeleton (copy to avoid shared reference with setup_window)
+            self.track_skeleton = np.copy(track_skeleton) if track_skeleton is not None else None
+            if self.track_skeleton is not None:
                 self.btn_toggle_tracks.setEnabled(True)
                 self._set_status(f" Track detection verfügbar: {self.layout_name}")
 
@@ -1508,7 +1392,26 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 elif df_cleaned[col].dtype == np.float64:
                     df_cleaned[col] = df_cleaned[col].astype(object).where(df_cleaned[col].notna(), None)
                     df_cleaned[col] = df_cleaned[col].apply(lambda x: float(x) if x is not None else None)
-            
+
+            # Ensure _hidden is boolean (not NaN/None) - persists merged/deleted state
+            if '_hidden' in df_cleaned.columns:
+                # Handle both NaN and None values (NaN was converted to None earlier)
+                df_cleaned['_hidden'] = df_cleaned['_hidden'].apply(
+                    lambda x: bool(x) if x is not None and not pd.isna(x) else False
+                )
+
+            # Serialize _signal_positions dict to JSON string for persistence
+            if '_signal_positions' in df_cleaned.columns:
+                df_cleaned['_signal_positions'] = df_cleaned['_signal_positions'].apply(
+                    lambda x: json.dumps(x) if isinstance(x, dict) else x
+                )
+
+            # Ensure weichen_coordinates is list (not numpy array)
+            if 'weichen_coordinates' in df_cleaned.columns:
+                df_cleaned['weichen_coordinates'] = df_cleaned['weichen_coordinates'].apply(
+                    lambda x: x.tolist() if isinstance(x, np.ndarray) else (x if x is not None else [])
+                )
+
             data_list = df_cleaned.to_dict("records")
             #  Collect image dimensions (ensure they're Python ints, not numpy)
             image_dimensions = {}
@@ -1520,12 +1423,14 @@ class WorkspaceWidget(QtWidgets.QWidget):
             
             from database_sqlite import save_workspace_data
             save_workspace_data(
-                self.layout_name, 
-                data_list, 
+                self.layout_name,
+                data_list,
                 self.track_skeleton,
-                image_dimensions
+                image_dimensions,
+                learned_patterns=getattr(self, 'learned_patterns', None),
+                uncertain_detections=getattr(self, 'uncertain_detections', None)
             )
-            
+
             print(f"Saved {self.layout_name} with dimensions: {image_dimensions}")
             
         except Exception as e:
@@ -3565,7 +3470,6 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
             # Update polygon points if provided (critical for rotated bbox OCR!)
             if poly_points:
-                import numpy as np
                 # Convert to numpy array format expected by OCR functions
                 poly_array = np.array(poly_points, dtype=np.float32).flatten()  # [x1, y1, x2, y2, x3, y3, x4, y4]
                 det["poly"] = poly_array
@@ -6724,12 +6628,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.tree.scrollToItem(tree_item, QtWidgets.QAbstractItemView.PositionAtCenter)
             
             # Optional: Flash yellow highlight
-            from PyQt5.QtGui import QColor
             original_bg = tree_item.background(0)
-            
-            tree_item.setBackground(0, QColor(255, 255, 0))  # Yellow
-            tree_item.setBackground(1, QColor(255, 255, 0))
-            tree_item.setBackground(2, QColor(255, 255, 0))
+
+            tree_item.setBackground(0, QtGui.QColor(255, 255, 0))  # Yellow
+            tree_item.setBackground(1, QtGui.QColor(255, 255, 0))
+            tree_item.setBackground(2, QtGui.QColor(255, 255, 0))
             
             # Restore original background after 1 second
             QtCore.QTimer.singleShot(

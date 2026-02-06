@@ -464,6 +464,7 @@ class NewSymbolDetector:
         links_to_coordinate: bool = False,
         coordinate_position: Optional[List[str]] = None,
         similarity_threshold: float = 0.75,
+        max_link_distance: int = 150,
     ) -> SymbolDefinition:
         """
         Add a new symbol definition from example crops.
@@ -477,6 +478,7 @@ class NewSymbolDetector:
             links_to_coordinate: Should this link to coordinates?
             coordinate_position: List of positions where coordinates can be found
             similarity_threshold: How similar must matches be? (0-1)
+            max_link_distance: Maximum pixel distance for coordinate linking
 
         Returns:
             Created SymbolDefinition
@@ -500,6 +502,7 @@ class NewSymbolDetector:
             links_to_coordinate=links_to_coordinate,
             coordinate_position=coordinate_position,
             similarity_threshold=similarity_threshold,
+            max_link_distance=max_link_distance,
             example_count=len(example_crops),
         )
 

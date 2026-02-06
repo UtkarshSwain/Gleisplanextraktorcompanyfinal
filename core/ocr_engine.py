@@ -2466,6 +2466,27 @@ def _ocr_custom_symbol_single_position(
                 print(f"Invalid text_region_offset: width={tw}, height={th}. Falling back to position-based search.")
             text_region_offset = None  # Force fallback to position-based search
         else:
+            # SCALE COMPENSATION: Adjust offset based on detected symbol size vs. reference size
+            # This handles cases where symbol is detected at different sizes (different DPI, etc.)
+            ref_sym_w = text_region_offset.get("ref_sym_width", 0)
+            ref_sym_h = text_region_offset.get("ref_sym_height", 0)
+
+            if ref_sym_w > 0 and ref_sym_h > 0 and sym_w > 0 and sym_h > 0:
+                # Calculate scale factor (use average of width and height ratios)
+                scale_x = sym_w / ref_sym_w
+                scale_y = sym_h / ref_sym_h
+                scale_factor = (scale_x + scale_y) / 2
+
+                # Apply scaling to offset and text region dimensions
+                dx = dx * scale_factor
+                dy = dy * scale_factor
+                tw = tw * scale_factor
+                th = th * scale_factor
+
+                if DEBUG_CUSTOM_SYMBOLS:
+                    print(f"Scale compensation: ref_size=({ref_sym_w}x{ref_sym_h}), "
+                          f"detected_size=({sym_w}x{sym_h}), scale={scale_factor:.2f}")
+
             # IMPORTANT: Rotate the offset based on symbol rotation
             # The offset was defined relative to the 0° template, so we need to
             # transform it for rotated symbols
@@ -2476,19 +2497,47 @@ def _ocr_custom_symbol_single_position(
             )
 
             if DEBUG_CUSTOM_SYMBOLS:
-                print(f"Manual offset rotation: ({dx},{dy}) @ {sym_angle:.1f}° → ({dx_rot},{dy_rot})")
+                print(f"Manual offset rotation: ({dx},{dy}) @ {sym_angle:.1f}° → ({dx_rot:.1f},{dy_rot:.1f})")
 
             # Calculate text region center from symbol center + rotated offset
             txt_cx = sym_cx + dx_rot
             txt_cy = sym_cy + dy_rot
 
-            # Calculate crop bounds
-            crop_x1 = max(0, int(txt_cx - tw_rot / 2))
-            crop_y1 = max(0, int(txt_cy - th_rot / 2))
-            crop_x2 = min(img_w, int(txt_cx + tw_rot / 2))
-            crop_y2 = min(img_h, int(txt_cy + th_rot / 2))
+            # Calculate ideal crop bounds (before clamping)
+            ideal_x1 = int(txt_cx - tw_rot / 2)
+            ideal_y1 = int(txt_cy - th_rot / 2)
+            ideal_x2 = int(txt_cx + tw_rot / 2)
+            ideal_y2 = int(txt_cy + th_rot / 2)
 
-            if DEBUG_CUSTOM_SYMBOLS:
+            # Calculate clamped crop bounds
+            crop_x1 = max(0, ideal_x1)
+            crop_y1 = max(0, ideal_y1)
+            crop_x2 = min(img_w, ideal_x2)
+            crop_y2 = min(img_h, ideal_y2)
+
+            # VALIDATION: Check if significant portion of text region is outside image
+            ideal_area = (ideal_x2 - ideal_x1) * (ideal_y2 - ideal_y1)
+            actual_area = (crop_x2 - crop_x1) * (crop_y2 - crop_y1)
+
+            if ideal_area > 0:
+                coverage = actual_area / ideal_area
+                if coverage < 0.5:
+                    if DEBUG_CUSTOM_SYMBOLS:
+                        print(f"⚠ WARNING: Text region mostly outside image! "
+                              f"Coverage: {coverage*100:.0f}%, ideal=({ideal_x1},{ideal_y1})-({ideal_x2},{ideal_y2})")
+                    # Fall back to position-based search
+                    text_region_offset = None
+                elif coverage < 0.8:
+                    if DEBUG_CUSTOM_SYMBOLS:
+                        print(f"⚠ Text region partially clipped. Coverage: {coverage*100:.0f}%")
+
+            # VALIDATION: Check if region is too small for OCR
+            if text_region_offset and (crop_x2 - crop_x1 < 15 or crop_y2 - crop_y1 < 10):
+                if DEBUG_CUSTOM_SYMBOLS:
+                    print(f"⚠ WARNING: Text region too small for OCR: {crop_x2-crop_x1}x{crop_y2-crop_y1}px. Falling back.")
+                text_region_offset = None
+
+            if DEBUG_CUSTOM_SYMBOLS and text_region_offset:
                 print(f"Precise region: ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
 
     # FALLBACK: Use direction-based search with LARGER area for auto-detection

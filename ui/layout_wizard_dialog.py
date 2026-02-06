@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
 from typing import List, Dict, Optional, Tuple
 import numpy as np
 from pathlib import Path
-from utils.dpi_utils import get_adaptive_window_size, center_window
+from utils.dpi_utils import get_adaptive_window_size, center_window, scale_value
 
 
 class ClickableGraphicsView(QGraphicsView):
@@ -218,7 +218,7 @@ class LayoutWizardDialog(QDialog):
         name_layout.addWidget(QLabel("Profile Name:"))
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("e.g., layout_type_b")
-        self.name_input.setMinimumWidth(300)
+        self.name_input.setMinimumWidth(scale_value(300))
         name_layout.addWidget(self.name_input)
         name_layout.addStretch()
         layout.addLayout(name_layout)
@@ -261,13 +261,13 @@ class LayoutWizardDialog(QDialog):
                 background: #E8F5E9;
             }
         """)
-        self.drop_area.setMinimumHeight(200)
+        self.drop_area.setMinimumHeight(scale_value(200))
         self.drop_area.mousePressEvent = self._browse_pdfs
         layout.addWidget(self.drop_area)
 
         # File list
         self.file_list = QListWidget()
-        self.file_list.setMaximumHeight(150)
+        self.file_list.setMaximumHeight(scale_value(150))
         layout.addWidget(self.file_list)
 
         # Analysis results
@@ -366,7 +366,7 @@ class LayoutWizardDialog(QDialog):
 
         left_widget = QWidget()
         left_widget.setLayout(left_panel)
-        left_widget.setMaximumWidth(300)
+        left_widget.setMaximumWidth(scale_value(300))
         layout.addWidget(left_widget)
 
         # Right panel - image view

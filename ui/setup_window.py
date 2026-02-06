@@ -21,7 +21,7 @@ from core.image_processing import qpolygonf_from_pts
 class SetupAndRunWindow(QtWidgets.QMainWindow):
     processing_done = QtCore.pyqtSignal(pd.DataFrame, object, object, object, object, object, bool, list)  # df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, exception, from_database, uncertain_detections
     started_processing = QtCore.pyqtSignal()
-    started_processing = QtCore.pyqtSignal()
+
     def __init__(self, main_app_ref: 'MainWindow'):
         from main import MainWindow
         super().__init__()
@@ -145,7 +145,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                     }}
                 """)
 
-                # Update step header color
+                # Update step header color (old layout)
                 if hasattr(frame, 'step_header'):
                     frame.step_header.setStyleSheet(f"""
                         font-size: 10pt;
@@ -154,15 +154,25 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                         padding: 0px;
                     """)
 
+                # Update step badge (compact layout)
+                if hasattr(frame, 'step_badge'):
+                    frame.step_badge.setStyleSheet(f"""
+                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #009999, stop:1 #00adef);
+                        color: white;
+                        padding: {scale_value(4)}px {scale_value(10)}px;
+                        border-radius: {scale_value(4)}px;
+                        font-size: 9pt;
+                        font-weight: bold;
+                    """)
+
                 # Update step title color
                 if hasattr(frame, 'step_title'):
                     frame.step_title.setStyleSheet(f"""
-                        font-size: 11pt;
+                        font-size: 12pt;
                         font-weight: 700;
                         letter-spacing: 0.5px;
                         color: {self.theme_colors['text_primary']};
-                        padding: 4px 0px;
-                        min-height: {scale_value(24)}px;
+                        padding: 0px;
                     """)
 
         # Update info banner (compact with Siemens blue accent)
@@ -185,7 +195,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 color: {self.theme_colors['text_secondary']};
                 font-size: 8pt;
                 font-weight: normal;
-                padding: 8px 0px;
+                padding: {scale_value(6)}px 0px;
             """)
 
         if hasattr(self, 'lbl_model') and "Kein Modell" in self.lbl_model.text():
@@ -193,7 +203,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 color: {self.theme_colors['text_secondary']};
                 font-size: 8pt;
                 font-weight: normal;
-                padding: 8px 0px;
+                padding: {scale_value(6)}px 0px;
             """)
 
         # Update log
@@ -258,14 +268,14 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         main_layout = QtWidgets.QVBoxLayout(central)
-        main_layout.setSpacing(8)
-        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(scale_value(8))
+        main_layout.setContentsMargins(scale_value(10), scale_value(10), scale_value(10), scale_value(10))
 
         # ========== COMPACT PROFESSIONAL HEADER ==========
         self.module_header = QtWidgets.QFrame()
         header_layout = QtWidgets.QHBoxLayout(self.module_header)
-        header_layout.setContentsMargins(12, 8, 12, 8)
-        header_layout.setSpacing(12)
+        header_layout.setContentsMargins(scale_value(12), scale_value(8), scale_value(12), scale_value(8))
+        header_layout.setSpacing(scale_value(12))
 
         # Professional module badge (Siemens blue)
         badge_label = QtWidgets.QLabel("MODUL")
@@ -304,8 +314,12 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         main_layout.addWidget(self.module_header)
 
         # ========== COMPACT STEPS - NO EMOJIS ==========
+        # Wrapper widget to center the step cards on full-screen
+        top_wrapper = QtWidgets.QHBoxLayout()
+        top_wrapper.addStretch()  # Push cards to center
+
         top = QtWidgets.QHBoxLayout()
-        top.setSpacing(8)
+        top.setSpacing(scale_value(16))  # Better spacing between step cards (DPI-scaled)
 
         # Step 1: Gleisplan - Compact professional design
         self.pdf_frame = self._create_step_frame_compact(
@@ -343,16 +357,17 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
         # Compact status display
         self.lbl_pdf = QtWidgets.QLabel("Keine Datei")
-        self.lbl_pdf.setStyleSheet("font-size: 8pt; font-weight: normal; color: #a0a4b8; padding: 8px 0px;")
+        self.lbl_pdf.setStyleSheet(f"font-size: 8pt; font-weight: normal; color: #a0a4b8; padding: {scale_value(6)}px 0px;")
         self.lbl_pdf.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_pdf.setMinimumHeight(scale_value(24))
         pdf_layout.addWidget(self.lbl_pdf)
 
         # Resolution warning for image files
         self.lbl_resolution_hint = QtWidgets.QLabel(" Bilder: min. 300 DPI empfohlen")
-        self.lbl_resolution_hint.setStyleSheet("""
+        self.lbl_resolution_hint.setStyleSheet(f"""
             font-size: 7pt;
             color: #f0a030;
-            padding: 2px 0px;
+            padding: {scale_value(2)}px 0px;
         """)
         self.lbl_resolution_hint.setAlignment(QtCore.Qt.AlignCenter)
         self.lbl_resolution_hint.setToolTip(
@@ -363,6 +378,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             "• A1-Gleisplan: ca. 7000 x 10000 Pixel"
         )
         pdf_layout.addWidget(self.lbl_resolution_hint)
+        pdf_layout.addStretch()  # Anchor widgets to top, prevent vertical shift on resize
 
         top.addWidget(self.pdf_frame)
 
@@ -402,9 +418,11 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
         # Compact status
         self.lbl_model = QtWidgets.QLabel("Kein Modell")
-        self.lbl_model.setStyleSheet("font-size: 8pt; font-weight: normal; color: #a0a4b8; padding: 8px 0px;")
+        self.lbl_model.setStyleSheet(f"font-size: 8pt; font-weight: normal; color: #a0a4b8; padding: {scale_value(6)}px 0px;")
         self.lbl_model.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_model.setMinimumHeight(scale_value(24))
         model_layout.addWidget(self.lbl_model)
+        model_layout.addStretch()  # Anchor widgets to top, prevent vertical shift on resize
 
         top.addWidget(self.model_frame)
 
@@ -464,10 +482,15 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         """)
         self.check_force_rerun.setToolTip("Ignoriert Cache, führt vollständige Neuanalyse durch")
         run_layout.addWidget(self.check_force_rerun)
+        run_layout.addStretch()  # Anchor widgets to top, prevent vertical shift on resize
 
         top.addWidget(self.run_frame)
 
-        main_layout.addLayout(top)
+        # Complete the wrapper layout to center cards
+        top_wrapper.addLayout(top)
+        top_wrapper.addStretch()  # Push cards to center from right side too
+
+        main_layout.addLayout(top_wrapper)
 
         # Compact info banner - no emoji
         self.analysis_info = QtWidgets.QLabel(
@@ -478,14 +501,15 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         main_layout.addWidget(self.analysis_info)
 
         # Graphics view - very small compact preview so step cards dominate the layout
+        # Only scale max height, keep min small so window can fit on smaller screens
         self.view.setMaximumHeight(scale_value(150))
-        self.view.setMinimumHeight(scale_value(120))
+        self.view.setMinimumHeight(80)
         main_layout.addWidget(self.view)
 
-        # Enhanced progress bar (Siemens blue) - increased height for better visibility
+        # Enhanced progress bar (Siemens blue) - visible height, small minimum
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
-        self.progress.setMinimumHeight(scale_value(50))
+        self.progress.setMinimumHeight(32)
         self.progress.setStyleSheet("""
             QProgressBar {
                 border: 1px solid #cbd5e0;
@@ -508,7 +532,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.log.setReadOnly(True)
         self.log.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
         self.log.setMaximumBlockCount(5000)
-        self.log.setMinimumHeight(scale_value(150))
+        self.log.setMinimumHeight(100)
         self.log.setStyleSheet("""
             QPlainTextEdit {
                 background: #2c3e50;
@@ -544,44 +568,58 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         frame = QtWidgets.QFrame()
         frame.setFrameStyle(QtWidgets.QFrame.StyledPanel | QtWidgets.QFrame.Raised)
 
+        # Set size policy: expanding horizontally to fill available space
+        frame.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Preferred
+        )
+        # Bigger and wider step cards (DPI-scaled)
+        frame.setMinimumWidth(scale_value(280))
+        frame.setMaximumWidth(scale_value(550))
+        frame.setMinimumHeight(scale_value(200))  # Taller for better visibility
+
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setSpacing(16)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(scale_value(14))  # More spacing between elements
+        layout.setContentsMargins(scale_value(20), scale_value(20), scale_value(20), scale_value(20))
 
-        # Header: Badge + Title on same line
+        # Header: Badge + Title as separate widgets (more reliable than HTML)
         header_layout = QtWidgets.QHBoxLayout()
-        header_layout.setSpacing(8)
+        header_layout.setSpacing(scale_value(8))
+        header_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Small badge on left
-        step_badge = QtWidgets.QLabel(step_num)
-        step_badge.setStyleSheet("""
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                       stop:0 #009999, stop:1 #00adef);
+        # Badge label (step number)
+        badge_label = QtWidgets.QLabel(step_num)
+        badge_label.setAlignment(QtCore.Qt.AlignCenter)
+        badge_label.setStyleSheet(f"""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #009999, stop:1 #00adef);
             color: white;
-            padding: 4px 10px;
-            border-radius: 4px;
-            font-size: 8pt;
-            font-weight: 700;
-            letter-spacing: 0.5px;
+            padding: {scale_value(4)}px {scale_value(10)}px;
+            border-radius: {scale_value(4)}px;
+            font-size: 9pt;
+            font-weight: bold;
         """)
-        step_badge.setAlignment(QtCore.Qt.AlignCenter)
-        header_layout.addWidget(step_badge, 0, QtCore.Qt.AlignVCenter)
+        badge_label.setFixedHeight(scale_value(24))
+        header_layout.addWidget(badge_label)
 
-        # Title next to badge
+        # Title label
         title_label = QtWidgets.QLabel(title)
-        title_label.setStyleSheet("""
-            font-size: 11pt;
-            font-weight: 700;
-            letter-spacing: 0.5px;
-            padding: 4px 0px;
+        title_label.setStyleSheet(f"""
+            font-size: 12pt;
+            font-weight: bold;
+            color: #e8eaf0;
+            padding: 0px;
         """)
-        title_label.setMinimumHeight(scale_value(24))  # Ensure enough height for text
-        title_label.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
-        header_layout.addWidget(title_label, 0, QtCore.Qt.AlignVCenter)
+        header_layout.addWidget(title_label)
         header_layout.addStretch()
-        frame.step_title = title_label  # Store reference for theming
 
         layout.addLayout(header_layout)
+
+        # Add small spacer after header for visual separation
+        layout.addSpacing(scale_value(4))
+
+        # Store references for theming
+        frame.step_badge = badge_label
+        frame.step_title = title_label
 
         return frame
 
@@ -592,7 +630,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         # Don't set colors here - will be set by _apply_theme()
 
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setSpacing(12)
+        layout.setSpacing(scale_value(12))
 
         # Step number badge
         badge = QtWidgets.QLabel(f"{icon}")
@@ -636,7 +674,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         """Show detailed welcome dialog"""
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("Willkommen bei RailDoc Studio")
-        dialog.setMinimumWidth(650)
+        dialog.setMinimumWidth(scale_value(650))
 
         layout = QtWidgets.QVBoxLayout(dialog)
 
@@ -890,203 +928,40 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         
         layout_name = os.path.basename(self.pdf_path)  # Use just filename as layout name
         force_rerun = self.check_force_rerun.isChecked()
-        
-        # Check if saved data exists
-        saved_result = None
-        try:
-            from database_sqlite import get_workspace_data
-            saved_result = get_workspace_data(layout_name)
-        except Exception as e:
-            self.on_status(f"DB-Fehler beim Laden: {e}")
-        
-        # Decide whether to load from DB or run full analysis
-        if saved_result and not force_rerun:
-            #  LOAD FROM DATABASE (FAST PATH)
-            self.on_status(" Gespeicherter Arbeitsbereich gefunden!")
-            self.on_status("Lade Daten aus Datenbank (schnell)...")
-            
-            QtWidgets.QApplication.instance().setOverrideCursor(QtCore.Qt.WaitCursor)
-            self.btn_run.setEnabled(False)
-            self.act_run.setEnabled(False)
-            self.menu_act_run.setEnabled(False)
-            
+
+        # Always run full analysis - loading from DB is done via Database Manager
+        if force_rerun:
+            self.on_status(" Neu-Analyse erzwungen")
+            # Delete existing saved data to start fresh
             try:
-                #  FIX: Unpack 3 values instead of 2
-                saved_data, saved_track_skeleton, saved_dimensions = saved_result
-                
-                # Convert saved data to DataFrame
-                df_all = pd.DataFrame(saved_data)
-
-                # Load Gleisplan images (needed for visualization)
-                self.on_status("Lade Gleisplan...")
-                from PIL import Image
-                import cv2
-
-                dpi = 500
-
-                # Check if it's an image file or PDF
-                image_extensions = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
-                if self.pdf_path.lower().endswith(image_extensions):
-                    # Load image directly
-                    pil_img = Image.open(self.pdf_path)
-                    if pil_img.mode != 'RGB':
-                        pil_img = pil_img.convert('RGB')
-                    pages = [pil_img]
-                else:
-                    # Load PDF pages
-                    from pdf2image import convert_from_path
-                    pages = convert_from_path(self.pdf_path, dpi=dpi)
-                
-                self._page_base_pix.clear()
-                self._page_dfs.clear()
-                self._page_bgr_arrays.clear()
-                
-                #  Build current dimensions for validation
-                current_dimensions = {}
-                
-                for page_num, pil_img in enumerate(pages, start=1):
-                    # Convert to QPixmap
-                    img_rgb = pil_img.convert("RGB")
-                    img_bytes = img_rgb.tobytes("raw", "RGB")
-                    qimg = QtGui.QImage(
-                        img_bytes,
-                        pil_img.width,
-                        pil_img.height,
-                        pil_img.width * 3,
-                        QtGui.QImage.Format_RGB888
-                    )
-                    pixmap = QtGui.QPixmap.fromImage(qimg)
-                    self._page_base_pix[page_num] = pixmap
-                    
-                    # Store current dimensions
-                    current_dimensions[page_num] = {
-                        'width': pixmap.width(),
-                        'height': pixmap.height()
-                    }
-                    
-                    # Convert to BGR array for OCR operations
-                    self._page_bgr_arrays[page_num] = cv2.cvtColor(
-                        np.array(pil_img), 
-                        cv2.COLOR_RGB2BGR
-                    )
-                    
-                    self.on_status(f"Seite {page_num}/{len(pages)} geladen")
-                
-                #  Validate dimensions match
-                dimensions_match = True
-                if saved_dimensions:
-                    for page_num, saved_dims in saved_dimensions.items():
-                        page_num_int = int(page_num)
-                        if page_num_int in current_dimensions:
-                            current_dims = current_dimensions[page_num_int]
-                            if (current_dims['width'] != saved_dims['width'] or 
-                                current_dims['height'] != saved_dims['height']):
-                                dimensions_match = False
-                                self.on_status(
-                                    f" Seite {page_num_int}: Dimensionen stimmen nicht überein "
-                                    f"(Gespeichert: {saved_dims['width']}x{saved_dims['height']}, "
-                                    f"Aktuell: {current_dims['width']}x{current_dims['height']})"
-                                )
-                
-                if not dimensions_match:
-                    QtWidgets.QApplication.restoreOverrideCursor()
-                    
-                    reply = QtWidgets.QMessageBox.warning(
-                        self,
-                        "Dimensionskonflikt",
-                        "Die gespeicherten Daten haben andere Bilddimensionen als der aktuelle Gleisplan.\n\n"
-                        "Dies kann zu verschobenen Overlays führen.\n\n"
-                        "Möchten Sie trotzdem die gespeicherten Daten laden?\n\n"
-                        "'Ja' = Gespeicherte Daten laden (Overlays könnten verschoben sein)\n"
-                        "'Nein' = Vollständige Neuanalyse durchführen",
-                        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                        QtWidgets.QMessageBox.No
-                    )
-                    
-                    if reply == QtWidgets.QMessageBox.No:
-                        self.on_status("Benutzer wählte Neuanalyse")
-                        self._run_full_analysis()
-                        return
-                    
-                    QtWidgets.QApplication.instance().setOverrideCursor(QtCore.Qt.WaitCursor)
-                
-                # Split df_all into page_dfs
-                for page_num in df_all['page'].unique():
-                    self._page_dfs[int(page_num)] = df_all[df_all['page'] == page_num].copy()
-                
-                QtWidgets.QApplication.restoreOverrideCursor()
-                self.btn_run.setEnabled(True)
-                self.act_run.setEnabled(True)
-                self.menu_act_run.setEnabled(True)
-                
-                self.on_status(" Erfolgreich aus Datenbank geladen!")
-
-                # Display last page as preview
-                if self._page_base_pix:
-                    last_page = max(self._page_base_pix.keys())
-                    self._display_page_preview(last_page)
-
-                # Enable "New Symbol" button now that we have images
-                if hasattr(self, 'act_new_symbol'):
-                    self.act_new_symbol.setEnabled(True)
-                if hasattr(self, 'menu_act_new_symbol'):
-                    self.menu_act_new_symbol.setEnabled(True)
-
-                # Emit to main window (with saved track skeleton)
-                self.processing_done.emit(
-                    df_all,
-                    self._page_base_pix,
-                    self._page_dfs,
-                    self._page_bgr_arrays,
-                    saved_track_skeleton,  # Use saved track skeleton
-                    None,  # No exception
-                    True,  # from_database=True
-                    []  # No uncertain detections from database
-                )
-                
-                self.statusBar().showMessage(" Aus Datenbank geladen - Keine Analyse nötig!", 8000)
-                
+                from database_sqlite import delete_workspace_data
+                delete_workspace_data(layout_name)
+                self.on_status("Alte gespeicherte Daten gelöscht")
             except Exception as e:
-                import traceback
-                traceback.print_exc()
-                
-                QtWidgets.QApplication.restoreOverrideCursor()
-                self.btn_run.setEnabled(True)
-                self.act_run.setEnabled(True)
-                self.menu_act_run.setEnabled(True)
-                
-                QtWidgets.QMessageBox.critical(
-                    self, 
-                    "Ladefehler",
-                    f"Fehler beim Laden aus Datenbank:\n{str(e)}\n\nStarte vollständige Analyse..."
-                )
-                
-                self.on_status(f"Fehler beim Laden: {e}")
-                self.on_status("Fallback: Starte vollständige Analyse...")
-                
-                # Fall back to full analysis
-                self._run_full_analysis()
-        
-        else:
-            #  RUN FULL ANALYSIS (SLOW PATH)
-            if force_rerun:
-                self.on_status(" Neu-Analyse erzwungen")
-                # Delete existing saved data to avoid confusion in workspace_widget
-                try:
-                    from database_sqlite import delete_workspace_data
-                    delete_workspace_data(layout_name)
-                    self.on_status("Alte gespeicherte Daten gelöscht")
-                except Exception as e:
-                    print(f"Could not delete old workspace data: {e}")
-            else:
-                self.on_status("Keine gespeicherten Daten gefunden")
+                print(f"Could not delete old workspace data: {e}")
 
-            self._run_full_analysis()
+        self._run_full_analysis()
+
+    def _cleanup_worker(self):
+        """Clean up worker and disconnect signals to prevent memory leaks and duplicate callbacks"""
+        if hasattr(self, 'worker') and self.worker is not None:
+            try:
+                self.worker.progress.disconnect()
+                self.worker.status.disconnect()
+                self.worker.page_processed.disconnect()
+                self.worker.done.disconnect()
+                self.worker.track_detection_progress.disconnect()
+            except Exception:
+                pass  # Signals may not be connected
+            self.worker = None
 
     def _run_full_analysis(self):
         """Run full YOLO + OCR analysis"""
+        # Clean up any previous worker to prevent memory leaks
+        self._cleanup_worker()
+
         self.on_status("Starte vollständige Analyse (YOLO + OCR)...")
-        
+
         self.started_processing.emit()
         QtWidgets.QApplication.instance().setOverrideCursor(QtCore.Qt.WaitCursor)
         self.btn_run.setEnabled(False)
@@ -1191,103 +1066,110 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.view.fit_to_view()
 
     def _on_worker_page_ready(self, pidx: int, bgr_color: np.ndarray, df_page: pd.DataFrame):
-            # This function now receives the raw np.ndarray
-            
-            # 1. Store the raw array for the AuditingWindow
-            self._page_bgr_arrays[pidx] = bgr_color
-            
-            # 2. Convert to QPixmap for this window's preview
-            rgb = cv2.cvtColor(bgr_color, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb.shape
-            base_img = QtGui.QImage(rgb.data, w, h, ch * w, QtGui.QImage.Format_RGB888).copy()
-            base_pix = QtGui.QPixmap.fromImage(base_img)
+        # This function now receives the raw np.ndarray
 
-            # 3. Store the QPixmap and DataFrame for the AuditingWindow
-            self._page_base_pix[pidx] = base_pix
-            self._page_dfs[pidx] = df_page.copy()
+        # 1. Store the raw array for the AuditingWindow
+        self._page_bgr_arrays[pidx] = bgr_color
 
-            # 4. Update this window's live preview (using the QPixmap)
-            self.current_page = pidx
-            self.scene.blockSignals(True)
-            self.scene.clear()
-            _, _, _, _, scene_bg = self._get_theme_colors()
-            self.scene.setBackgroundBrush(QtGui.QBrush(scene_bg))
-            self.scene.addPixmap(base_pix)
-            self.scene.setSceneRect(QtCore.QRectF(base_pix.rect()))
+        # 2. Convert to QPixmap for this window's preview
+        rgb = cv2.cvtColor(bgr_color, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        base_img = QtGui.QImage(rgb.data, w, h, ch * w, QtGui.QImage.Format_RGB888).copy()
+        base_pix = QtGui.QPixmap.fromImage(base_img)
 
-            pen = QtGui.QPen(QtCore.Qt.green, 2)
-            text_brush = QtGui.QBrush(QtCore.Qt.black)
+        # 3. Store the QPixmap and DataFrame for the AuditingWindow
+        self._page_base_pix[pidx] = base_pix
+        self._page_dfs[pidx] = df_page.copy()
 
-            for _, row in df_page.iterrows():
-                try:
-                    label = f"{row['cls']} {row.get('conf','')}"
-                    if pd.notna(row.get('anchor_text')) and row['anchor_text']:
-                        label += f" | {row['anchor_text']}"
+        # 4. Update this window's live preview (using the QPixmap)
+        self.current_page = pidx
+        self.scene.blockSignals(True)
+        self.scene.clear()
+        _, _, _, _, scene_bg = self._get_theme_colors()
+        self.scene.setBackgroundBrush(QtGui.QBrush(scene_bg))
+        self.scene.addPixmap(base_pix)
+        self.scene.setSceneRect(QtCore.QRectF(base_pix.rect()))
 
-                    if isinstance(row.get("poly"), (list, tuple)) and len(row["poly"]) == 4:
-                        pts = np.array(row["poly"], dtype=np.float32).reshape(4, 2)
-                        it = QtWidgets.QGraphicsPolygonItem(qpolygonf_from_pts(pts))
-                        it.setPen(pen)
-                        it.setBrush(QtCore.Qt.NoBrush)
-                        it.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
-                        it.setData(0, int(row['row_id']))
-                        self.scene.addItem(it)
-                        ti = QtWidgets.QGraphicsSimpleTextItem(label)
-                        ti.setBrush(text_brush)
-                        ti.setPos(float(pts[:, 0].min()), float(pts[:, 1].min()) - 20)
-                        ti.setData(0, int(row['row_id']))
-                        ti.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
-                        self.scene.addItem(ti)
-                        continue
+        pen = QtGui.QPen(QtCore.Qt.green, 2)
+        text_brush = QtGui.QBrush(QtCore.Qt.black)
 
-                    if row['cls'] == 'coordinate':
-                        x1, y1, x2, y2 = row['cx1'], row['cy1'], row['cx2'], row['cy2']
-                    else:
-                        x1, y1, x2, y2 = row['ax1'], row['ay1'], row['ax2'], row['ay2']
-                    if pd.isna(x1) or x1 is None:
-                        continue
+        for _, row in df_page.iterrows():
+            try:
+                label = f"{row['cls']} {row.get('conf','')}"
+                if pd.notna(row.get('anchor_text')) and row['anchor_text']:
+                    label += f" | {row['anchor_text']}"
 
-                    r = QtWidgets.QGraphicsRectItem(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
-                    r.setPen(pen)
-                    r.setBrush(QtCore.Qt.NoBrush)
-                    r.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
-                    r.setData(0, int(row['row_id']))
-                    self.scene.addItem(r)
+                if isinstance(row.get("poly"), (list, tuple)) and len(row["poly"]) == 4:
+                    pts = np.array(row["poly"], dtype=np.float32).reshape(4, 2)
+                    it = QtWidgets.QGraphicsPolygonItem(qpolygonf_from_pts(pts))
+                    it.setPen(pen)
+                    it.setBrush(QtCore.Qt.NoBrush)
+                    it.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
+                    it.setData(0, int(row['row_id']))
+                    self.scene.addItem(it)
                     ti = QtWidgets.QGraphicsSimpleTextItem(label)
                     ti.setBrush(text_brush)
-                    ti.setPos(int(x1), int(y1) - 20)
+                    ti.setPos(float(pts[:, 0].min()), float(pts[:, 1].min()) - 20)
                     ti.setData(0, int(row['row_id']))
                     ti.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
                     self.scene.addItem(ti)
-                except Exception:
                     continue
 
-            self.scene.blockSignals(False)
-            self.view.fit_to_view()
+                if row['cls'] == 'coordinate':
+                    x1, y1, x2, y2 = row['cx1'], row['cy1'], row['cx2'], row['cy2']
+                else:
+                    x1, y1, x2, y2 = row['ax1'], row['ay1'], row['ax2'], row['ay2']
+                if pd.isna(x1) or x1 is None:
+                    continue
 
-            # Enable "New Symbol" button now that we have an image
-            if hasattr(self, 'act_new_symbol'):
-                self.act_new_symbol.setEnabled(True)
-            if hasattr(self, 'menu_act_new_symbol'):
-                self.menu_act_new_symbol.setEnabled(True)
+                r = QtWidgets.QGraphicsRectItem(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+                r.setPen(pen)
+                r.setBrush(QtCore.Qt.NoBrush)
+                r.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
+                r.setData(0, int(row['row_id']))
+                self.scene.addItem(r)
+                ti = QtWidgets.QGraphicsSimpleTextItem(label)
+                ti.setBrush(text_brush)
+                ti.setPos(int(x1), int(y1) - 20)
+                ti.setData(0, int(row['row_id']))
+                ti.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
+                self.scene.addItem(ti)
+            except Exception:
+                continue
+
+        self.scene.blockSignals(False)
+        self.view.fit_to_view()
+
+        # Enable "New Symbol" button now that we have an image
+        if hasattr(self, 'act_new_symbol'):
+            self.act_new_symbol.setEnabled(True)
+        if hasattr(self, 'menu_act_new_symbol'):
+            self.menu_act_new_symbol.setEnabled(True)
 
     def _on_worker_done(self, df_all: pd.DataFrame, page_dfs: Dict[int, pd.DataFrame],
-                            track_skeleton: Optional[np.ndarray], exception: Optional[Exception],
-                            uncertain_detections: list = None):
-            self.on_status("Analyse abgeschlossen.")
-            QtWidgets.QApplication.instance().restoreOverrideCursor()
-            self.btn_run.setEnabled(True)
-            self.act_run.setEnabled(True)
-            self.menu_act_run.setEnabled(True)
-            self.act_stop.setEnabled(False)
-            self.menu_act_stop.setEnabled(False)
+                        track_skeleton: Optional[np.ndarray], exception: Optional[Exception],
+                        uncertain_detections: list = None):
+        # Guard against race condition: if worker was stopped, ignore this callback
+        if not hasattr(self, 'worker') or self.worker is None:
+            return
 
-            # Pass all dictionaries, track_skeleton, and the exception to the next window
-            self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception, False, uncertain_detections or [])  # from_database=False
+        self.on_status("Analyse abgeschlossen.")
+        QtWidgets.QApplication.instance().restoreOverrideCursor()
+        self.btn_run.setEnabled(True)
+        self.act_run.setEnabled(True)
+        self.menu_act_run.setEnabled(True)
+        self.act_stop.setEnabled(False)
+        self.menu_act_stop.setEnabled(False)
+
+        # Pass all dictionaries, track_skeleton, and the exception to the next window
+        self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception, False, uncertain_detections or [])  # from_database=False
 
     def closeEvent(self, e: QtGui.QCloseEvent):
-        if hasattr(self, "worker") and self.worker.isRunning():
-            self.worker.requestInterruption(); self.worker.quit(); self.worker.wait(2000)
+        if hasattr(self, "worker") and self.worker is not None and self.worker.isRunning():
+            self.worker.requestInterruption()
+            self.worker.quit()
+            self.worker.wait(2000)
+        self._cleanup_worker()
         e.accept()
     def _create_toolbar(self):
         """Create streamlined toolbar for Setup window - only essential actions"""
@@ -1504,7 +1386,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         """Show advanced settings dialog"""
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("Erweiterte Einstellungen")
-        dialog.setMinimumWidth(400)
+        dialog.setMinimumWidth(scale_value(400))
         
         layout = QtWidgets.QFormLayout(dialog)
         
@@ -1579,7 +1461,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             
     def on_stop(self):
         """Stop the running analysis"""
-        if hasattr(self, "worker") and self.worker.isRunning():
+        if hasattr(self, "worker") and self.worker is not None and self.worker.isRunning():
             reply = QtWidgets.QMessageBox.question(
                 self,
                 "Analyse stoppen",
@@ -1587,19 +1469,33 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.No
             )
-            
+
             if reply == QtWidgets.QMessageBox.Yes:
                 self.worker.requestInterruption()
                 self.worker.quit()
                 self.worker.wait(2000)
-                
+
+                # Clean up worker and disconnect signals
+                self._cleanup_worker()
+
+                # Clear partial data from interrupted analysis
+                self._page_base_pix.clear()
+                self._page_dfs.clear()
+                self._page_bgr_arrays.clear()
+
+                # Reset page state
+                self.current_page = 0
+
+                # Clear scene
+                self.scene.clear()
+
                 QtWidgets.QApplication.restoreOverrideCursor()
                 self.btn_run.setEnabled(True)
                 self.act_run.setEnabled(True)
                 self.menu_act_run.setEnabled(True)
                 self.act_stop.setEnabled(False)
                 self.menu_act_stop.setEnabled(False)
-                
+
                 self.on_status("Analyse abgebrochen")
                 self.statusBar().showMessage("Analyse wurde abgebrochen")
     def _update_run_button_state(self):
@@ -1958,6 +1854,15 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
     def _on_load_saved_workspace(self, layout_name: str):
         """Handle loading a saved workspace from database."""
+        # Check if analysis is currently running
+        if hasattr(self, 'worker') and self.worker is not None and self.worker.isRunning():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Analyse läuft",
+                "Bitte stoppen Sie zuerst die laufende Analyse."
+            )
+            return
+
         try:
             from database_sqlite import get_workspace_data
 
@@ -1972,7 +1877,11 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 )
                 return
 
-            workspace_data, track_skeleton, image_dimensions = result
+            # Handle both old format (3 values) and new format (5 values)
+            if len(result) == 3:
+                workspace_data, track_skeleton, image_dimensions = result
+            else:
+                workspace_data, track_skeleton, image_dimensions, _, _ = result
 
             # Emit signal to open in AuditingWindow with saved data
             self.on_status(f"Öffne Arbeitsbereich mit {len(workspace_data)} Erkennungen...")
@@ -2066,7 +1975,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                     doc = fitz.open(file_path)
                     page = doc[0]
                     pix = page.get_pixmap(dpi=500)  # Match main pipeline DPI
-                    import numpy as np
                     img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
                     if pix.n == 4:  # RGBA
                         current_page_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)

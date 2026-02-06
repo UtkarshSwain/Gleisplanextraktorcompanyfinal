@@ -9,7 +9,7 @@ from typing import List, Dict, Tuple, Optional, Any
 import os
 import re
 import math
-from utils.dpi_utils import get_adaptive_window_size, center_window
+from utils.dpi_utils import get_adaptive_window_size, center_window, scale_value
 from ui.themes import DARK_QSS,LIGHT_QSS
 import pandas as pd
 import numpy as np
@@ -553,7 +553,6 @@ class AuditingWindow(QtWidgets.QMainWindow):
                 # For PDF, load the first page
                 try:
                     import fitz
-                    import numpy as np
                     doc = fitz.open(file_path)
                     page = doc[0]
                     pix = page.get_pixmap(dpi=500)  # Match main pipeline DPI
@@ -2035,9 +2034,9 @@ class AuditingWindow(QtWidgets.QMainWindow):
         # Icon
         icon_label = QtWidgets.QLabel("")
         icon_label.setAlignment(QtCore.Qt.AlignCenter)
-        icon_label.setStyleSheet("font-size: 48px;")
+        icon_label.setStyleSheet(f"font-size: {scale_value(48)}px;")
         placeholder_layout.addWidget(icon_label)
-        
+
         # Message
         message_label = QtWidgets.QLabel(
             f"Workspace '{os.path.basename(workspace.layout_name)}'\n"
@@ -2046,13 +2045,13 @@ class AuditingWindow(QtWidgets.QMainWindow):
             f"rechten Maustaste auf diesen Tab, um es zurückzuholen."
         )
         message_label.setAlignment(QtCore.Qt.AlignCenter)
-        message_label.setStyleSheet("font-size: 14px; color: gray;")
+        message_label.setStyleSheet(f"font-size: {scale_value(14)}px; color: gray;")
         message_label.setWordWrap(True)
         placeholder_layout.addWidget(message_label)
-        
+
         # Redock button
         redock_btn = QtWidgets.QPushButton("⬅ Zurück ins Hauptfenster")
-        redock_btn.setMaximumWidth(250)
+        redock_btn.setMaximumWidth(scale_value(250))
         redock_btn.clicked.connect(lambda: self._redock_workspace(tab_index))
         placeholder_layout.addWidget(redock_btn, alignment=QtCore.Qt.AlignCenter)
         

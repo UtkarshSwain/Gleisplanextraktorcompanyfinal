@@ -16,7 +16,8 @@ from PyQt5.QtWidgets import (
     QGroupBox, QFormLayout, QListWidget, QListWidgetItem,
     QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsPixmapItem,
     QGraphicsTextItem, QMessageBox, QProgressBar, QTabWidget, QWidget, QSlider,
-    QTableWidget, QTableWidgetItem, QHeaderView, QSplitter
+    QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QGridLayout, QScrollArea,
+    QFileDialog, QInputDialog, QMainWindow, QSizePolicy
 )
 from typing import List, Dict, Optional, Tuple
 import numpy as np
@@ -196,22 +197,52 @@ class NewSymbolDialog(QDialog):
         self.images: List[np.ndarray] = [image]  # List of all loaded images
         self.current_image_index = 0
         self.examples: List[Tuple[int, int, int, int]] = []  # List of (x1, y1, x2, y2) for CURRENT image
-        self.all_crops: List[np.ndarray] = []  # Crops from ALL images
+        self.all_crops: List[Tuple[np.ndarray, Tuple[int, int, int, int]]] = []  # (crop, bbox) from ALL images
         self.example_items: List[List] = []  # List of [rect, number_text, delete_btn] for each example
         self.text_region: Optional[Tuple[int, int, int, int]] = None  # (x1, y1, x2, y2) for text area
         self.text_region_item: Optional[QGraphicsRectItem] = None
+        self.text_region_offset = None  # Offset data for text region relative to symbol
         self._drawing_text_region = False  # Flag for text region drawing mode
 
         # For pop-out graphics window (Auskoppeln/Einkoppeln)
         self.graphics_window = None
         self.graphics_placeholder = None
         self.left_layout = None  # Will be set in _build_ui
+        self._pixmap_item = None  # Track current background pixmap for replacement
 
         self._build_ui()
         self._display_image()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)  # Tighter margins to reduce empty space
+
+        # Stylesheet for checkboxes to be visible on dark themes
+        checkbox_style = """
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 2px solid #888;
+                border-radius: 3px;
+                background: #333;
+            }
+            QCheckBox::indicator:checked {
+                background: #4CAF50;
+                border-color: #4CAF50;
+            }
+            QCheckBox::indicator:checked:disabled {
+                background: #666;
+                border-color: #555;
+            }
+            QCheckBox::indicator:disabled {
+                border-color: #555;
+                background: #444;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #aaa;
+            }
+        """
+        self.setStyleSheet(checkbox_style)
 
         # Instructions
         instructions = QLabel(
@@ -287,7 +318,7 @@ class NewSymbolDialog(QDialog):
 
         # Zoom percentage display
         self.zoom_label = QLabel("Zoom: 100%")
-        self.zoom_label.setMinimumWidth(100)
+        self.zoom_label.setMinimumWidth(scale_value(100))
         zoom_toolbar.addWidget(self.zoom_label)
 
         zoom_toolbar.addWidget(QLabel("|"))
@@ -327,10 +358,16 @@ class NewSymbolDialog(QDialog):
 
         splitter.addWidget(left_widget)
 
-        # Right: Settings
+        # Right: Settings - with scroll area for smaller screens
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        right_scroll.setMinimumWidth(scale_value(320))
+        right_scroll.setMaximumWidth(scale_value(450))
+
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-        right_widget.setMaximumWidth(400)
+        right_layout.setSpacing(scale_value(8))
 
         # Symbol name
         name_group = QGroupBox("Symbol-Name")
@@ -374,34 +411,36 @@ class NewSymbolDialog(QDialog):
         # Multi-select text positions with checkboxes
         text_pos_group = QGroupBox("Text-Position (mehrere möglich)")
         text_pos_layout = QVBoxLayout(text_pos_group)
-        text_pos_layout.setSpacing(2)
+        text_pos_layout.setSpacing(scale_value(2))
 
         # Inside option (for text inside symbol like speed signs)
         self.text_pos_inside = QCheckBox("innen (im Symbol)")
         text_pos_layout.addWidget(self.text_pos_inside)
 
-        # Cardinal directions row
-        text_cardinal_layout = QHBoxLayout()
+        # Cardinal directions - 2x2 grid
+        text_cardinal_layout = QGridLayout()
+        text_cardinal_layout.setSpacing(scale_value(4))
         self.text_pos_above = QCheckBox("oben")
         self.text_pos_below = QCheckBox("unten")
         self.text_pos_left = QCheckBox("links")
         self.text_pos_right = QCheckBox("rechts")
-        text_cardinal_layout.addWidget(self.text_pos_above)
-        text_cardinal_layout.addWidget(self.text_pos_below)
-        text_cardinal_layout.addWidget(self.text_pos_left)
-        text_cardinal_layout.addWidget(self.text_pos_right)
+        text_cardinal_layout.addWidget(self.text_pos_above, 0, 0)
+        text_cardinal_layout.addWidget(self.text_pos_below, 0, 1)
+        text_cardinal_layout.addWidget(self.text_pos_left, 1, 0)
+        text_cardinal_layout.addWidget(self.text_pos_right, 1, 1)
         text_pos_layout.addLayout(text_cardinal_layout)
 
-        # Diagonal directions row
-        text_diagonal_layout = QHBoxLayout()
-        self.text_pos_above_left = QCheckBox("oben-links")
-        self.text_pos_above_right = QCheckBox("oben-rechts")
-        self.text_pos_below_left = QCheckBox("unten-links")
-        self.text_pos_below_right = QCheckBox("unten-rechts")
-        text_diagonal_layout.addWidget(self.text_pos_above_left)
-        text_diagonal_layout.addWidget(self.text_pos_above_right)
-        text_diagonal_layout.addWidget(self.text_pos_below_left)
-        text_diagonal_layout.addWidget(self.text_pos_below_right)
+        # Diagonal directions - 2x2 grid
+        text_diagonal_layout = QGridLayout()
+        text_diagonal_layout.setSpacing(scale_value(4))
+        self.text_pos_above_left = QCheckBox("o-links")
+        self.text_pos_above_right = QCheckBox("o-rechts")
+        self.text_pos_below_left = QCheckBox("u-links")
+        self.text_pos_below_right = QCheckBox("u-rechts")
+        text_diagonal_layout.addWidget(self.text_pos_above_left, 0, 0)
+        text_diagonal_layout.addWidget(self.text_pos_above_right, 0, 1)
+        text_diagonal_layout.addWidget(self.text_pos_below_left, 1, 0)
+        text_diagonal_layout.addWidget(self.text_pos_below_right, 1, 1)
         text_pos_layout.addLayout(text_diagonal_layout)
 
         # Store all text position checkboxes
@@ -433,7 +472,7 @@ class NewSymbolDialog(QDialog):
 
         # Delete text region button
         self.btn_delete_text_region = QPushButton("")
-        self.btn_delete_text_region.setFixedWidth(30)
+        self.btn_delete_text_region.setFixedWidth(scale_value(30))
         self.btn_delete_text_region.setToolTip("Text-Bereich löschen und neu zeichnen")
         self.btn_delete_text_region.setEnabled(False)
         self.btn_delete_text_region.clicked.connect(self._delete_text_region)
@@ -480,7 +519,7 @@ class NewSymbolDialog(QDialog):
         # Multi-select coordinate positions with checkboxes
         coord_pos_group = QGroupBox("Koordinaten-Position")
         coord_pos_layout = QVBoxLayout(coord_pos_group)
-        coord_pos_layout.setSpacing(2)
+        coord_pos_layout.setSpacing(scale_value(2))
 
         # "Any" checkbox (exclusive - unchecks others when selected)
         self.coord_pos_any = QCheckBox("beliebig (alle Richtungen)")
@@ -493,28 +532,30 @@ class NewSymbolDialog(QDialog):
         sep_line.setStyleSheet("color: gray;")
         coord_pos_layout.addWidget(sep_line)
 
-        # Cardinal directions row
-        cardinal_layout = QHBoxLayout()
+        # Cardinal directions - 2x2 grid
+        cardinal_layout = QGridLayout()
+        cardinal_layout.setSpacing(scale_value(4))
         self.coord_pos_above = QCheckBox("oben")
         self.coord_pos_below = QCheckBox("unten")
         self.coord_pos_left = QCheckBox("links")
         self.coord_pos_right = QCheckBox("rechts")
-        cardinal_layout.addWidget(self.coord_pos_above)
-        cardinal_layout.addWidget(self.coord_pos_below)
-        cardinal_layout.addWidget(self.coord_pos_left)
-        cardinal_layout.addWidget(self.coord_pos_right)
+        cardinal_layout.addWidget(self.coord_pos_above, 0, 0)
+        cardinal_layout.addWidget(self.coord_pos_below, 0, 1)
+        cardinal_layout.addWidget(self.coord_pos_left, 1, 0)
+        cardinal_layout.addWidget(self.coord_pos_right, 1, 1)
         coord_pos_layout.addLayout(cardinal_layout)
 
-        # Diagonal directions row
-        diagonal_layout = QHBoxLayout()
-        self.coord_pos_above_left = QCheckBox("oben-links")
-        self.coord_pos_above_right = QCheckBox("oben-rechts")
-        self.coord_pos_below_left = QCheckBox("unten-links")
-        self.coord_pos_below_right = QCheckBox("unten-rechts")
-        diagonal_layout.addWidget(self.coord_pos_above_left)
-        diagonal_layout.addWidget(self.coord_pos_above_right)
-        diagonal_layout.addWidget(self.coord_pos_below_left)
-        diagonal_layout.addWidget(self.coord_pos_below_right)
+        # Diagonal directions - 2x2 grid
+        diagonal_layout = QGridLayout()
+        diagonal_layout.setSpacing(scale_value(4))
+        self.coord_pos_above_left = QCheckBox("o-links")
+        self.coord_pos_above_right = QCheckBox("o-rechts")
+        self.coord_pos_below_left = QCheckBox("u-links")
+        self.coord_pos_below_right = QCheckBox("u-rechts")
+        diagonal_layout.addWidget(self.coord_pos_above_left, 0, 0)
+        diagonal_layout.addWidget(self.coord_pos_above_right, 0, 1)
+        diagonal_layout.addWidget(self.coord_pos_below_left, 1, 0)
+        diagonal_layout.addWidget(self.coord_pos_below_right, 1, 1)
         coord_pos_layout.addLayout(diagonal_layout)
 
         # Store all position checkboxes for easy access
@@ -568,16 +609,15 @@ class NewSymbolDialog(QDialog):
         preview_layout = QVBoxLayout(preview_group)
 
         # Use a scroll area with custom widgets for delete buttons
-        from PyQt5.QtWidgets import QScrollArea, QFrame
         self.preview_scroll = QScrollArea()
         self.preview_scroll.setWidgetResizable(True)
-        self.preview_scroll.setMaximumHeight(180)
+        self.preview_scroll.setMaximumHeight(scale_value(180))
         self.preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         self.preview_container = QWidget()
         self.preview_flow_layout = QHBoxLayout(self.preview_container)
         self.preview_flow_layout.setAlignment(Qt.AlignLeft)
-        self.preview_flow_layout.setSpacing(5)
+        self.preview_flow_layout.setSpacing(scale_value(5))
         self.preview_scroll.setWidget(self.preview_container)
 
         preview_layout.addWidget(self.preview_scroll)
@@ -592,10 +632,12 @@ class NewSymbolDialog(QDialog):
 
         right_layout.addStretch()
 
-        splitter.addWidget(right_widget)
-        splitter.setSizes([800, 400])
+        # Set up scroll area
+        right_scroll.setWidget(right_widget)
+        splitter.addWidget(right_scroll)
+        splitter.setSizes([800, 450])
 
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)  # Stretch factor 1 so splitter expands to fill space
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -614,20 +656,25 @@ class NewSymbolDialog(QDialog):
 
     def _display_image(self):
         """Display the image in the graphics view."""
+        # Remove old pixmap if exists (prevents stacking when switching images)
+        if self._pixmap_item is not None:
+            self.scene.removeItem(self._pixmap_item)
+            self._pixmap_item = None
+
         # Convert numpy to QPixmap
         if len(self.image.shape) == 3:
             h, w, c = self.image.shape
             bytes_per_line = 3 * w
             # Convert BGR to RGB
             rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
-            q_img = QtGui.QImage(rgb.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888)
+            q_img = QtGui.QImage(rgb.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888).copy()
         else:
             h, w = self.image.shape
             bytes_per_line = w
-            q_img = QtGui.QImage(self.image.data, w, h, bytes_per_line, QtGui.QImage.Format_Grayscale8)
+            q_img = QtGui.QImage(self.image.data, w, h, bytes_per_line, QtGui.QImage.Format_Grayscale8).copy()
 
         pixmap = QtGui.QPixmap.fromImage(q_img)
-        self.scene.addPixmap(pixmap)
+        self._pixmap_item = self.scene.addPixmap(pixmap)
         self.scene.setSceneRect(QtCore.QRectF(pixmap.rect()))
         self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
 
@@ -679,7 +726,7 @@ class NewSymbolDialog(QDialog):
         # Also save the crop to all_crops (for multi-image support)
         x1_i, y1_i, x2_i, y2_i = int(x1), int(y1), int(x2), int(y2)
         crop = self.image[y1_i:y2_i, x1_i:x2_i].copy()
-        self.all_crops.append(crop)
+        self.all_crops.append((crop, bbox))  # Store both crop and bbox for text region reference
 
         example_index = len(self.all_crops) - 1  # Index of this example
 
@@ -730,23 +777,23 @@ class NewSymbolDialog(QDialog):
             if child.widget():
                 child.widget().deleteLater()
 
-        for i, crop in enumerate(self.all_crops):
+        for i, (crop, _) in enumerate(self.all_crops):
             h_px, w_px = crop.shape[:2]
 
             # Create a container widget for each example
             item_widget = QWidget()
             item_layout = QVBoxLayout(item_widget)
-            item_layout.setContentsMargins(2, 2, 2, 2)
-            item_layout.setSpacing(2)
+            item_layout.setContentsMargins(scale_value(2), scale_value(2), scale_value(2), scale_value(2))
+            item_layout.setSpacing(scale_value(2))
 
             # Convert crop to QPixmap
             if len(crop.shape) == 3:
                 h, w, c = crop.shape
                 rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                q_img = QtGui.QImage(rgb.data, w, h, 3 * w, QtGui.QImage.Format_RGB888)
+                q_img = QtGui.QImage(rgb.data, w, h, 3 * w, QtGui.QImage.Format_RGB888).copy()
             else:
                 h, w = crop.shape
-                q_img = QtGui.QImage(crop.data, w, h, w, QtGui.QImage.Format_Grayscale8)
+                q_img = QtGui.QImage(crop.data, w, h, w, QtGui.QImage.Format_Grayscale8).copy()
 
             pixmap = QtGui.QPixmap.fromImage(q_img).scaled(
                 60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation
@@ -761,7 +808,7 @@ class NewSymbolDialog(QDialog):
 
             # Info and delete button row
             info_row = QHBoxLayout()
-            info_row.setSpacing(2)
+            info_row.setSpacing(scale_value(2))
 
             # Number label
             num_label = QLabel(f"#{i+1}")
@@ -770,7 +817,7 @@ class NewSymbolDialog(QDialog):
 
             # Delete button - bright red background with white X for visibility
             delete_btn = QPushButton("X")
-            delete_btn.setFixedSize(18, 18)
+            delete_btn.setFixedSize(scale_value(18), scale_value(18))
             delete_btn.setStyleSheet(
                 "QPushButton { color: white; font-weight: bold; font-size: 12px; "
                 "border: 1px solid #cc0000; border-radius: 9px; background: #ff4444; }"
@@ -790,7 +837,7 @@ class NewSymbolDialog(QDialog):
             size_label.setAlignment(Qt.AlignCenter)
             item_layout.addWidget(size_label)
 
-            item_widget.setFixedWidth(75)
+            item_widget.setFixedWidth(scale_value(75))
             self.preview_flow_layout.addWidget(item_widget)
 
     def _update_ui_state(self):
@@ -811,7 +858,7 @@ class NewSymbolDialog(QDialog):
 
         # Check for size warnings using all_crops
         warnings = []
-        for i, crop in enumerate(self.all_crops):
+        for i, (crop, _) in enumerate(self.all_crops):
             h, w = crop.shape[:2]
             if w < 20 or h < 20:
                 warnings.append(f"Beispiel #{i+1} ist sehr klein ({w}x{h}px)")
@@ -855,6 +902,22 @@ class NewSymbolDialog(QDialog):
             for item in items:
                 self.scene.removeItem(item)
         self.example_items.clear()
+
+        # Also clear text region
+        if self.text_region_item:
+            self.scene.removeItem(self.text_region_item)
+            self.text_region_item = None
+        # Remove TEXT label if exists
+        for item in list(self.scene.items()):
+            if isinstance(item, QGraphicsTextItem) and item.toPlainText() == "TEXT":
+                self.scene.removeItem(item)
+                break
+        self.text_region = None
+        self.text_region_offset = None
+        self.text_region_label.setText("Kein Text-Bereich definiert")
+        self.text_region_label.setStyleSheet("color: gray; font-style: italic;")
+        self.btn_delete_text_region.setEnabled(False)
+
         self._update_preview()
         self._update_ui_state()
 
@@ -866,8 +929,8 @@ class NewSymbolDialog(QDialog):
         # Remove from all_crops
         self.all_crops.pop(index)
 
-        # Remove from examples if it's from current image
-        # Note: We track which examples belong to current image
+        # Remove from examples and graphics items if it's from current image
+        # Note: example_items is aligned with examples (current image only), not all_crops
         current_img_count = len(self.examples)
         items_before_current = len(self.all_crops) - current_img_count + 1
 
@@ -875,12 +938,11 @@ class NewSymbolDialog(QDialog):
             local_index = index - items_before_current
             if local_index < len(self.examples):
                 self.examples.pop(local_index)
-
-        # Remove graphics items if they exist for this index
-        if index < len(self.example_items):
-            items = self.example_items.pop(index)
-            for item in items:
-                self.scene.removeItem(item)
+            # Remove graphics items using local_index (not global index)
+            if local_index < len(self.example_items):
+                items = self.example_items.pop(local_index)
+                for item in items:
+                    self.scene.removeItem(item)
 
         # Update numbers on remaining items
         self._renumber_examples()
@@ -889,19 +951,22 @@ class NewSymbolDialog(QDialog):
 
     def _renumber_examples(self):
         """Renumber all example labels after deletion."""
+        # Calculate offset: how many items from previous images are in all_crops
+        # example_items only contains current image items, aligned with self.examples
+        items_from_prev_images = len(self.all_crops) - len(self.examples)
+
         for i, items in enumerate(self.example_items):
+            global_index = items_from_prev_images + i  # Convert local to global index
             if len(items) >= 2:
-                # items[1] is the number text
+                # items[1] is the number text - show global number
                 num_text = items[1]
-                num_text.setPlainText(str(i + 1))
-                # Update delete button data
+                num_text.setPlainText(str(global_index + 1))
+                # Update delete button data with global index
                 if len(items) >= 3:
-                    items[2].setData(0, i)
+                    items[2].setData(0, global_index)
 
     def _load_another_image(self):
         """Load another Gleisplan image to collect more symbol examples."""
-        from PyQt5.QtWidgets import QFileDialog, QMessageBox
-
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Weiteren Gleisplan laden",
@@ -929,7 +994,6 @@ class NewSymbolDialog(QDialog):
                 # If multiple pages, ask which one
                 page_num = 0
                 if len(doc) > 1:
-                    from PyQt5.QtWidgets import QInputDialog
                     page_num, ok = QInputDialog.getInt(
                         self, "Seite wählen",
                         f"Dokument hat {len(doc)} Seiten. Welche Seite? (1-{len(doc)})",
@@ -947,7 +1011,6 @@ class NewSymbolDialog(QDialog):
                 pix = page.get_pixmap(matrix=mat)
 
                 # Convert to numpy array
-                import numpy as np
                 new_image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
 
                 # Convert RGB to BGR for OpenCV
@@ -986,6 +1049,21 @@ class NewSymbolDialog(QDialog):
                 self.scene.removeItem(item)
         self.example_items.clear()
 
+        # Clear text region (it was relative to symbols on the previous image)
+        if self.text_region_item:
+            self.scene.removeItem(self.text_region_item)
+            self.text_region_item = None
+        # Remove TEXT label if exists
+        for item in list(self.scene.items()):
+            if isinstance(item, QGraphicsTextItem) and item.toPlainText() == "TEXT":
+                self.scene.removeItem(item)
+                break
+        self.text_region = None
+        self.text_region_offset = None
+        self.text_region_label.setText("Kein Text-Bereich definiert")
+        self.text_region_label.setStyleSheet("color: gray; font-style: italic;")
+        self.btn_delete_text_region.setEnabled(False)
+
         # Add new image
         self.images.append(new_image)
         self.current_image_index = len(self.images) - 1
@@ -1002,8 +1080,6 @@ class NewSymbolDialog(QDialog):
             self.graphics_window.raise_()
             self.graphics_window.activateWindow()
             return
-
-        from PyQt5.QtWidgets import QMainWindow, QVBoxLayout, QWidget, QPushButton, QSizePolicy
 
         # Store view's current size and stretch for restoring later
         self._view_size = self.view.size()
@@ -1313,40 +1389,32 @@ class NewSymbolDialog(QDialog):
             return
 
         try:
-            # Use all_crops collected from all images
-            crops = self.all_crops
+            # Use all_crops collected from all images - extract just the crops (not bboxes)
+            crops = [crop for crop, _ in self.all_crops]
             print(f"[DEBUG] Using {len(crops)} crops from {len(self.images)} image(s)")
 
-            # Get settings
+            # Get selected detection method
+            # TODO: Pass method to detector when supported (currently detector auto-selects)
             method_map = {
                 "Automatisch": "auto",
                 "Template": "template",
                 "Kontur": "contour",
                 "Kreis": "circle",
             }
-            position_map = {
-                "unten": "below",
-                "oben": "above",
-                "links": "left",
-                "rechts": "right",
-                "innen": "inside",
-                "beliebig (alle Richtungen)": "any",
-                "unten-rechts": "below_right",
-                "unten-links": "below_left",
-                "oben-rechts": "above_right",
-                "oben-links": "above_left",
-            }
-
-            selected_method = self.method_combo.currentText()
-            print(f"[DEBUG] Selected method: {selected_method}")
+            selected_method = method_map.get(self.method_combo.currentText(), "auto")
+            print(f"[DEBUG] Selected method: {selected_method} (note: not yet passed to detector)")
 
             # Calculate text region offset if defined
             text_region_offset = None
-            if self.text_region and self.examples:
-                # Calculate offset relative to first symbol's center
-                sym_x1, sym_y1, sym_x2, sym_y2 = self.examples[0]
+            if self.text_region and len(self.all_crops) > 0:
+                # Use first crop's bbox (from first image) for consistent reference
+                # This ensures ref_sym_width/height match the first template used in detection
+                _, first_bbox = self.all_crops[0]
+                sym_x1, sym_y1, sym_x2, sym_y2 = first_bbox
                 sym_cx = (sym_x1 + sym_x2) / 2
                 sym_cy = (sym_y1 + sym_y2) / 2
+                sym_w = sym_x2 - sym_x1
+                sym_h = sym_y2 - sym_y1
 
                 txt_x1, txt_y1, txt_x2, txt_y2 = self.text_region
                 txt_cx = (txt_x1 + txt_x2) / 2
@@ -1363,8 +1431,27 @@ class NewSymbolDialog(QDialog):
                     "dy": dy,  # Y offset from symbol center
                     "width": tw,  # Width of text region
                     "height": th,  # Height of text region
+                    # Reference symbol size for scale compensation
+                    "ref_sym_width": int(sym_w),
+                    "ref_sym_height": int(sym_h),
                 }
                 print(f"[DEBUG] Text region offset: {text_region_offset}")
+
+            # Validate custom regex pattern if used
+            if self.has_text_check.isChecked() and self.text_pattern_combo.currentText() == "Benutzerdefiniert...":
+                custom_pattern = self.text_pattern_input.text().strip()
+                if custom_pattern:
+                    try:
+                        import re
+                        re.compile(custom_pattern)
+                    except re.error as e:
+                        QMessageBox.warning(
+                            self,
+                            "Ungültiges Regex-Muster",
+                            f"Das benutzerdefinierte Regex-Muster ist ungültig:\n\n{e}\n\n"
+                            "Bitte korrigieren Sie das Muster oder wählen Sie ein vordefiniertes."
+                        )
+                        return
 
             # Create symbol using detector
             from core.symbol_detector import NewSymbolDetector
@@ -1388,6 +1475,7 @@ class NewSymbolDialog(QDialog):
                 links_to_coordinate=self.links_coord_check.isChecked(),
                 coordinate_position=coord_positions,  # Now a list
                 similarity_threshold=self.threshold_slider.value() / 100.0,
+                max_link_distance=self.max_distance_spin.value(),
             )
 
             print(f"[DEBUG] Symbol '{name}' saved successfully!")
@@ -1457,9 +1545,11 @@ class UnknownSymbolsDialog(QDialog):
             if crop is not None:
                 h, w = crop.shape[:2]
                 if len(crop.shape) == 2:
-                    q_img = QtGui.QImage(crop.data, w, h, w, QtGui.QImage.Format_Grayscale8)
+                    q_img = QtGui.QImage(crop.data, w, h, w, QtGui.QImage.Format_Grayscale8).copy()
                 else:
-                    q_img = QtGui.QImage(crop.data, w, h, 3*w, QtGui.QImage.Format_RGB888)
+                    # Convert BGR to RGB for QImage
+                    rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                    q_img = QtGui.QImage(rgb_crop.data, w, h, 3*w, QtGui.QImage.Format_RGB888).copy()
                 pixmap = QtGui.QPixmap.fromImage(q_img).scaled(50, 50, Qt.KeepAspectRatio)
                 label = QLabel()
                 label.setPixmap(pixmap)

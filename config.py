@@ -19,10 +19,11 @@ import os
 
 # External tool paths (set to None to use system PATH, or specify full path)
 # Example for company laptop:
-#   TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-#   POPPLER_PATH = r"C:\Program Files\poppler-24.02.0\Library\bin"
 TESSERACT_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\tesseract\tesseract.exe"
+ 
 POPPLER_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\poppler-25.12.0\Library\bin"
+#TESSERACT_PATH = None
+#POPPLER_PATH = None
 
 # ============================================================================
 # DEBUG FLAGS - Set to True to enable debug output for specific modules
@@ -185,7 +186,7 @@ CLASS_THRESH = {
     "sverbinder": 0.50,          # ↓ Very confident class
     "prellblock": 0.30,          # ↓ Very confident class
     "endeweichen": 0.28,         # ↓ Excellent performer
-    "weichengruppeende": 0.32,   # ↓ Very good
+    "weichengruppeende": 0.6,   # ↓ Very good
     
     # STRONG PERFORMERS (mAP50: 0.975-0.99) - Moderate-low thresholds
     "signal": 0.80,              # ↓ TTA will help with edge cases
@@ -200,7 +201,7 @@ CLASS_THRESH = {
     "gks_gesteuert": 0.7,        # Lower performer
     
     # Alias
-    "weichenende": 0.4,
+    "weichenende": 0.7,
 }
 
 # ============================================================================
@@ -260,10 +261,12 @@ LINK_RULES = {
     "isolierstoß": dict(mode="above", tilted_ok=True),
     "haltepunkt": dict(mode="either"),
     "sverbinder": dict(mode="above"),
-    "weichenende": dict(mode="either", dx_multiplier=3.0, prefer_horizontal=True),
+    "weichenende": dict(mode="either", dx_multiplier=3.0, prefer_horizontal=True,
+                        fallback_dy_steps=[1.5, 2.0, 2.5]),
     "prellblock": dict(mode="right_or_below", dx_multiplier=2.0, prefer_horizontal=True),
     "haltetafel": dict(mode="either", dx_multiplier=2.0),
-    "weichengruppeende": dict(mode="either", dx_multiplier=4.0, prefer_horizontal=True, search_left=True)
+    "weichengruppeende": dict(mode="either", dx_multiplier=4.0, prefer_horizontal=True,
+                              search_left=True, fallback_dy_steps=[1.5, 2.0, 2.5, 3.0])
 }
 
 
