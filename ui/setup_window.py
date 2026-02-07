@@ -519,7 +519,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 border: 2px solid #1a252f;
                 border-radius: 6px;
                 padding: 8px;
-                font-size: 9pt;
+                font-size: 18pt;
             }
         """)
         main_layout.addWidget(self.log)

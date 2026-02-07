@@ -86,6 +86,12 @@ TILE_HALO = 320              # ↑ Increased to 320px for maximum context
 OBB_ONLY = True
 ZOOM_SIZE = 2048
 
+# ============================================================================
+# LEGEND STRIP EXCLUSION - Exclude right edge from detection
+# ============================================================================
+EXCLUDE_LEGEND_STRIP = True  # Master toggle for legend exclusion
+LEGEND_STRIP_WIDTH_PERCENT = 12  # Percentage of width to exclude from right edge
+
 # OCR Threading - CPU optimized
 MAX_OCR_WORKERS = max(2, min(16, (os.cpu_count() or 4)))  # Use more CPU cores
 
@@ -190,7 +196,7 @@ CLASS_THRESH = {
     "isolierstoß": 0.09,         # ↓ Was 0.00! Now reasonable
     "haltetafel": 0.55,          # Moderate (6 background FPs)
     "haltepunkt": 0.32,          # ↓ Good performer
-    "gks_festkodiert": 0.88,      # ↓ Was 0.5 (h100_color_v1 model: mAP50=0.985)
+    "gks_festkodiert": 0.85,      # ↓ Was 0.5 (h100_color_v1 model: mAP50=0.985)
 
     # CLASSES NEEDING ATTENTION - Still strict
     "coordinate": 0.10,          # ↑ Slightly higher (35 background FPs!)

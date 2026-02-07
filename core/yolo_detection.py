@@ -2,7 +2,7 @@ from typing import List, Dict, Tuple
 import numpy as np
 import cv2
 from ultralytics import YOLO
-from config import TILE_SIZE, OVERLAP_PCT, PRED_IMGSZ, CLASS_THRESH, CLASSES,TILE_HALO, DEBUG_ANGLE_ROUTING, canon_name, OBB_ONLY, NMS_THRESHOLDS, UNCERTAIN_THRESH_MULTIPLIER, MIN_UNCERTAIN_THRESH, MIN_UNCERTAIN_THRESH_DEFAULT
+from config import TILE_SIZE, OVERLAP_PCT, PRED_IMGSZ, CLASS_THRESH, CLASSES, TILE_HALO, DEBUG_ANGLE_ROUTING, canon_name, OBB_ONLY, NMS_THRESHOLDS, UNCERTAIN_THRESH_MULTIPLIER, MIN_UNCERTAIN_THRESH, MIN_UNCERTAIN_THRESH_DEFAULT, EXCLUDE_LEGEND_STRIP, LEGEND_STRIP_WIDTH_PERCENT
 import math
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PIL import Image, ImageFile
@@ -253,6 +253,12 @@ def run_combined_detection(model, page_bgr: np.ndarray, detect_custom: bool = Tr
         det['is_new_symbol'] = False  # Alias for consistency
         det['detection_source'] = 'YOLO'
 
+    # Filter detections in legend strip (right edge) if enabled - apply EARLY to all paths
+    if EXCLUDE_LEGEND_STRIP:
+        W = page_bgr.shape[1]
+        threshold_x = W * (1.0 - LEGEND_STRIP_WIDTH_PERCENT / 100.0)
+        yolo_dets = [d for d in yolo_dets if d['cx'] < threshold_x]
+
     if not detect_custom:
         return yolo_dets
 
@@ -306,6 +312,12 @@ def run_combined_detection(model, page_bgr: np.ndarray, detect_custom: bool = Tr
                                 det.update(linked[0])
                     linked_custom_dets.append(det)
                 custom_dets = linked_custom_dets
+
+        # Filter custom detections in legend strip (yolo_dets already filtered above)
+        if EXCLUDE_LEGEND_STRIP and custom_dets:
+            W = page_bgr.shape[1]
+            threshold_x = W * (1.0 - LEGEND_STRIP_WIDTH_PERCENT / 100.0)
+            custom_dets = [d for d in custom_dets if d['cx'] < threshold_x]
 
         # Combine results
         all_dets = yolo_dets + custom_dets

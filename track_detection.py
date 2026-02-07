@@ -138,7 +138,7 @@ def detect_main_tracks(
 
         h_px, w_px = gray_image.shape
         if progress_callback:
-            progress_callback(f"[track] Image size: {w_px} x {h_px} pixels")
+            progress_callback("Gleiserkennung läuft...")
     else:
         # PDF mode
         if pdf_path is None:
@@ -153,7 +153,7 @@ def detect_main_tracks(
         h_px = int(page.rect.height * scale + 0.5)
 
         if progress_callback:
-            progress_callback(f"[track] Page size @ {dpi} DPI: {w_px} x {h_px} pixels")
+            progress_callback("Gleiserkennung läuft...")
 
     # Pass 1: Build thick-line mask
     mask = np.zeros((h_px, w_px), dtype=np.uint8)
@@ -191,21 +191,14 @@ def detect_main_tracks(
             )
             
             tile_count += 1
-            if progress_callback and tile_count % 10 == 0:
-                progress_callback(f"[track] Processing: {tile_count}/{total_tiles} tiles")
     
     #  FILTER TITLE BLOCK BEFORE COMPONENT ANALYSIS (with asymmetric margins)
     if filter_title_block:
-        if progress_callback:
-            progress_callback(f"[track] Filtering title block region...")
         mask = filter_title_block_tracks(
             mask, 
             exclusion_margin_width_percent=title_block_margin_width,
             exclusion_margin_height_percent=title_block_margin_height
         )
-    
-    if progress_callback:
-        progress_callback(f"[track] Analyzing components...")
     
     # Connected components analysis
     bin_mask = (mask > 0).astype(np.uint8)
@@ -217,7 +210,7 @@ def detect_main_tracks(
     
     if num_labels <= 1:
         if progress_callback:
-            progress_callback("[track]  No thick components found")
+            progress_callback("Gleiserkennung: Keine Gleise gefunden")
         if doc is not None:
             doc.close()
         return np.zeros((h_px, w_px), dtype=np.uint8), w_px, h_px
@@ -251,16 +244,14 @@ def detect_main_tracks(
     
     if progress_callback:
         if num_tracks_found > 0:
-            progress_callback(f"[track]  Found {num_tracks_found} track section(s)")
+            progress_callback(f"Gleiserkennung: {num_tracks_found} Gleisabschnitt(e) erkannt")
         else:
-            progress_callback(f"[track]  No tracks found (try adjusting parameters)")
+            progress_callback("Gleiserkennung: Keine Gleise gefunden")
     
     del labels
     
     # Skeletonize
     if num_tracks_found > 0:
-        if progress_callback:
-            progress_callback(f"[track] Computing centerlines...")
         skel = skeletonize((main_mask > 0).astype(bool)).astype(np.uint8) * 255
     else:
         skel = np.zeros_like(main_mask, dtype=np.uint8)

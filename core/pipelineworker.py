@@ -5,7 +5,7 @@ import os
 from PIL import Image, ImageFile
 import cv2
 import re
-from config import POPPLER_PATH, DEBUG_ANGLE_ROUTING, DEBUG_YOLO, DEBUG_TRACK, DEBUG_CUSTOM_SYMBOLS, DEBUG_LINKING, DEBUG_OCR, MAX_OCR_WORKERS, CLASS_THRESH, CLASSES, LINK_RULES, ALIASES, DPI, TILE_SIZE
+from config import POPPLER_PATH, DEBUG_ANGLE_ROUTING, DEBUG_YOLO, DEBUG_TRACK, DEBUG_CUSTOM_SYMBOLS, DEBUG_LINKING, DEBUG_OCR, MAX_OCR_WORKERS, CLASS_THRESH, CLASSES, LINK_RULES, ALIASES, DPI, TILE_SIZE, EXCLUDE_LEGEND_STRIP, LEGEND_STRIP_WIDTH_PERCENT
 from pdf2image import convert_from_path, pdfinfo_from_path
 from core.yolo_detection import run_yolo_on_page, run_combined_detection, box_color, pil_to_bgr, tile_image, OVERLAP_PCT, color_masks
 from ultralytics import YOLO
@@ -125,23 +125,18 @@ class PipelineWorker(QtCore.QThread):
             if self._is_image_file:
                 # Image files are single-page
                 n_pages = 1
-                self.status.emit(f"[image] Bilddatei erkannt: {os.path.basename(self.file_path)}")
             else:
                 # PDF: get page count
                 info = pdfinfo_from_path(self.pdf_path, poppler_path=POPPLER_PATH)
                 n_pages = int(info["Pages"])
-                self.status.emit(f"[pdf] {n_pages} page(s) total")
 
             # 2. CONDITIONALLY load model
             if self.run_analysis:
                 # -------- Model load (5%) --------
-                t0 = time.perf_counter()
-                msg = f"[init] Loading model: {self.model_path}"
-                self.status.emit(msg); print(msg)
                 model = YOLO(self.model_path)
-                self.status.emit(f"[init] Model loaded in {time.perf_counter() - t0:.2f}s")
                 self.progress.emit(5)
                 set_classes_from_model(model)
+                self.status.emit(f"Erkennbare Klassen ({len(CLASSES)}): {', '.join(CLASSES)}")
                 
                 #  DIAGNOSTIC: Verify class order
                 if DEBUG_YOLO:
@@ -174,7 +169,6 @@ class PipelineWorker(QtCore.QThread):
                     print(f"canon_name('haltetafel')  → '{canon_name('haltetafel')}'   (should be 'haltetafel')")
 
                     print(f"{'='*70}\n")
-                self.status.emit(f"[init] Model classes: {CLASSES}")
 
                 ALIAS_REV = {}
                 for variant, canonical in ALIASES.items():
@@ -189,15 +183,9 @@ class PipelineWorker(QtCore.QThread):
                     return False
 
                 missing_thresh = [k for k in CLASS_THRESH if not _class_present(k)]
-                if missing_thresh:
-                    self.status.emit(f"[warn] CLASS_THRESH has unknown classes: {missing_thresh}")
-
                 missing_rules = [k for k in LINK_RULES if not _class_present(k)]
-                if missing_rules:
-                    self.status.emit(f"[warn] LINK_RULES has unknown classes: {missing_rules}")
             
             else:
-                self.status.emit("[init] Schnell-Laden: Überspringe Modell-Laden.")
                 self.progress.emit(5)
 
             # per-page subweights sum to 1.0
@@ -213,34 +201,29 @@ class PipelineWorker(QtCore.QThread):
 
                 if self._is_image_file:
                     # Load image directly with PIL (no conversion needed)
-                    self.status.emit(f"[page {pidx}/{n_pages}] Lade Bilddatei...")
                     pil = Image.open(self.file_path)
                     # Convert to RGB if necessary (handles RGBA, grayscale, etc.)
                     if pil.mode != 'RGB':
                         pil = pil.convert('RGB')
-                    self.status.emit(f"[page {pidx}] Bild geladen in {time.perf_counter() - t_load:.2f}s ({pil.width}x{pil.height})")
                 else:
                     # PDF: Rasterize at specified DPI
-                    self.status.emit(f"[page {pidx}/{n_pages}] Rasterizing at {DPI} DPI…")
                     pil = convert_from_path(
                         self.pdf_path, dpi=DPI, poppler_path=POPPLER_PATH,
                         first_page=pidx, last_page=pidx, fmt="png",
                         thread_count=2, strict=False
                     )[0]
-                    self.status.emit(f"[page {pidx}] Rasterized in {time.perf_counter() - t_load:.2f}s")
 
                 emit_progress(pidx - 1, W['raster'])
 
                 if self._is_interrupted:
                     break
 
-                self.status.emit(f"[page {pidx}] Preparing image…")
                 bgr_color = pil_to_bgr(pil)
                 
                 df_page = pd.DataFrame()
 
                 if self.run_analysis:
-                    self.status.emit(f"[page {pidx}] Führe YOLO/OCR-Analyse aus...")
+                    self.status.emit("Objekterkennung läuft...")
                     
                     _ = tile_image(bgr_color, tile=TILE_SIZE, overlap_pct=OVERLAP_PCT)
                     emit_progress(pidx - 1, W['raster'] + W['prep'])
@@ -293,18 +276,15 @@ class PipelineWorker(QtCore.QThread):
                     cnt = Counter(d['name'] for d in dets)
                     summary = ", ".join(f"{k}:{v}" for k, v in sorted(cnt.items()))
 
-                    # Status message with custom symbol count
-                    status_msg = f"[page {pidx}] YOLO: {yolo_count} boxes"
-                    if custom_count > 0:
-                        status_msg += f" + {custom_count} custom symbols"
-                    status_msg += f" in {dt_det:.2f}s [{summary}]"
-                    self.status.emit(status_msg)
+                    # Status message - simplified for presentation
+                    total_objects = yolo_count + custom_count
+                    self.status.emit(f"Objekterkennung: {total_objects} Objekte erkannt")
                     emit_progress(pidx - 1, W['raster'] + W['prep'] + W['det'])
 
                     mask_red, mask_yel = color_masks(bgr_color)
                     coords = [d for d in dets if d["name"] == "coordinate"]
                     anchors = [d for d in dets if d["name"] != "coordinate"]
-                    self.status.emit(f"[page {pidx}] OCR: coords={len(coords)}, anchors={len(anchors)}")
+                    self.status.emit("Texterkennung läuft...")
 
                     # Coordinate OCR
                     coord_meta = {}
@@ -346,7 +326,7 @@ class PipelineWorker(QtCore.QThread):
                                 k, v = f.result()
                                 coord_meta[k] = v
 
-                    self.status.emit(f"[page {pidx}] OCR coords done in {time.perf_counter() - t_ocr:.2f}s (threads={MAX_OCR_WORKERS})")
+                    self.status.emit("Texterkennung abgeschlossen")
                     emit_progress(pidx - 1, W['raster'] + W['prep'] + W['det'] + W['ocr_c'])
 
                     if self._is_interrupted:
@@ -484,6 +464,8 @@ class PipelineWorker(QtCore.QThread):
                                     image_array=bgr_color,
                                     tile_size=TILE_SIZE,
                                     overlap=int(TILE_SIZE * OVERLAP_PCT / 100),
+                                    title_block_margin_width=LEGEND_STRIP_WIDTH_PERCENT if EXCLUDE_LEGEND_STRIP else 8,
+                                    title_block_margin_height=100 if EXCLUDE_LEGEND_STRIP else 25,
                                     progress_callback=track_progress
                                 )
                             else:
@@ -493,6 +475,8 @@ class PipelineWorker(QtCore.QThread):
                                     dpi=DPI,
                                     tile_size=TILE_SIZE,
                                     overlap=int(TILE_SIZE * OVERLAP_PCT / 100),
+                                    title_block_margin_width=LEGEND_STRIP_WIDTH_PERCENT if EXCLUDE_LEGEND_STRIP else 8,
+                                    title_block_margin_height=100 if EXCLUDE_LEGEND_STRIP else 25,
                                     progress_callback=track_progress
                                 )
                             
@@ -516,7 +500,7 @@ class PipelineWorker(QtCore.QThread):
                             if DEBUG_TRACK:
                                 print(f"Track detection failed: {e}")
                             traceback.print_exc()
-                            self.status.emit(f"[track]  Track detection failed: {e}")
+                            self.status.emit("Gleiserkennung fehlgeschlagen")
                             track_skeleton = None
                             track_bounds = None  #  Ensure track_bounds is None on failure
                     
@@ -638,6 +622,7 @@ class PipelineWorker(QtCore.QThread):
                         print(f"{'='*70}\n")
 
                     # Linking + rows
+                    self.status.emit("Symbolzuordnung läuft...")
                     used_coord_ids = set()
                     learned_patterns = {}
 
@@ -1252,12 +1237,13 @@ class PipelineWorker(QtCore.QThread):
                             _fahrtrichtung_source='none'  #  CHANGE 3
                         ))
                         
+                    self.status.emit("Symbolzuordnung abgeschlossen")
                     emit_progress(pidx - 1, W['raster'] + W['prep'] + W['det'] + W['ocr_c'] + W['ocr_a'] + W['link'])
 
                     df_page = pd.DataFrame([r for r in all_rows if r["page"] == pidx])
                 
                 else:
-                    self.status.emit(f"[page {pidx}] Extrahiere Bild (Überspringe Analyse)...")
+                    self.status.emit("Bild wird extrahiert...")
                     emit_progress(pidx - 1, 1.0)
 
                 page_bgr_arrays[pidx] = bgr_color
@@ -1265,7 +1251,7 @@ class PipelineWorker(QtCore.QThread):
                 
                 self.page_processed.emit(pidx, bgr_color, df_page)
                 
-                self.status.emit(f"[page {pidx}] Done.")
+                self.status.emit("Seite abgeschlossen")
 
                 del pil, bgr_color
                 if self.run_analysis:
@@ -1275,7 +1261,7 @@ class PipelineWorker(QtCore.QThread):
             df_all = pd.DataFrame(all_rows)
 
             if self.run_analysis:
-                self.status.emit(f"[done] Total rows: {len(df_all)}")
+                self.status.emit(f"Analyse abgeschlossen: {len(df_all)} Einträge gefunden")
                 
                 if DEBUG_LINKING:
                     print(f"\n{'='*70}")
@@ -1630,6 +1616,6 @@ class PipelineWorker(QtCore.QThread):
         except Exception as e:
             import traceback
             tb_str = traceback.format_exc()
-            self.status.emit(f"[error] {e}\n{tb_str}")
+            self.status.emit(f"Fehler bei der Verarbeitung: {e}")
             df_err = pd.DataFrame([{"error": str(e)}])
             self.done.emit(df_err, {}, None, e, [])
