@@ -33,111 +33,31 @@ logger = logging.getLogger(__name__)
 # WORKER THREAD (with weighted progress + unified coordinate OCR)
 # ============================================================================
 
-NO_OCR_CLASSES = ["isolierstoß", "haltepunkt", "sverbinder", "weichenende", "weichengruppeende", "haltetafel"]
-FIXED_TEXT_CLASSES = {"gm_block": "GM","prellblock": "PB"}
+NO_OCR_CLASSES = ["isolierstoß", "haltepunkt", "sverbinder", "weichenende", "weichengruppenende", "haltetafel"]
+FIXED_TEXT_CLASSES = {"gm_block": "GM","prellbock": "PB"}
 
 
-def convert_colors_to_black_for_yolo(bgr_image, color_threshold=0.001):
+def convert_colors_to_black_for_yolo(bgr_image, sat_threshold=30):
     """
-    Convert red and yellow/orange pixels to black so YOLO sees them like black symbols.
-    Uses HSV color space for robust color detection.
-    Only processes if colored pixels are detected (performance optimization).
+    Convert ALL colored pixels to black so YOLO sees uniform black symbols.
+    Uses saturation threshold - any pixel with saturation > threshold is "colored".
 
-    Args:
-        bgr_image: Input BGR image
-        color_threshold: Minimum ratio of colored pixels to trigger conversion (default 0.1%)
+    This catches: Red, Yellow, Green, Blue, Violet, Brown, Orange
+    This preserves: Black, White, Gray (document background/lines)
 
-    Returns:
-        Processed image with colors converted to black, or original if no colors found
+    Colors in railway documents:
+    - ROT (Red), GELB (Yellow), GRÜN (Green), BLAU (Blue)
+    - VIOLETT (Violet), BRAUN (Brown), ORANGE, GRAU (Gray)
     """
     hsv = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2HSV)
 
-    # === RED detection (wraps around 0/180 in HSV) ===
-    # Lower red range (Hue 0-10)
-    lower_red1 = np.array([0, 50, 50])
-    upper_red1 = np.array([10, 255, 255])
-    # Upper red range (Hue 170-180)
-    lower_red2 = np.array([170, 50, 50])
-    upper_red2 = np.array([180, 255, 255])
+    # Saturation channel - high = colored, low = grayscale
+    saturation = hsv[:, :, 1]
+    color_mask = saturation > sat_threshold
 
-    red_mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    red_mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-    red_mask = red_mask1 | red_mask2
-
-    # === YELLOW/ORANGE detection (Hue 10-35) ===
-    lower_yellow = np.array([10, 50, 50])
-    upper_yellow = np.array([35, 255, 255])
-    yellow_mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
-
-    # Combine all color masks
-    color_mask = red_mask | yellow_mask
-
-    # Performance optimization: skip copy if no colored pixels
-    color_ratio = np.count_nonzero(color_mask) / color_mask.size
-    if color_ratio < color_threshold:
-        return bgr_image  # No significant colors, return original
-
-    # Convert colored pixels to black
     result = bgr_image.copy()
-    result[color_mask > 0] = [0, 0, 0]
-
+    result[color_mask] = [0, 0, 0]  # Convert to black
     return result
-
-
-def enhance_image_for_yolo(bgr_image):
-    """
-    Enhance image clarity for better YOLO detection AND OCR.
-    Uses CLAHE + Morphological dilation + Unsharp masking.
-
-    Benefits:
-    - YOLO: Can detect thin coordinates like "0,0378"
-    - OCR: Better reading of faint/thin text
-
-    Args:
-        bgr_image: Input BGR image
-
-    Returns:
-        Enhanced BGR image with better contrast and thicker strokes
-    """
-    # === STEP 1: CLAHE on luminance channel (STRONGER) ===
-    # Convert to LAB color space (luminance separate from color)
-    lab = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-
-    # Stronger CLAHE for faint text (clipLimit 3.0 instead of 2.0)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    l_enhanced = clahe.apply(l)
-
-    # Merge back to BGR
-    lab_enhanced = cv2.merge([l_enhanced, a, b])
-    enhanced = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
-
-    # === STEP 2: Morphological dilation to thicken thin text ===
-    # Convert to grayscale for morphology
-    gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
-
-    # Invert: black text becomes white (morphology works on white foreground)
-    inverted = cv2.bitwise_not(gray)
-
-    # Light dilation to thicken thin strokes (1 iteration, small kernel)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    dilated = cv2.dilate(inverted, kernel, iterations=1)
-
-    # Invert back: white text becomes black
-    thickened = cv2.bitwise_not(dilated)
-
-    # Convert back to BGR
-    enhanced = cv2.cvtColor(thickened, cv2.COLOR_GRAY2BGR)
-
-    # === STEP 3: Unsharp Masking for edge sharpness ===
-    # Blur the image
-    blurred = cv2.GaussianBlur(enhanced, (0, 0), 3)
-
-    # Sharpen: original + (original - blurred) * amount
-    # Using addWeighted: 1.5 * original - 0.5 * blurred
-    sharpened = cv2.addWeighted(enhanced, 1.5, blurred, -0.5, 0)
-
-    return sharpened
 
 
 class PipelineWorker(QtCore.QThread):
@@ -230,9 +150,9 @@ class PipelineWorker(QtCore.QThread):
                     print(f"{'='*70}")
 
                     critical_classes = {
-                        9: 'prellblock',
+                        9: 'prellbock',
                         10: 'haltetafel',
-                        11: 'endeweichen',
+                        11: 'weichenende',
                     }
 
                     all_correct = True
@@ -249,8 +169,8 @@ class PipelineWorker(QtCore.QThread):
                         print(f"\nClass order is WRONG! Check your config.py")
 
                     print(f"\nAliasing test:")
-                    print(f"canon_name('endeweichen') → '{canon_name('endeweichen')}'  (should be 'weichenende')")
-                    print(f"canon_name('prellblock')  → '{canon_name('prellblock')}'   (should be 'prellblock')")
+                    print(f"canon_name('weichenende') → '{canon_name('weichenende')}'  (should be 'weichenende')")
+                    print(f"canon_name('prellbock')  → '{canon_name('prellbock')}'   (should be 'prellbock')")
                     print(f"canon_name('haltetafel')  → '{canon_name('haltetafel')}'   (should be 'haltetafel')")
 
                     print(f"{'='*70}\n")
@@ -329,15 +249,9 @@ class PipelineWorker(QtCore.QThread):
                         break
 
                     t_det = time.perf_counter()
-                    # Convert red/yellow symbols to black for better YOLO classification
-                    # (model was trained mostly on black symbols)
-                    bgr_for_yolo = convert_colors_to_black_for_yolo(bgr_color)
-
-                    # Enhance image clarity (CLAHE + unsharp masking)
-                    bgr_for_yolo = enhance_image_for_yolo(bgr_for_yolo)
-
                     # Use combined detection: YOLO + Custom Symbols
-                    all_dets = run_combined_detection(model, bgr_for_yolo, detect_custom=True)
+                    # HSV-trained model handles colors directly (no preprocessing needed)
+                    all_dets = run_combined_detection(model, bgr_color, detect_custom=True)
 
                     # Separate confirmed and uncertain detections
                     confirmed_dets = [d for d in all_dets if d.get('detection_status', 'confirmed') == 'confirmed']
@@ -1242,7 +1156,7 @@ class PipelineWorker(QtCore.QThread):
                         # For signals: also exclude haltepunkt soft-claimed coordinates
                         if a["name"] == "signal":
                             available_coords = [c for c in coords if id(c) not in used_coord_ids and id(c) not in haltepunkt_coord_ids]
-                        elif a["name"] in ["weichenende", "weichengruppeende"]:
+                        elif a["name"] in ["weichenende", "weichengruppenende"]:
                             # LOWEST PRIORITY: exclude ALL claimed coordinates from ALL sources
                             # These classes should only take coordinates that NO OTHER class has claimed
                             all_claimed = (

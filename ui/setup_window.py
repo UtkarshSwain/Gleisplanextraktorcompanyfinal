@@ -175,20 +175,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                         padding: 0px;
                     """)
 
-        # Update info banner (compact with Siemens blue accent)
-        if hasattr(self, 'analysis_info'):
-            self.analysis_info.setStyleSheet(f"""
-                background: {self.theme_colors['info_bg']};
-                color: {self.theme_colors['text_primary']};
-                padding: 10px 16px;
-                border-radius: 8px;
-                font-size: 9pt;
-                font-weight: 600;
-                letter-spacing: 0.5px;
-                border: 1px solid {self.theme_colors['border']};
-                border-left: 3px solid {self.theme_colors['siemens_blue']};
-            """)
-
         # Update status labels if they haven't been set yet (muted style)
         if hasattr(self, 'lbl_pdf') and "Keine Datei" in self.lbl_pdf.text():
             self.lbl_pdf.setStyleSheet(f"""
@@ -314,12 +300,12 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         main_layout.addWidget(self.module_header)
 
         # ========== COMPACT STEPS - NO EMOJIS ==========
-        # Wrapper widget to center the step cards on full-screen
+        # Wrapper to center the step cards
         top_wrapper = QtWidgets.QHBoxLayout()
         top_wrapper.addStretch()  # Push cards to center
 
         top = QtWidgets.QHBoxLayout()
-        top.setSpacing(scale_value(16))  # Better spacing between step cards (DPI-scaled)
+        top.setSpacing(scale_value(12))  # Compact spacing between step cards
 
         # Step 1: Gleisplan - Compact professional design
         self.pdf_frame = self._create_step_frame_compact(
@@ -360,6 +346,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.lbl_pdf.setStyleSheet(f"font-size: 8pt; font-weight: normal; color: #a0a4b8; padding: {scale_value(6)}px 0px;")
         self.lbl_pdf.setAlignment(QtCore.Qt.AlignCenter)
         self.lbl_pdf.setMinimumHeight(scale_value(24))
+        self.lbl_pdf.setWordWrap(True)  # Allow long filenames to wrap
         pdf_layout.addWidget(self.lbl_pdf)
 
         # Resolution warning for image files
@@ -421,6 +408,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.lbl_model.setStyleSheet(f"font-size: 8pt; font-weight: normal; color: #a0a4b8; padding: {scale_value(6)}px 0px;")
         self.lbl_model.setAlignment(QtCore.Qt.AlignCenter)
         self.lbl_model.setMinimumHeight(scale_value(24))
+        self.lbl_model.setWordWrap(True)  # Allow long filenames to wrap
         model_layout.addWidget(self.lbl_model)
         model_layout.addStretch()  # Anchor widgets to top, prevent vertical shift on resize
 
@@ -492,18 +480,9 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
         main_layout.addLayout(top_wrapper)
 
-        # Compact info banner - no emoji
-        self.analysis_info = QtWidgets.QLabel(
-            "AUTOMATISCH: Symbol-Erkennung | Texterkennung | Gleiserkennung"
-        )
-        self.analysis_info.setStyleSheet("padding: 8px; border-radius: 2px; font-size: 9pt; font-weight: 600; letter-spacing: 0.5px;")
-        self.analysis_info.setAlignment(QtCore.Qt.AlignCenter)
-        main_layout.addWidget(self.analysis_info)
-
-        # Graphics view - very small compact preview so step cards dominate the layout
-        # Only scale max height, keep min small so window can fit on smaller screens
-        self.view.setMaximumHeight(scale_value(150))
-        self.view.setMinimumHeight(80)
+        # Graphics view - compact preview
+        self.view.setMaximumHeight(scale_value(100))
+        self.view.setMinimumHeight(60)
         main_layout.addWidget(self.view)
 
         # Enhanced progress bar (Siemens blue) - visible height, small minimum
@@ -573,14 +552,14 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Expanding,
             QtWidgets.QSizePolicy.Preferred
         )
-        # Bigger and wider step cards (DPI-scaled)
-        frame.setMinimumWidth(scale_value(280))
-        frame.setMaximumWidth(scale_value(550))
-        frame.setMinimumHeight(scale_value(200))  # Taller for better visibility
+        # Step cards (DPI-scaled)
+        frame.setMinimumWidth(scale_value(250))
+        frame.setMaximumWidth(scale_value(450))
+        frame.setMinimumHeight(scale_value(160))
 
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setSpacing(scale_value(14))  # More spacing between elements
-        layout.setContentsMargins(scale_value(20), scale_value(20), scale_value(20), scale_value(20))
+        layout.setSpacing(scale_value(10))
+        layout.setContentsMargins(scale_value(16), scale_value(16), scale_value(16), scale_value(16))
 
         # Header: Badge + Title as separate widgets (more reliable than HTML)
         header_layout = QtWidgets.QHBoxLayout()
@@ -1248,6 +1227,14 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.act_stop.triggered.connect(self.on_stop)
         toolbar.addAction(self.act_stop)
 
+        toolbar.addSeparator()
+
+        # Threshold adjustment button
+        self.act_thresholds = QtWidgets.QAction("Schwellenwerte", self)
+        self.act_thresholds.setToolTip("Schwellenwerte\n\nKonfidenz-Schwellenwerte pro Klasse anpassen\nfür die YOLO-Erkennung")
+        self.act_thresholds.triggered.connect(self.on_open_thresholds)
+        toolbar.addAction(self.act_thresholds)
+
         # Add spacer to push next button to the right
         spacer = QtWidgets.QWidget()
         spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
@@ -1348,11 +1335,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         act_ocr_adjust = tools_menu.addAction("OCR-Anpassung...")
         act_ocr_adjust.setToolTip("Manuelle OCR-Texterkennung anpassen")
         act_ocr_adjust.triggered.connect(self._show_ocr_adjustment)
-
-        # Symbol Manager
-        act_symbol_manager = tools_menu.addAction("Symbol-Manager...")
-        act_symbol_manager.setToolTip("Symbole und Vorlagen verwalten")
-        act_symbol_manager.triggered.connect(self._show_symbol_manager)
 
         tools_menu.addSeparator()
 
@@ -1579,8 +1561,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             Nützlich für Versionskontrolle und Change-Management.</li>
 
             <li><b>OCR-Anpassung:</b> Manuelle Korrektur von OCR-Erkennungen für bessere Textqualität.</li>
-
-            <li><b>Symbol-Manager:</b> Verwalten Sie erkannte Symbole und Vorlagen.</li>
         </ul>
 
         <h3>Nach der Analyse</h3>
@@ -1803,29 +1783,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 f"Fehler beim Öffnen der OCR-Anpassung:\n{str(e)}"
             )
 
-    def _show_symbol_manager(self):
-        """Show symbol manager dialog"""
-        try:
-            from ui.symbol_manager import SymbolManagerDialog
-
-            dialog = SymbolManagerDialog(self)
-            dialog.exec_()
-
-        except ImportError as e:
-            # If symbol manager doesn't exist, show new symbol dialog instead
-            QtWidgets.QMessageBox.information(
-                self,
-                "Symbol-Manager",
-                "Verwenden Sie 'Neues Symbol definieren...' im Menü 'Verarbeitung', um neue Symbole zu erstellen.\n\n"
-                "Ein vollständiger Symbol-Manager wird in einer zukünftigen Version verfügbar sein."
-            )
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Fehler",
-                f"Fehler beim Öffnen des Symbol-Managers:\n{str(e)}"
-            )
-
     def _show_saved_workspaces(self):
         """Show dialog to load a saved workspace from database."""
         try:
@@ -1929,6 +1886,13 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 "Fehler",
                 f"Fehler beim Laden des Arbeitsbereichs:\n{str(e)}"
             )
+
+    def on_open_thresholds(self):
+        """Open the Threshold Dialog to adjust confidence thresholds per class."""
+        from ui.threshold_dialog import ThresholdDialog
+
+        dialog = ThresholdDialog(self)
+        dialog.exec_()
 
     def on_add_new_symbol(self):
         """Open the New Symbol Dialog to define a new symbol without retraining YOLO."""

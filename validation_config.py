@@ -22,13 +22,13 @@ CLASSES_REQUIRING_COORDINATES: List[str] = [
     'gks_gesteuert',
     'gks_festkodiert',
     'isolierstoß',
-    'prellblock',
+    'prellbock',
     'haltepunkt',
     'sverbinder',
     'gm_block',
     'haltetafel',
     'weichenende',
-    'weichengruppeende',
+    'weichengruppenende',
 ]
 
 # Classes that MUST have text/label (anchor_text)
@@ -61,9 +61,9 @@ CONFIDENCE_THRESHOLDS: Dict[str, float] = {
     "sverbinder": 0.80,
     "coordinate": 0.65,
     "weichenende": 0.80,
-    "prellblock": 0.80,
+    "prellbock": 0.80,
     "haltetafel": 0.70,
-    "weichengruppeende": 0.80,
+    "weichengruppenende": 0.80,
 }
 
 # Default threshold for unknown classes

@@ -708,6 +708,20 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
         self.class_selector_combo.currentTextChanged.connect(self.on_class_selector_changed)
         conf.addWidget(self.class_selector_combo)
+
+        # Threshold adjustment button - right of class selector
+        self.btn_thresholds = QtWidgets.QPushButton("Schwellenwerte")
+        self.btn_thresholds.setToolTip("Konfidenz-Schwellenwerte pro Klasse anpassen\n\nNiedrigere Werte = mehr Erkennungen\nHöhere Werte = nur sichere Erkennungen")
+        self.btn_thresholds.setStyleSheet("""
+            QPushButton {
+                font-size: 11pt;
+                padding: 6px 12px;
+                min-height: 28px;
+            }
+        """)
+        self.btn_thresholds.clicked.connect(self._open_threshold_dialog)
+        conf.addWidget(self.btn_thresholds)
+
         conf.addStretch(1)
 
         # Common toolbar button style - larger font and padding
@@ -5647,6 +5661,103 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self._refresh_page_graphics()
             self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
 
+    def _open_threshold_dialog(self):
+        """Open the Threshold Dialog to adjust confidence thresholds per class."""
+        from ui.threshold_dialog import ThresholdDialog
+        import config
+
+        # Store old thresholds to detect changes
+        old_thresholds = dict(config.CLASS_THRESH)
+
+        dialog = ThresholdDialog(self)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            # Dialog applied changes → re-filter detections
+            self._apply_threshold_changes(old_thresholds)
+
+    def _apply_threshold_changes(self, old_thresholds: dict):
+        """
+        Apply threshold changes by re-filtering uncertain detections.
+
+        When thresholds are lowered, some uncertain detections may now qualify
+        as confirmed and need to be processed through OCR and linking.
+
+        When thresholds are raised, some confirmed detections may need to be hidden.
+
+        Args:
+            old_thresholds: Dictionary of previous CLASS_THRESH values
+        """
+        import config
+
+        newly_confirmed_count = 0
+        hidden_count = 0
+
+        # 1. Find detections that should now be confirmed (threshold lowered)
+        if hasattr(self, 'uncertain_detections') and self.uncertain_detections:
+            newly_confirmed = []
+            for det in self.uncertain_detections:
+                # Detection dict has 'name' (class name string) and 'cls' (class index int)
+                # We need the string name for threshold lookup
+                cls_name = det.get('name', '')
+                new_thresh = config.CLASS_THRESH.get(cls_name, 0.25)
+                conf = det.get('conf', 0)
+
+                # Check if this detection now meets the new threshold
+                if conf >= new_thresh:
+                    # Mark for processing (needed by _add_confirmed_uncertain_detections)
+                    det['user_confirmed'] = True
+                    newly_confirmed.append(det)
+
+            # 2. Process newly confirmed detections through OCR and linking
+            if newly_confirmed:
+                self._set_status(f"Verarbeite {len(newly_confirmed)} neue Erkennung(en)...")
+                QtWidgets.QApplication.processEvents()
+
+                # Use existing method that handles OCR, linking, signal merging, view refresh
+                self._add_confirmed_uncertain_detections(newly_confirmed)
+                newly_confirmed_count = len(newly_confirmed)
+
+        # 3. Handle threshold changes on existing confirmed detections
+        unhidden_count = 0
+        if self.df_all is not None and not self.df_all.empty:
+            for idx, row in self.df_all.iterrows():
+                cls_name = row.get('cls', '')
+                new_thresh = config.CLASS_THRESH.get(cls_name, 0.25)
+                conf = row.get('conf', 1.0)
+
+                # If confidence now below threshold, hide it
+                if conf < new_thresh and not row.get('_hidden', False):
+                    self.df_all.at[idx, '_hidden'] = True
+                    self.df_all.at[idx, '_hidden_by_threshold'] = True
+                    hidden_count += 1
+                # If was hidden by threshold but now meets threshold, unhide it
+                elif conf >= new_thresh and row.get('_hidden_by_threshold', False):
+                    self.df_all.at[idx, '_hidden'] = False
+                    self.df_all.at[idx, '_hidden_by_threshold'] = False
+                    unhidden_count += 1
+
+            if hidden_count > 0 or unhidden_count > 0:
+                # Sync df_all changes to page_dfs (required for overlay display)
+                for page_num in self.page_dfs.keys():
+                    self.page_dfs[page_num] = self.df_all[self.df_all['page'] == page_num].copy()
+
+                # Rebuild row specs and refresh display
+                self._rebuild_row_specs_for_page(self.current_page)
+                self.on_page_changed(self.current_page)
+
+        # Show summary status
+        status_parts = []
+        if newly_confirmed_count > 0:
+            status_parts.append(f"{newly_confirmed_count} hinzugefügt")
+        if hidden_count > 0:
+            status_parts.append(f"{hidden_count} ausgeblendet")
+        if unhidden_count > 0:
+            status_parts.append(f"{unhidden_count} wieder eingeblendet")
+
+        if status_parts:
+            self._set_status(", ".join(status_parts))
+        else:
+            self._set_status("Schwellenwerte aktualisiert")
+
     def _run_validation(self):
         """Run enhanced validation with auto-correction support"""
         if self.df_all is None or self.df_all.empty:
@@ -5952,17 +6063,195 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
         return gks_dets, gks_coord_map
 
-    def _process_confirmed_uncertain_detection(self, det: dict) -> dict:
+    def _filter_duplicate_detections(self, confirmed_dets: list) -> list:
+        """
+        Remove detections that already exist in df_all to prevent duplicates.
+
+        Args:
+            confirmed_dets: List of detection dicts to filter
+
+        Returns:
+            Filtered list with duplicates removed
+        """
+        if self.df_all is None or self.df_all.empty:
+            return confirmed_dets
+
+        # Build set of existing detection keys (page, bbox, class)
+        existing_keys = set()
+        for _, row in self.df_all.iterrows():
+            key = (row['page'], row['ax1'], row['ay1'], row['ax2'], row['ay2'], row['cls'])
+            existing_keys.add(key)
+
+        # Filter out duplicates
+        filtered = []
+        for det in confirmed_dets:
+            key = (det['page'], det['x1'], det['y1'], det['x2'], det['y2'], det['name'])
+            if key not in existing_keys:
+                filtered.append(det)
+            else:
+                print(f"[SKIP] Duplicate detection already exists: {det['name']} at page {det['page']}")
+
+        if len(filtered) < len(confirmed_dets):
+            print(f"[UNCERTAIN] Filtered out {len(confirmed_dets) - len(filtered)} duplicate detection(s)")
+
+        return filtered
+
+    def _show_relinking_progress(self) -> QtWidgets.QProgressDialog:
+        """Show a progress dialog during page re-linking."""
+        progress = QtWidgets.QProgressDialog(
+            "Verknüpfung wird aktualisiert...",
+            None,  # No cancel button
+            0, 0,  # Indeterminate progress
+            self
+        )
+        progress.setWindowTitle("Bitte warten")
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)  # Show immediately
+        progress.show()
+        QtWidgets.QApplication.processEvents()
+        return progress
+
+    def _relink_entire_page(self, page: int, progress: QtWidgets.QProgressDialog = None):
+        """
+        Re-link ALL symbols on a page for optimal coordinate assignments.
+
+        This clears existing links and rebuilds them, allowing higher-confidence
+        symbols to take coordinates from lower-confidence ones.
+        """
+        from core.linking import (
+            link_anchor_to_coord, link_isolierstoss_fallback, link_haltetafel_to_gks
+        )
+
+        # Get all non-coordinate, non-hidden symbols on this page
+        mask = (
+            (self.df_all['page'] == page) &
+            (self.df_all['cls'] != 'coordinate') &
+            (self.df_all['_hidden'] != True)  # Use != True to handle NaN
+        )
+        page_df = self.df_all[mask]
+
+        if page_df.empty:
+            print(f"[RELINK] Page {page}: no symbols to relink")
+            return
+
+        # Get coordinates for this page
+        page_coords = self._get_page_coordinates_for_linking(page)
+        if not page_coords:
+            print(f"[RELINK] Page {page}: no coordinates available")
+            return
+
+        # Get GKS data for haltetafel fallback
+        page_gks_dets, gks_coord_map = self._get_page_gks_with_coord_map(page)
+
+        # Sort symbols by confidence (higher first) for priority linking
+        sorted_indices = page_df.sort_values('conf', ascending=False).index.tolist()
+
+        print(f"[RELINK] Page {page}: re-linking {len(sorted_indices)} symbols")
+
+        # Clear existing links first
+        for idx in sorted_indices:
+            self.df_all.at[idx, 'coord_text'] = None
+            self.df_all.at[idx, 'cx1'] = None
+            self.df_all.at[idx, 'cy1'] = None
+            self.df_all.at[idx, 'cx2'] = None
+            self.df_all.at[idx, 'cy2'] = None
+            self.df_all.at[idx, 'link_coord_row_id'] = None
+            self.df_all.at[idx, 'coord_value'] = None
+            self.df_all.at[idx, 'gi_gl'] = None
+
+        # Track used coordinates
+        used_coord_ids = set()
+
+        # Re-link each symbol in confidence order
+        for idx in sorted_indices:
+            row = self.df_all.loc[idx]
+            cls_name = row['cls']
+
+            # Build detection dict matching expected format
+            det = {
+                'x1': row['ax1'], 'y1': row['ay1'],
+                'x2': row['ax2'], 'y2': row['ay2'],
+                'cx': (row['ax1'] + row['ax2']) / 2,
+                'cy': (row['ay1'] + row['ay2']) / 2,
+                'w': row['ax2'] - row['ax1'],
+                'h': row['ay2'] - row['ay1'],
+                'name': cls_name,
+                'page': page,
+                'angle': row.get('angle', 0) or 0,
+                'angle_raw': row.get('angle_raw', 0) or 0,
+                'text': row.get('anchor_text', ''),
+            }
+
+            # Filter page_coords to exclude already-used coordinates
+            # This is how we prevent duplicate linking without modifying link_anchor_to_coord
+            available_coords = [
+                c for c in page_coords
+                if c.get('row_id', id(c)) not in used_coord_ids
+            ]
+
+            linked_coord = None
+
+            # Try standard linking with filtered coordinates
+            if available_coords:
+                linked_coord = link_anchor_to_coord(det, available_coords, learned_patterns=None)
+
+            # Class-specific fallbacks
+            if linked_coord is None:
+                if cls_name == 'haltetafel' and page_gks_dets:
+                    gks_dets_festkodiert = [g for g in page_gks_dets if g['name'] == 'gks_festkodiert']
+                    linked_coord = link_haltetafel_to_gks(
+                        det, gks_dets_festkodiert, page_coords, gks_coord_map
+                    )
+                elif cls_name == 'isolierstoß':
+                    linked_coord = link_isolierstoss_fallback(
+                        det, page_coords, used_coord_ids, max_radius=300
+                    )
+
+            # Update row with link result
+            if linked_coord:
+                coord_row_id = linked_coord.get('row_id') or id(linked_coord)
+                used_coord_ids.add(coord_row_id)
+
+                from core.linking import parse_coord
+                coord_text = linked_coord.get('text', '')
+                coord_value, gi_gl = None, None
+                if coord_text:
+                    parsed = parse_coord(coord_text)
+                    if parsed:
+                        coord_value, gi_gl = parsed
+
+                self.df_all.at[idx, 'coord_text'] = coord_text
+                self.df_all.at[idx, 'cx1'] = linked_coord.get('x1')
+                self.df_all.at[idx, 'cy1'] = linked_coord.get('y1')
+                self.df_all.at[idx, 'cx2'] = linked_coord.get('x2')
+                self.df_all.at[idx, 'cy2'] = linked_coord.get('y2')
+                self.df_all.at[idx, 'link_coord_row_id'] = coord_row_id
+                self.df_all.at[idx, 'coord_value'] = coord_value
+                self.df_all.at[idx, 'gi_gl'] = gi_gl
+
+            # Process events to keep UI responsive
+            if progress:
+                QtWidgets.QApplication.processEvents()
+
+        linked_count = len([idx for idx in sorted_indices if pd.notna(self.df_all.at[idx, 'coord_text'])])
+        print(f"[RELINK] Page {page}: linked {linked_count}/{len(sorted_indices)} symbols")
+
+    def _process_confirmed_uncertain_detection(self, det: dict, used_coord_ids: set = None) -> tuple:
         """
         Process a user-confirmed uncertain detection through OCR, linking,
         Fahrtrichtung detection, and other class-specific processing.
 
         Args:
             det: Detection dict with x1,y1,x2,y2,cx,cy,name,conf,page,angle,etc.
+            used_coord_ids: Set of coordinate row_ids already linked to. Will be updated
+                           after successful link to prevent duplicate linking.
 
         Returns:
-            Processed row dict ready for df_all
+            Tuple of (processed row dict ready for df_all, linked coord_row_id or None)
         """
+        if used_coord_ids is None:
+            used_coord_ids = set()
+        import uuid
         from core.ocr_engine import ocr_anchor_name, ocr_coordinate_unified
         from core.linking import (
             link_anchor_to_coord, parse_coord, detect_fahrtrichtung,
@@ -5993,9 +6282,6 @@ class WorkspaceWidget(QtWidgets.QWidget):
         page_coords = self._get_page_coordinates_for_linking(page)
         page_gks_dets, gks_coord_map = self._get_page_gks_with_coord_map(page)
 
-        # Track which coordinates are already used (simplified - just get IDs)
-        used_coord_ids = set()
-
         # 1. OCR PROCESSING (only if BGR image available)
         if bgr_image is not None:
             try:
@@ -6008,7 +6294,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                             coord_value, gi_gl = parsed
                         coord_text = anchor_text
                 elif cls_name in FIXED_TEXT_CLASSES:
-                    # Fixed text classes (prellblock="PB", gm_block="GM")
+                    # Fixed text classes (prellbock="PB", gm_block="GM")
                     anchor_text = FIXED_TEXT_CLASSES[cls_name]
                 elif cls_name not in NO_OCR_CLASSES:
                     # Normal OCR for anchor text
@@ -6085,6 +6371,28 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                 if fahrtrichtung:
                     fahrtrichtung_source = 'gks' if page_gks_dets else 'track'
+                    # Try to find the matching GKS to capture its bbox
+                    if page_gks_dets and fahrtrichtung_source == 'gks':
+                        sig_cx, sig_cy = det.get('cx', 0), det.get('cy', 0)
+                        best_gks = None
+                        best_dist = float('inf')
+                        for gks in page_gks_dets:
+                            gks_cx = (gks.get('x1', 0) + gks.get('x2', 0)) / 2
+                            gks_cy = (gks.get('y1', 0) + gks.get('y2', 0)) / 2
+                            dx = gks_cx - sig_cx
+                            dy = gks_cy - sig_cy
+                            # Check if GKS is in valid range (same criteria as detect_fahrtrichtung)
+                            if abs(dx) <= 120 and 30 <= abs(dy) <= 200:
+                                dist = (dx**2 + dy**2) ** 0.5
+                                if dist < best_dist:
+                                    best_dist = dist
+                                    best_gks = gks
+                        if best_gks:
+                            coord_bbox = (
+                                best_gks.get('x1'), best_gks.get('y1'),
+                                best_gks.get('x2'), best_gks.get('y2')
+                            )
+                            link_coord_row_id = best_gks.get('row_id')
                     print(f"[UNCERTAIN FAHRT] signal '{anchor_text}' -> {fahrtrichtung} (via {fahrtrichtung_source})")
                 else:
                     # Tiered fallbacks when basic GKS detection fails
@@ -6100,6 +6408,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     if tier3_result:
                         fahrtrichtung = tier3_result
                         fahrtrichtung_source = 'gks_relaxed'
+                        # Capture GKS bbox for signal's coord display
+                        if tier3_gks:
+                            coord_bbox = (
+                                tier3_gks.get('x1'), tier3_gks.get('y1'),
+                                tier3_gks.get('x2'), tier3_gks.get('y2')
+                            )
+                            link_coord_row_id = tier3_gks.get('row_id')
                         print(f"[UNCERTAIN FAHRT] Tier 3 success: {fahrtrichtung}")
                     else:
                         # Tier 4: GKS nearest (Euclidean dist≤800px)
@@ -6113,6 +6428,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         if tier4_result:
                             fahrtrichtung = tier4_result
                             fahrtrichtung_source = 'gks_nearest'
+                            # Capture GKS bbox for signal's coord display
+                            if tier4_gks:
+                                coord_bbox = (
+                                    tier4_gks.get('x1'), tier4_gks.get('y1'),
+                                    tier4_gks.get('x2'), tier4_gks.get('y2')
+                                )
+                                link_coord_row_id = tier4_gks.get('row_id')
                             print(f"[UNCERTAIN FAHRT] Tier 4 success: {fahrtrichtung}")
                         else:
                             print(f"[UNCERTAIN FAHRT] All tiers failed for signal '{anchor_text}'")
@@ -6146,59 +6468,105 @@ class WorkspaceWidget(QtWidgets.QWidget):
             'obb_h': det.get('obb_h'),
             'detection_source': 'USER_CONFIRMED',
             'detection_status': 'confirmed',
+            'color': det.get('color', 'green'),  # Default color for confirmed detections
             'fahrtrichtung': fahrtrichtung,
             '_fahrtrichtung_source': fahrtrichtung_source,
             'link_coord_row_id': link_coord_row_id,
+            # Additional fields for consistency with pipeline
+            'detection_id': str(uuid.uuid4()),
+            'poly': det.get('poly'),  # OBB polygon if available
+            'ocr_x1': None,
+            'ocr_y1': None,
+            'ocr_x2': None,
+            'ocr_y2': None,
+            'ocr_region_source': None,
+            'notes': '',
+            'weichen_coordinates': [],
+            # CRITICAL: Explicitly set _hidden to False to prevent NaN issues
+            # (NaN is truthy in Python, causing overlay to be skipped)
+            '_hidden': False,
         }
 
-        return row
+        return row, link_coord_row_id
 
     def _add_confirmed_uncertain_detections(self, confirmed_dets: list):
         """
-        Add confirmed uncertain detections with full OCR and linking processing.
+        Add confirmed uncertain detections with full page re-linking.
 
-        Args:
-            confirmed_dets: List of detection dicts that user confirmed
+        This ensures optimal coordinate assignments by re-linking ALL symbols
+        on affected pages after adding the new detections.
         """
         try:
             if not confirmed_dets:
                 return
 
+            # Filter out duplicates that already exist in df_all
+            confirmed_dets = self._filter_duplicate_detections(confirmed_dets)
+            if not confirmed_dets:
+                print("[UNCERTAIN] All detections were duplicates, nothing to add")
+                return
+
             print(f"\n[UNCERTAIN] Processing {len(confirmed_dets)} confirmed detections...")
 
-            # Process each detection through OCR and linking
-            new_rows = []
-            for det in confirmed_dets:
-                processed_row = self._process_confirmed_uncertain_detection(det)
-                new_rows.append(processed_row)
+            # Show progress dialog
+            progress = self._show_relinking_progress()
 
-            if new_rows:
+            try:
+                # Build used_coord_ids from existing df_all (needed for initial processing)
+                used_coord_ids = set()
+                if self.df_all is not None and not self.df_all.empty:
+                    for _, row in self.df_all.iterrows():
+                        link_id = row.get('link_coord_row_id')
+                        if pd.notna(link_id):
+                            used_coord_ids.add(link_id)
+
+                # Process each detection through OCR (linking will be redone in relink step)
+                new_rows = []
+                for det in confirmed_dets:
+                    processed_row, linked_coord_id = self._process_confirmed_uncertain_detection(det, used_coord_ids)
+                    new_rows.append(processed_row)
+                    if linked_coord_id is not None:
+                        used_coord_ids.add(linked_coord_id)
+
+                if not new_rows:
+                    return
+
                 # Add to DataFrame
                 new_df = pd.DataFrame(new_rows)
                 self.df_all = pd.concat([self.df_all, new_df], ignore_index=True)
+
+                # RE-LINK ENTIRE PAGE(S) for optimal coordinate assignments
+                affected_pages = set(row.get('page', 0) for row in new_rows)
+                for page in affected_pages:
+                    progress.setLabelText(f"Seite {int(page)} wird verknüpft...")
+                    QtWidgets.QApplication.processEvents()
+                    self._relink_entire_page(int(page), progress)
 
                 # Merge signals with existing same-name signals
                 for row in new_rows:
                     if row.get('cls') == 'signal' and row.get('anchor_text'):
                         self._merge_signal_with_existing(row['anchor_text'], row['page'])
 
-                # Remove from uncertain_detections
+                # Remove confirmed AND rejected from uncertain_detections
                 self.uncertain_detections = [
                     d for d in self.uncertain_detections
-                    if not d.get('user_confirmed', False)
+                    if not d.get('user_confirmed') and not d.get('user_rejected')
                 ]
 
-                # Rebuild page_dfs only for affected pages
-                affected_pages = set(row.get('page', 0) for row in new_rows)
+                # Rebuild page_dfs and row_specs for affected pages
                 for page_num in affected_pages:
                     page_num_int = int(page_num)
                     self.page_dfs[page_num_int] = self.df_all[self.df_all['page'] == page_num].copy()
+                    self._rebuild_row_specs_for_page(page_num_int)
 
                 # Refresh display
                 self.on_page_changed(self.current_page)
 
-                self._set_status(f" {len(new_rows)} Erkennung(en) mit OCR verarbeitet und hinzugefügt")
-                print(f"[UNCERTAIN] Added {len(new_rows)} processed detections to df_all")
+                self._set_status(f"✓ {len(new_rows)} Erkennung(en) hinzugefügt, Seite(n) neu verknüpft")
+                print(f"[UNCERTAIN] Added {len(new_rows)} detections, re-linked {len(affected_pages)} page(s)")
+
+            finally:
+                progress.close()
 
         except Exception as e:
             import traceback
@@ -6332,19 +6700,37 @@ class WorkspaceWidget(QtWidgets.QWidget):
             if should_merge_fahrt:
                 self.df_all.at[primary_idx, 'fahrtrichtung'] = new_fahrt
                 self.df_all.at[primary_idx, '_fahrtrichtung_source'] = new_source
+                # Also copy the GKS bbox if the new source has one (for signal GKS display)
+                if pd.notna(row.get('cx1')) and pd.notna(row.get('cy1')):
+                    self.df_all.at[primary_idx, 'cx1'] = row.get('cx1')
+                    self.df_all.at[primary_idx, 'cy1'] = row.get('cy1')
+                    self.df_all.at[primary_idx, 'cx2'] = row.get('cx2')
+                    self.df_all.at[primary_idx, 'cy2'] = row.get('cy2')
+                    self.df_all.at[primary_idx, 'link_coord_row_id'] = row.get('link_coord_row_id')
+                    print(f"[UNCERTAIN MERGE] Also copied GKS bbox to primary")
                 print(f"[UNCERTAIN MERGE] Updated Fahrtrichtung to '{new_fahrt}' (source: {new_source})")
 
             # Merge coord if primary doesn't have it
             primary_coord = self.df_all.at[primary_idx, 'coord_text'] if 'coord_text' in self.df_all.columns else None
-            if (not primary_coord or pd.isna(primary_coord)) and row.get('coord_text'):
+            primary_has_bbox = pd.notna(self.df_all.at[primary_idx, 'cx1']) if 'cx1' in self.df_all.columns else False
+            new_has_coord = row.get('coord_text') and pd.notna(row.get('coord_text'))
+            new_has_bbox = pd.notna(row.get('cx1')) and pd.notna(row.get('cy1'))
+
+            # Copy coord_text if primary doesn't have it
+            if (not primary_coord or pd.isna(primary_coord)) and new_has_coord:
                 self.df_all.at[primary_idx, 'coord_text'] = row['coord_text']
                 self.df_all.at[primary_idx, 'coord_value'] = row.get('coord_value')
                 self.df_all.at[primary_idx, 'gi_gl'] = row.get('gi_gl')
+                print(f"[UNCERTAIN MERGE] Merged coordinate '{row['coord_text']}' from instance {idx}")
+
+            # Copy GKS/coord bbox if primary doesn't have one but new does
+            if not primary_has_bbox and new_has_bbox:
                 self.df_all.at[primary_idx, 'cx1'] = row.get('cx1')
                 self.df_all.at[primary_idx, 'cy1'] = row.get('cy1')
                 self.df_all.at[primary_idx, 'cx2'] = row.get('cx2')
                 self.df_all.at[primary_idx, 'cy2'] = row.get('cy2')
-                print(f"[UNCERTAIN MERGE] Merged coordinate '{row['coord_text']}' from instance {idx}")
+                self.df_all.at[primary_idx, 'link_coord_row_id'] = row.get('link_coord_row_id')
+                print(f"[UNCERTAIN MERGE] Merged GKS/coord bbox from instance {idx}")
 
             # Mark duplicate as hidden
             if '_hidden' not in self.df_all.columns:
@@ -7106,7 +7492,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
             print(f"No data for page {page_num}")
             self.all_page_row_specs[page_num] = {}
             return
-        
+
+        # Filter out hidden rows - they should not have bounding box specs
+        if '_hidden' in df_page.columns:
+            df_page = df_page[~df_page['_hidden'].fillna(False)]
+
         #  Initialize specs dictionary
         specs = {}
         
@@ -7233,9 +7623,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
         for row_id in row_ids:
             if row_id not in specs:
                 continue
-            
+
             spec = specs[row_id]
-            
+
             # Check filters and get row data
             dfp = self.page_dfs.get(pidx)
             conf = 1.0  # Default confidence
@@ -7246,8 +7636,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 if m.empty:
                     continue
 
-                #  Skip hidden rows
-                if m.iloc[0].get('_hidden', False):
+                #  Skip hidden rows (use == True to handle NaN correctly)
+                if m.iloc[0].get('_hidden', False) == True:
                     continue
 
                 conf = m['conf'].iloc[0]

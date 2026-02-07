@@ -9,6 +9,7 @@ import math
 from typing import Dict, List, Tuple, Optional, Set
 from dataclasses import dataclass
 from enum import Enum
+from scipy.optimize import linear_sum_assignment
 
 # ============================================================================
 # COMPARISON RESULT TYPES
@@ -131,7 +132,7 @@ class LayoutComparisonEngine:
                     'identifier': 'coord_text',
                     'tracked_fields': ['coord_value']
                 },
-                'prellblock': {
+                'prellbock': {
                     'identifier': 'coord_text',
                     'tracked_fields': ['coord_value']
                 },
@@ -139,11 +140,11 @@ class LayoutComparisonEngine:
                     'identifier': 'coord_text',
                     'tracked_fields': ['coord_value']
                 },
-                'endeweichen': {
+                'weichenende': {
                     'identifier': 'coord_text',
                     'tracked_fields': ['coord_value']
                 },
-                'weichengruppeende': {
+                'weichengruppenende': {
                     'identifier': 'coord_text',
                     'tracked_fields': ['coord_value']
                 },
@@ -405,38 +406,77 @@ class LayoutComparisonEngine:
 
     def _match_spatially(self, dict_old: Dict, dict_new: Dict) -> Dict:
         """
-        Match elements by spatial proximity and semantic similarity.
-        
+        Match elements using Hungarian algorithm for optimal assignment.
+
+        This handles duplicates correctly by finding globally optimal pairing,
+        unlike greedy matching which can mismatch elements with same coord_text.
+
         Args:
             dict_old: Unmatched old elements {detection_id: element_data}
             dict_new: Unmatched new elements {detection_id: element_data}
-        
+
         Returns:
             Matches {old_detection_id: new_detection_id}
         """
+        if not dict_old or not dict_new:
+            return {}
+
+        # Group by class for class-specific matching
+        old_by_class = self._group_by_class(dict_old)
+        new_by_class = self._group_by_class(dict_new)
+
         matches = {}
-        matched_new = set()
-        
-        for old_id, old_elem in dict_old.items():
-            best_match_id = None
-            best_score = 0.0
-            
-            for new_id, new_elem in dict_new.items():
-                if new_id in matched_new:
-                    continue
-                
-                # Calculate match score
-                score = self._calculate_match_score(old_elem, new_elem)
-                
-                if score > best_score and score > 0.7:  # Threshold
-                    best_score = score
-                    best_match_id = new_id
-            
-            if best_match_id:
-                matches[old_id] = best_match_id
-                matched_new.add(best_match_id)
-        
+
+        for cls in old_by_class:
+            if cls not in new_by_class:
+                continue  # All elements of this class are deleted
+
+            old_items = list(old_by_class[cls].items())
+            new_items = list(new_by_class[cls].items())
+
+            if not old_items or not new_items:
+                continue
+
+            # Build cost matrix (negative scores for minimization)
+            n_old = len(old_items)
+            n_new = len(new_items)
+            cost_matrix = np.zeros((n_old, n_new))
+
+            for i, (old_id, old_elem) in enumerate(old_items):
+                for j, (new_id, new_elem) in enumerate(new_items):
+                    score = self._calculate_match_score(old_elem, new_elem)
+                    cost_matrix[i, j] = -score  # Negative for minimization
+
+            # Hungarian algorithm finds optimal assignment
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+            # Extract matches above threshold
+            for i, j in zip(row_ind, col_ind):
+                score = -cost_matrix[i, j]
+                if score > 0.7:  # Threshold
+                    old_id = old_items[i][0]
+                    new_id = new_items[j][0]
+                    matches[old_id] = new_id
+
         return matches
+
+    def _group_by_class(self, elements: Dict) -> Dict[str, Dict]:
+        """
+        Group elements by class for class-specific matching.
+
+        Args:
+            elements: Dictionary of elements {detection_id: element_data}
+
+        Returns:
+            Dictionary grouped by class {cls: {detection_id: element_data}}
+        """
+        grouped = {}
+        for elem_id, elem in elements.items():
+            cls = elem.get('cls', 'unknown')
+            if cls not in grouped:
+                grouped[cls] = {}
+            grouped[cls][elem_id] = elem
+        return grouped
     
     def _calculate_match_score(self, row1: Dict, row2: Dict) -> float:
         """
@@ -556,7 +596,7 @@ class LayoutComparisonEngine:
 
         Returns True for:
         - Pattern: "{class_name} {number}" (e.g., "sverbinder 7")
-        - Fixed names: "GM", "PB" (for gm_block, prellblock)
+        - Fixed names: "GM", "PB" (for gm_block, prellbock)
         - Haltepunkt with signal: "haltepunkt 1 (MB456)"
 
         Args:
@@ -576,7 +616,7 @@ class LayoutComparisonEngine:
         # FIXED NAMES - always auto-generated (not meaningful identifiers)
         if cls == 'gm_block' and anchor_text.upper() == 'GM':
             return True
-        if cls == 'prellblock' and anchor_text.upper() == 'PB':
+        if cls == 'prellbock' and anchor_text.upper() == 'PB':
             return True
 
         # HALTEPUNKT with signal name in brackets

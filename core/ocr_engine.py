@@ -1311,32 +1311,12 @@ def _normalize_signal_digits(s: str) -> str:
     trans = str.maketrans({'O': '0', 'I': '1', 'L': '1', 'S': '5', 'B': '8', 'Z': '2', 'G': '6', 'Q': '0', 'D': '0'})
     return head + tail.translate(trans)
 
-# Add this next to your other helpers
-_FINAL_ZERO_TAIL2_RE = re.compile(r'^([A-ZÄÖÜ]{1,4})\s*(\d{2})$')
-
 def _post_fix_missing_zero_middle(s: str) -> str:
     """
     DISABLED - This function caused incorrect OCR results.
-
-    Original purpose: If HEAD + exactly 2 digits, insert a middle '0'.
-    Example: 'AHR21' -> 'AHR201'
-
-    Problem: When OCR dropped a digit (AHR313 -> AHR31), this function
-    incorrectly "fixed" it to AHR301 instead of leaving it as AHR31.
-
-    The function is kept but disabled - all calls now return input unchanged.
-    User can manually correct OCR errors if needed.
+    Returns input unchanged. User can manually correct OCR errors if needed.
     """
-    # DISABLED: Return input unchanged to prevent incorrect "fixes"
     return s
-
-    # Original code (disabled):
-    # ss = _only_az09(s)
-    # m = _FINAL_ZERO_TAIL2_RE.match(ss)
-    # if not m:
-    #     return ss
-    # head, tail2 = m.groups()
-    # return f"{head}{tail2[0]}0{tail2[1]}"
 
 
 def _merge_adjacent_tokens_easyocr(detail_items, anchor):

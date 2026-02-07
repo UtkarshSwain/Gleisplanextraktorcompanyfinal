@@ -284,31 +284,29 @@ class AuditingWindow(QtWidgets.QMainWindow):
         help_menu.addAction(" Über", self._show_about)
     
     def _create_toolbar(self):
-        """Create streamlined toolbar with essential tools only"""
+        """Create single-row compact toolbar"""
         toolbar = self.addToolBar("Hauptwerkzeuge")
         toolbar.setMovable(False)
-
-        # Make toolbar buttons bigger with larger font
         toolbar.setStyleSheet("""
             QToolBar {
-                spacing: 4px;
-                padding: 4px;
+                spacing: 2px;
+                padding: 2px;
             }
             QToolButton {
-                font-size: 11pt;
-                padding: 6px 10px;
-                min-height: 28px;
+                font-size: 9pt;
+                padding: 4px 6px;
+                min-height: 24px;
             }
         """)
 
-        # Save Section - Most important actions first
-        act_save = QtWidgets.QAction(" Speichern", self)
+        # Save
+        act_save = QtWidgets.QAction("Speichern", self)
         act_save.setShortcut("Ctrl+S")
         act_save.setToolTip("Speichert alle Änderungen (Strg+S)")
         act_save.triggered.connect(self.on_save_current)
         toolbar.addAction(act_save)
 
-        act_save_all = QtWidgets.QAction(" Alle", self)
+        act_save_all = QtWidgets.QAction("Alle", self)
         act_save_all.setShortcut("Ctrl+Shift+S")
         act_save_all.setToolTip("Speichert alle geöffneten Pläne (Strg+Shift+S)")
         act_save_all.triggered.connect(self.on_save_all)
@@ -316,84 +314,84 @@ class AuditingWindow(QtWidgets.QMainWindow):
 
         toolbar.addSeparator()
 
-        # Clipboard Section
-        act_copy = QtWidgets.QAction(" Kopieren", self)
+        # Clipboard
+        act_copy = QtWidgets.QAction("Kopieren", self)
         act_copy.setToolTip("Kopiert ausgewählte Zellen (Strg+C)")
         act_copy.triggered.connect(self.on_copy)
         toolbar.addAction(act_copy)
 
-        act_paste = QtWidgets.QAction(" Einfügen", self)
+        act_paste = QtWidgets.QAction("Einfügen", self)
         act_paste.setToolTip("Fügt kopierte Daten ein (Strg+V)")
         act_paste.triggered.connect(self.on_paste)
         toolbar.addAction(act_paste)
 
         toolbar.addSeparator()
 
-        # Search and Data Management
-        act_find = QtWidgets.QAction(" Suchen", self)
+        # Search and Data
+        act_find = QtWidgets.QAction("Suchen", self)
         act_find.setToolTip("Sucht und ersetzt Text (Strg+F)")
         act_find.triggered.connect(self.on_find_replace)
         toolbar.addAction(act_find)
 
-        act_sort = QtWidgets.QAction(" Sortieren", self)
+        act_sort = QtWidgets.QAction("Sortieren", self)
         act_sort.setToolTip("Sortiert Daten nach Spalte")
         act_sort.triggered.connect(self.on_sort)
         toolbar.addAction(act_sort)
 
-        act_filter = QtWidgets.QAction(" Filter", self)
+        act_filter = QtWidgets.QAction("Filter", self)
         act_filter.setToolTip("Filtert Daten nach Kriterien")
         act_filter.triggered.connect(self.on_filter)
         toolbar.addAction(act_filter)
 
         toolbar.addSeparator()
 
-        # Export Section
-        act_excel = QtWidgets.QAction(" Excel Export", self)
+        # Export
+        act_excel = QtWidgets.QAction("Excel Export", self)
         act_excel.setToolTip("Exportiert als Excel-Datei (Strg+E)")
         act_excel.triggered.connect(self.on_export_excel)
         toolbar.addAction(act_excel)
 
-        act_json = QtWidgets.QAction(" JSON", self)
+        act_json = QtWidgets.QAction("JSON", self)
         act_json.setToolTip("Exportiert als JSON (Strg+J)")
         act_json.triggered.connect(self.on_export_json)
         toolbar.addAction(act_json)
 
         toolbar.addSeparator()
 
-        # Advanced Features - with clearer labels for non-technical users
-        act_bulk = QtWidgets.QAction(" Mehrere ändern", self)
-        act_bulk.setToolTip("Mehrere Einträge gleichzeitig bearbeiten\n\nNützlich wenn Sie viele ähnliche\nÄnderungen machen möchten")
+        # Bulk edit
+        act_bulk = QtWidgets.QAction("Mehrere ändern", self)
+        act_bulk.setToolTip("Mehrere Einträge gleichzeitig bearbeiten")
         act_bulk.triggered.connect(self.on_bulk_edit)
         toolbar.addAction(act_bulk)
 
-        act_compare = QtWidgets.QAction(" Pläne vergleichen", self)
-        act_compare.setToolTip("Zwei Gleispläne nebeneinander vergleichen\n\nHilft Unterschiede zwischen\nVersionen zu finden")
+        act_compare = QtWidgets.QAction("Pläne vergleichen", self)
+        act_compare.setToolTip("Zwei Gleispläne nebeneinander vergleichen")
         act_compare.triggered.connect(self.on_compare_pdfs)
         toolbar.addAction(act_compare)
 
         toolbar.addSeparator()
 
-        # Row Management - clearer labels
-        act_add_row = QtWidgets.QAction(" Neuer Eintrag", self)
-        act_add_row.setToolTip("Neuen Eintrag hinzufügen (Strg+Shift+N)\n\nErstellt einen neuen leeren Eintrag")
+        # Row management
+        act_add_row = QtWidgets.QAction("Neuer Eintrag", self)
+        act_add_row.setToolTip("Neuen Eintrag hinzufügen (Strg+Shift+N)")
         act_add_row.triggered.connect(self.on_add_row)
         toolbar.addAction(act_add_row)
 
-        act_del_row = QtWidgets.QAction(" Entfernen", self)
-        act_del_row.setToolTip("Ausgewählte Einträge entfernen (Strg+D)\n\n Diese Aktion kann nicht\nrückgängig gemacht werden")
+        act_del_row = QtWidgets.QAction("Entfernen", self)
+        act_del_row.setToolTip("Ausgewählte Einträge entfernen (Strg+D)")
         act_del_row.triggered.connect(self.on_delete_selected_table_rows)
         toolbar.addAction(act_del_row)
 
         toolbar.addSeparator()
 
-        # Symbol Management - clearer German labels
-        self.act_new_symbol = QtWidgets.QAction(" Symbol definieren", self)
-        self.act_new_symbol.setToolTip("Neues Symbol definieren\n\nErmöglicht das Hinzufügen von\nSymbolen die nicht automatisch\nerkannt wurden")
+        # Symbol management
+        self.act_new_symbol = QtWidgets.QAction("Symbol definieren", self)
+        self.act_new_symbol.setToolTip("Neues Symbol definieren")
         self.act_new_symbol.triggered.connect(self.on_add_new_symbol)
         toolbar.addAction(self.act_new_symbol)
 
-        self.act_run_template = QtWidgets.QAction(" Symbol suchen", self)
-        self.act_run_template.setToolTip("Nach definierten Symbolen suchen\n\nFindet alle Vorkommen eines\nneu definierten Symbols im Plan")
+        self.act_run_template = QtWidgets.QAction("Symbol suchen", self)
+        self.act_run_template.setToolTip("Nach definierten Symbolen suchen")
         self.act_run_template.triggered.connect(self.on_run_template_matching_only)
         toolbar.addAction(self.act_run_template)
 

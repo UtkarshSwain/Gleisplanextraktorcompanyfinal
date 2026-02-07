@@ -109,19 +109,19 @@ TTA_MIN_VOTES = 1             # Minimum votes to keep detection (1 or 2)
 # ============================================================================
 
 CLASSES = [
-    'signal',           # 0  - mAP50: 0.984
-    'gm_block',         # 1  - mAP50: 0.995
-    'gks_festkodiert',  # 2  - mAP50: 0.978
-    'gks_gesteuert',    # 3  - mAP50: 0.951
-    'weichen_block',    # 4  - mAP50: 0.977 (14 background FPs)
-    'isolierstoß',      # 5  - mAP50: 0.978
-    'haltepunkt',       # 6  - mAP50: 0.987
-    'sverbinder',       # 7  - mAP50: 0.995
-    'coordinate',       # 8  - mAP50: 0.987 (35 background FPs!)
-    'prellblock',       # 9  - mAP50: 0.995
-    'haltetafel',       # 10 - mAP50: 0.984 (6 background FPs)
-    'endeweichen',      # 11 - mAP50: 0.995
-    'weichengruppeende' # 12 - mAP50: 0.990
+    'signal',           # 0  - mAP50: 0.989 (h100_color_v1)
+    'gm_block',         # 1  - mAP50: 0.995 (h100_color_v1)
+    'gks_festkodiert',  # 2  - mAP50: 0.985 (h100_color_v1, handles colors)
+    'gks_gesteuert',    # 3  - mAP50: 0.973 (h100_color_v1, handles colors)
+    'weichen_block',    # 4  - mAP50: 0.979 (h100_color_v1)
+    'isolierstoß',      # 5  - mAP50: 0.994 (h100_color_v1)
+    'haltepunkt',       # 6  - mAP50: 0.995 (h100_color_v1)
+    'sverbinder',       # 7  - mAP50: 0.988 (h100_color_v1)
+    'coordinate',       # 8  - mAP50: 0.993 (h100_color_v1)
+    'prellbock',        # 9  - mAP50: 0.995 (h100_color_v1)
+    'haltetafel',       # 10 - mAP50: 0.966 (h100_color_v1)
+    'weichenende',      # 11 - mAP50: 0.995 (h100_color_v1)
+    'weichengruppenende' # 12 - mAP50: 0.995 (h100_color_v1)
 ]
 
 def set_classes_from_model(model):
@@ -145,9 +145,7 @@ def set_classes_from_model(model):
 # ALIASES & REMAPPING
 # ============================================================================
 
-ALIASES = {
-    "endeweichen": "weichenende",
-}
+ALIASES = {}
 
 def _alias_name(n: str) -> str:
     """Apply class name aliases."""
@@ -164,7 +162,7 @@ def canon_name(n: str) -> str:
 # VALIDATION PATTERNS
 # ============================================================================
 
-NUMERIC_OK = {"gks_gesteuert", "gks_festkodiert", "weichen_block", "prellblock"}
+NUMERIC_OK = {"gks_gesteuert", "gks_festkodiert", "weichen_block", "prellbock"}
 
 CLASS_ID_PATTERNS = {
     "signal": r"^[A-ZÄÖÜ]{1,4}\d{1,4}$",
@@ -184,21 +182,20 @@ CLASS_THRESH = {
     # EXCELLENT PERFORMERS (mAP50 > 0.99) - Lower thresholds for edge cases
     "gm_block": 0.22,            # ↓ Very confident class
     "sverbinder": 0.50,          # ↓ Very confident class
-    "prellblock": 0.30,          # ↓ Very confident class
-    "endeweichen": 0.28,         # ↓ Excellent performer
-    "weichengruppeende": 0.6,   # ↓ Very good
+    "prellbock": 0.30,          # ↓ Very confident class
+    "weichengruppenende": 0.7,   # ↓ Very good
     
     # STRONG PERFORMERS (mAP50: 0.975-0.99) - Moderate-low thresholds
-    "signal": 0.80,              # ↓ TTA will help with edge cases
+    "signal": 0.40,              # ↓ TTA will help with edge cases
     "isolierstoß": 0.09,         # ↓ Was 0.00! Now reasonable
-    "haltetafel": 0.38,          # Moderate (6 background FPs)
+    "haltetafel": 0.55,          # Moderate (6 background FPs)
     "haltepunkt": 0.32,          # ↓ Good performer
-    "gks_festkodiert": 0.5,      # ↓ Solid
-    
+    "gks_festkodiert": 0.88,      # ↓ Was 0.5 (h100_color_v1 model: mAP50=0.985)
+
     # CLASSES NEEDING ATTENTION - Still strict
     "coordinate": 0.10,          # ↑ Slightly higher (35 background FPs!)
     "weichen_block": 0.42,       # Balanced (14 background FPs)
-    "gks_gesteuert": 0.7,        # Lower performer
+    "gks_gesteuert": 0.5,        # ↓ Was 0.7 (h100_color_v1 model: mAP50=0.973)
     
     # Alias
     "weichenende": 0.7,
@@ -228,8 +225,8 @@ NMS_THRESHOLDS = {
     "weichen_block": 0.30,       # ↓ Stricter
     "signal": 0.32,              # ↓ Stricter
     "haltetafel": 0.35,          # ↓ Stricter
-    "gks_gesteuert": 0.38,       
-    "gks_festkodiert": 0.38,     
+    "gks_gesteuert": 0.30,       # ↓ Was 0.38 (h100_color_v1 model is more confident)
+    "gks_festkodiert": 0.30,     # ↓ Was 0.38 (h100_color_v1 model is more confident)
     "default": 0.40              # ↓ Much tighter than 0.5
 }
 
@@ -263,9 +260,9 @@ LINK_RULES = {
     "sverbinder": dict(mode="above"),
     "weichenende": dict(mode="either", dx_multiplier=3.0, prefer_horizontal=True,
                         fallback_dy_steps=[1.5, 2.0, 2.5]),
-    "prellblock": dict(mode="right_or_below", dx_multiplier=2.0, prefer_horizontal=True),
+    "prellbock": dict(mode="right_or_below", dx_multiplier=2.0, prefer_horizontal=True),
     "haltetafel": dict(mode="either", dx_multiplier=2.0),
-    "weichengruppeende": dict(mode="either", dx_multiplier=4.0, prefer_horizontal=True,
+    "weichengruppenende": dict(mode="either", dx_multiplier=3.0, prefer_horizontal=True,
                               search_left=True, fallback_dy_steps=[1.5, 2.0, 2.5, 3.0])
 }
 
@@ -277,10 +274,10 @@ CARDINAL_PARAMS = {
         "signal": 4,
         "weichenende": 8,
         "haltetafel": 4,
-        "prellblock": 4,
+        "prellbock": 4,
         "gks_gesteuert": 8,
         "gks_festkodiert": 8,
-        "weichengruppeende": 4,
+        "weichengruppenende": 4,
         "weichen_block": 2,
     },
     "expansion_factor": {
@@ -303,7 +300,7 @@ ANGULAR_PARAMS = {
         "signal": 8,
         "weichenende": 4,
         "haltetafel": 4,
-        "prellblock": 4,
+        "prellbock": 4,
         # ⬇ angular GKS benefit most from extra pad
         "gks_gesteuert": 6,
         "gks_festkodiert": 6,

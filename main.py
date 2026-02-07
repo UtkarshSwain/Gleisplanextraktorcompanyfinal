@@ -22,7 +22,7 @@ from utils.dpi_utils import get_adaptive_window_size, center_window
 from utils.helpers import _is_deleted
 from ui.themes import DARK_QSS, LIGHT_QSS
 import sys
-from database_sqlite import init_db, get_workspace_data, save_workspace_data
+from database_sqlite import init_db
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):

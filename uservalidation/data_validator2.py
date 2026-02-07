@@ -202,13 +202,13 @@ class EnhancedDataValidator:
             'gks_gesteuert',
             'gks_festkodiert',
             'isolierstoß',
-            'prellblock',
+            'prellbock',
             'haltepunkt',
             'sverbinder',
             'gm_block',
             'haltetafel',
             'weichenende',
-            'weichengruppeende',
+            'weichengruppenende',
         ]
 
         for cls in LINKABLE_CLASSES:

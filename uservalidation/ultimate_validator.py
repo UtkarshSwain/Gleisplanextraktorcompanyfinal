@@ -356,10 +356,10 @@ class UltimateValidator:
             'haltetafel': None,        # Skip - can be legitimately close, rarely duplicates
             'sverbinder': 30,
             'gm_block': 40,
-            'prellblock': 30,
+            'prellbock': 30,
             'isolierstoß': None,       # Skip - often appear in sequence, rarely duplicates
             'weichenende': None,       # Skip - can be legitimately close
-            'weichengruppeende': 40,
+            'weichengruppenende': 40,
         }
 
         for cls in self.df['cls'].unique():
@@ -772,10 +772,10 @@ class UltimateValidator:
         - gks_festkodiert → must have coordinate within 150px (error)
         - sverbinder → must have coordinate within 150px (error)
         - gm_block → must have coordinate within 150px (error)
-        - prellblock → should have coordinate within 200px (warning)
+        - prellbock → should have coordinate within 200px (warning)
         - haltepunkt → should have coordinate within 200px (warning)
         - haltetafel → should have coordinate within 200px (warning)
-        - weichengruppeende → should have coordinate within 200px (warning)
+        - weichengruppenende → should have coordinate within 200px (warning)
         - weichenende → should have coordinate within 200px (warning)
         """
         issues = []
@@ -791,8 +791,8 @@ class UltimateValidator:
             # Use same list as CLASSES_NEEDING_COORDS
             critical_classes = [
                 'signal', 'gks_gesteuert', 'gks_festkodiert', 'isolierstoß',
-                'prellblock', 'haltepunkt', 'sverbinder', 'gm_block',
-                'haltetafel', 'weichenende', 'weichengruppeende'
+                'prellbock', 'haltepunkt', 'sverbinder', 'gm_block',
+                'haltetafel', 'weichenende', 'weichengruppenende'
             ]
             for cls in critical_classes:
                 count = len(self.df[self.df['cls'] == cls])
@@ -829,10 +829,10 @@ class UltimateValidator:
             'sverbinder': {'max_distance': 150, 'severity': 'error', 'required': True},
             'gm_block': {'max_distance': 150, 'severity': 'error', 'required': True},
             # Optional classes (warnings if missing coordinate)
-            'prellblock': {'max_distance': 200, 'severity': 'warning', 'required': False},
+            'prellbock': {'max_distance': 200, 'severity': 'warning', 'required': False},
             'haltepunkt': {'max_distance': 200, 'severity': 'warning', 'required': False},
             'haltetafel': {'max_distance': 200, 'severity': 'warning', 'required': False},
-            'weichengruppeende': {'max_distance': 200, 'severity': 'warning', 'required': False},
+            'weichengruppenende': {'max_distance': 200, 'severity': 'warning', 'required': False},
             'weichenende': {'max_distance': 200, 'severity': 'warning', 'required': False},
         }
 
@@ -898,8 +898,8 @@ class UltimateValidator:
         # Classes that MUST have coordinate nearby (same as CLASSES_NEEDING_COORDS)
         coord_required_classes = [
             'signal', 'gks_gesteuert', 'gks_festkodiert', 'isolierstoß',
-            'prellblock', 'haltepunkt', 'sverbinder', 'gm_block',
-            'haltetafel', 'weichenende', 'weichengruppeende'
+            'prellbock', 'haltepunkt', 'sverbinder', 'gm_block',
+            'haltetafel', 'weichenende', 'weichengruppenende'
         ]
 
         # Get all coordinates for distance checks

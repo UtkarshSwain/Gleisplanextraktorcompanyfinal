@@ -320,7 +320,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         self.uncertain_table.setColumnWidth(2, 150)  # Position
         self.uncertain_table.setColumnWidth(3, 60)   # Page
         self.uncertain_table.setColumnWidth(4, 80)   # Show
-        self.uncertain_table.setColumnWidth(5, 100)  # Confirm/Reject
+        self.uncertain_table.setColumnWidth(5, 130)  # Confirm/Reject/Reset (3 buttons)
         self.uncertain_table.setColumnWidth(6, 100)  # Status
 
         self.uncertain_table.horizontalHeader().setStretchLastSection(True)
@@ -388,11 +388,25 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             reject_btn.clicked.connect(lambda checked, r=row: self._reject_uncertain(r))
             btn_layout.addWidget(reject_btn)
 
+            reset_btn = QtWidgets.QPushButton("↺")
+            reset_btn.setToolTip("Zurücksetzen")
+            reset_btn.setStyleSheet("background-color: #888888; color: white; font-weight: bold;")
+            reset_btn.setFixedWidth(30)
+            reset_btn.clicked.connect(lambda checked, r=row: self._reset_uncertain(r))
+            btn_layout.addWidget(reset_btn)
+
             self.uncertain_table.setCellWidget(row, 5, btn_widget)
 
-            # Status
-            status_item = QtWidgets.QTableWidgetItem("Ausstehend")
-            status_item.setForeground(QtGui.QColor(170, 170, 170))
+            # Status - sync with existing flags from previous session
+            if det.get('user_confirmed'):
+                status_item = QtWidgets.QTableWidgetItem("✓ Bestätigt")
+                status_item.setForeground(QtGui.QColor(144, 238, 144))  # Light green
+            elif det.get('user_rejected'):
+                status_item = QtWidgets.QTableWidgetItem("✗ Abgelehnt")
+                status_item.setForeground(QtGui.QColor(255, 182, 193))  # Light pink
+            else:
+                status_item = QtWidgets.QTableWidgetItem("Ausstehend")
+                status_item.setForeground(QtGui.QColor(170, 170, 170))
             self.uncertain_table.setItem(row, 6, status_item)
 
         self.uncertain_layout.addWidget(self.uncertain_table)
@@ -434,9 +448,21 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
     def _reject_uncertain(self, row):
         """Reject a single uncertain detection."""
         self.uncertain_detections[row]['user_confirmed'] = False
+        self.uncertain_detections[row]['user_rejected'] = True  # Mark as explicitly rejected
         status_item = self.uncertain_table.item(row, 6)
         status_item.setText("✗ Abgelehnt")
         status_item.setForeground(QtGui.QColor(255, 182, 193))  # Light pink
+
+    def _reset_uncertain(self, row):
+        """Reset a single uncertain detection to pending state."""
+        # Remove both flags
+        if 'user_confirmed' in self.uncertain_detections[row]:
+            del self.uncertain_detections[row]['user_confirmed']
+        if 'user_rejected' in self.uncertain_detections[row]:
+            del self.uncertain_detections[row]['user_rejected']
+        status_item = self.uncertain_table.item(row, 6)
+        status_item.setText("Ausstehend")
+        status_item.setForeground(QtGui.QColor(170, 170, 170))  # Gray
 
     def _confirm_all_uncertain(self):
         """Confirm all uncertain detections."""

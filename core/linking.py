@@ -12,7 +12,7 @@ from utils.helpers import _is_cardinal,_norm_angle,_is_angular,ANGLE_TOL,_is_nea
 NAME_RULES_EXTRA = {
     "gm_block": dict(inside=True, right=True, below=True),
     "weichen_block": dict(inside=True, right=True, below=True),
-    "prellblock": dict(inside=True, right=True, below=True),
+    "prellbock": dict(inside=True, right=True, below=True),
     "gks_gesteuert": dict(inside=True, left=True, right=True, below=True),
     "gks_festkodiert": dict(inside=True, left=True, right=True, below=True),
     "signal": dict(left=True, right=True, below=True, above=True),
@@ -542,7 +542,7 @@ def link_anchor_to_coord(anchor, coords, learned_patterns=None):
         else:
             print(f"NO MATCH")
 
-    # Step-wise fallback for specific classes (weichengruppeende, weichenende)
+    # Step-wise fallback for specific classes (weichengruppenende, weichenende)
     # Only searches in AVAILABLE coordinates (not occupied by other classes)
     if best is None:
         fallback_steps = rule.get("fallback_dy_steps", [])
@@ -2192,7 +2192,8 @@ def link_isolierstoss_fallback(anchor, coords, used_coord_ids, max_radius=300):
         print(f"Max radius: {max_radius}px")
 
     # Filter to unlinked coordinates only
-    available_coords = [c for c in coords if id(c) not in used_coord_ids]
+    # Use row_id if available (for database-backed coords), fallback to id() for runtime objects
+    available_coords = [c for c in coords if c.get('row_id', id(c)) not in used_coord_ids]
 
     if DEBUG_ANGLE_ROUTING:
         print(f"Total coordinates: {len(coords)}")

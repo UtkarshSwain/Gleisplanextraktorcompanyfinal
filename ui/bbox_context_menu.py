@@ -13,18 +13,21 @@ if TYPE_CHECKING:
 class BBoxContextMenu:
     """Context menu handler for bounding box items"""
 
-    # Common YOLO classes for rail infrastructure
+    # All YOLO classes for rail infrastructure (matching model training)
     COMMON_CLASSES = [
-        'coordinate',
         'signal',
-        'gks_gesteuert',
+        'gm_block',
         'gks_festkodiert',
-        'weiche',
+        'gks_gesteuert',
         'weichen_block',
-        'sverbinder',
+        'isolierstoß',
         'haltepunkt',
-        'prellblock',
-        'gks_nicht_gesteuert',
+        'sverbinder',
+        'coordinate',
+        'prellbock',
+        'haltetafel',
+        'weichenende',
+        'weichengruppenende',
     ]
 
     def __init__(self, workspace: 'WorkspaceWidget'):

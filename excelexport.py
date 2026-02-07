@@ -3,8 +3,7 @@ import json
 import re
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.utils import get_column_letter
 
 
 # =============================================================================

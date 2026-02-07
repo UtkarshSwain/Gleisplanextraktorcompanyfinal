@@ -20,13 +20,10 @@ model_classes:
   - haltepunkt
   - sverbinder
   - coordinate
-  - prellblock
+  - prellbock
   - haltetafel
-  - endeweichen
-  - weichengruppeende
-
-class_aliases:
-  endeweichen: weichenende
+  - weichenende
+  - weichengruppenende
 
 # Class-specific configurations
 classes:
@@ -88,7 +85,7 @@ classes:
     requires_ocr: true
     color: [128, 128, 128]
 
-  prellblock:
+  prellbock:
     confidence_threshold: 0.22
     nms_threshold: 0.40
     requires_ocr: false
@@ -107,7 +104,7 @@ classes:
     requires_ocr: true
     color: [255, 192, 203]
 
-  weichengruppeende:
+  weichengruppenende:
     confidence_threshold: 0.32
     nms_threshold: 0.40
     requires_ocr: true
@@ -137,14 +134,14 @@ linking_rules:
     mode: either
     dx_multiplier: 3.0
     prefer_horizontal: true
-  prellblock:
+  prellbock:
     mode: right_or_below
     dx_multiplier: 2.0
     prefer_horizontal: true
   haltetafel:
     mode: either
     dx_multiplier: 2.0
-  weichengruppeende:
+  weichengruppenende:
     mode: either
     dx_multiplier: 4.0
     prefer_horizontal: true
@@ -169,10 +166,10 @@ ocr:
     signal: 4
     weichenende: 8
     haltetafel: 4
-    prellblock: 4
+    prellbock: 4
     gks_gesteuert: 8
     gks_festkodiert: 8
-    weichengruppeende: 4
+    weichengruppenende: 4
     weichen_block: 2
   cardinal_expansion_factor:
     coordinate: [1.0, 1.0]
@@ -185,7 +182,7 @@ ocr:
     signal: 8
     weichenende: 4
     haltetafel: 4
-    prellblock: 4
+    prellbock: 4
     gks_gesteuert: 6
     gks_festkodiert: 6
   angular_expansion_factor:
@@ -218,7 +215,7 @@ validation:
     - gks_gesteuert
     - gks_festkodiert
     - weichen_block
-    - prellblock
+    - prellbock
   id_patterns:
     signal: "^[A-ZÄÖÜ]{1,4}\\d{1,4}$"
     gks_gesteuert: "^\\d{3,4}$"
