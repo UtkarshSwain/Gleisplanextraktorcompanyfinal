@@ -341,6 +341,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
         # Storage for uncertain (low-confidence) detections for user review
         self.uncertain_detections = []
 
+        # Storage for learned OCR patterns (for adaptive linking)
+        self.learned_patterns = None
+
         # OCR engine for processing confirmed uncertain detections
         self.ocr_engine = "paddleocr"
 
@@ -1117,12 +1120,14 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 page_dfs: Dict, page_bgr_arrays: Dict,
                 track_skeleton: Optional[np.ndarray] = None,
                 from_database: bool = False,
-                uncertain_detections: list = None):
+                uncertain_detections: list = None,
+                learned_patterns: dict = None):
         """Load data into workspace - with database check
 
         Args:
             from_database: If True, skip database check (data already loaded from DB)
             uncertain_detections: List of low-confidence detections for user review
+            learned_patterns: Optional dict of learned OCR patterns for adaptive linking
         """
 
         #  SET FLAG TO PREVENT STATE SAVING DURING LOAD
@@ -1132,6 +1137,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self.uncertain_detections = uncertain_detections or []
         if self.uncertain_detections:
             print(f"  Received {len(self.uncertain_detections)} uncertain detections for review")
+
+        # Store learned patterns for OCR adjustment tracking
+        self.learned_patterns = learned_patterns
+        if self.learned_patterns:
+            print(f"  Received {len(self.learned_patterns)} learned OCR patterns")
 
         try:
             #  VERIFY DATA ISOLATION
@@ -1176,6 +1186,17 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.page_dfs = {k: self._ensure_hidden_column(v.copy()) for k, v in page_dfs.items()}
             self.page_bgr_arrays = {k: np.copy(v) for k, v in page_bgr_arrays.items()}  # Deep copy numpy arrays
 
+            # FIX: Rebuild page_dfs from df_all when loading from database
+            if from_database and not self.page_dfs and not self.df_all.empty:
+                print("  Rebuilding page_dfs from df_all (loaded from database)...")
+                if 'page' in self.df_all.columns:
+                    for page_num in self.df_all['page'].unique():
+                        page_num_int = int(page_num)
+                        self.page_dfs[page_num_int] = self._ensure_hidden_column(
+                            self.df_all[self.df_all['page'] == page_num].copy()
+                        )
+                    print(f"  Rebuilt page_dfs for {len(self.page_dfs)} pages")
+
             #  FIX: Ensure link_coord_row_id column exists in page_dfs too
             for page_num, page_df in self.page_dfs.items():
                 if 'link_coord_row_id' not in page_df.columns:
@@ -1210,12 +1231,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.all_page_row_specs.clear()
             for pidx, df_page in self.page_dfs.items():
                 
-                #  ADD DEBUG: Check _hidden column in page df
-                if '_hidden' in df_page.columns:
-                    page_hidden_count = df_page['_hidden'].sum()
-                    print(f"  Page {pidx}: {page_hidden_count} hidden rows out of {len(df_page)}")
-                else:
-                    print(f"WARNING: Page {pidx} missing _hidden column!")
+                #  ADD DEBUG: Check _hidden column in page df (disabled for performance)
+                # if '_hidden' in df_page.columns:
+                #     page_hidden_count = df_page['_hidden'].sum()
+                #     print(f"  Page {pidx}: {page_hidden_count} hidden rows out of {len(df_page)}")
+                # else:
+                #     print(f"WARNING: Page {pidx} missing _hidden column!")
                 
                 specs = {}
                 for _, row in df_page.iterrows():
@@ -1256,9 +1277,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     angle = row.get('angle', 0.0)
                     angle_raw = row.get('angle_raw', angle)
 
-                    # Debug output for angle detection
-                    if pd.notna(angle) or pd.notna(angle_raw):
-                        print(f"Row {row['row_id']} ({row['cls']}): angle={angle}, angle_raw={angle_raw}")
+                    # Debug output for angle detection (disabled for performance)
+                    # if pd.notna(angle) or pd.notna(angle_raw):
+                    #     print(f"Row {row['row_id']} ({row['cls']}): angle={angle}, angle_raw={angle_raw}")
 
                     # Try angle first, then angle_raw
                     use_angle = angle if pd.notna(angle) and angle != 0.0 else angle_raw
@@ -1268,7 +1289,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                             pts = bbox_to_rotated_poly(x1, y1, x2, y2, float(use_angle))
                             spec.update({"is_poly": True, "pts": pts})
                             specs[int(row['row_id'])] = spec
-                            print(f"Created ROTATED polygon for row {row['row_id']}, angle={use_angle:.1f}°")
+                            # print(f"Created ROTATED polygon for row {row['row_id']}, angle={use_angle:.1f}°")  # Disabled for performance
                             continue
                         except Exception as e:
                             print(f"Failed to create rotated poly: {e}")
@@ -1281,10 +1302,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     specs[int(row['row_id'])] = spec
                 
                 self.all_page_row_specs[pidx] = specs
-                
-                #  DEBUG: Show what was built
-                print(f" Page {pidx}: Built {len(specs)} row specs")
-                print(f"Classes: {df_page['cls'].value_counts().to_dict()}")
+
+                #  DEBUG: Show what was built (disabled for performance - uncomment for debugging)
+                # print(f" Page {pidx}: Built {len(specs)} row specs")
+                # print(f"Classes: {df_page['cls'].value_counts().to_dict()}")
 
             max_page = max(self.page_dfs.keys()) if self.page_dfs else 1
             # Page control removed - single page view only

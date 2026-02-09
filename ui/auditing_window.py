@@ -74,12 +74,14 @@ class AuditingWindow(QtWidgets.QMainWindow):
                     page_base_pix: Dict, page_dfs: Dict, page_bgr_arrays: Dict,
                     track_skeleton: Optional[np.ndarray] = None,
                     from_database: bool = False,
-                    uncertain_detections: list = None):
+                    uncertain_detections: list = None,
+                    learned_patterns: dict = None):
         """Add a new PDF workspace as a tab
 
         Args:
             from_database: If True, data was loaded from database (skip DB check in workspace)
             uncertain_detections: List of low-confidence detections for user review
+            learned_patterns: Optional dict of learned OCR patterns
         """
         from ui.workspace_widget import WorkspaceWidget
 
@@ -92,7 +94,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
 
         # Create workspace widget
         workspace = WorkspaceWidget(self, layout_name)
-        workspace.load_data(df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, from_database, uncertain_detections or [])
+        workspace.load_data(df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, from_database, uncertain_detections or [], learned_patterns)
         
         # Add as tab (use filename without extension for cleaner look)
         tab_label = os.path.basename(layout_name)

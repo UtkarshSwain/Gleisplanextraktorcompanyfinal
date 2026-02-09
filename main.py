@@ -94,7 +94,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setup_window.show(); self.hide()
 
 
-    def _handle_processing_done(self, df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, exception, from_database=False, uncertain_detections=None):
+    def _handle_processing_done(self, df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, exception, from_database=False, uncertain_detections=None, learned_patterns=None):
             """Handle processing completion"""
 
             # Hide progress window
@@ -141,7 +141,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 page_bgr_arrays,
                 track_skeleton,
                 from_database,
-                uncertain_detections or []
+                uncertain_detections or [],
+                learned_patterns
             )
             
             # Keep setup window open for processing more PDFs

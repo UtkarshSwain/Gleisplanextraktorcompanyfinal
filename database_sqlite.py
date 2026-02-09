@@ -1,6 +1,11 @@
 """
 SQLite database module for Gleisplanextraktor.
 Provides local file-based storage with no external dependencies.
+
+Features:
+- Local SQLite database file
+- Memory logging utilities for debugging
+- No external dependencies (sqlite3 is built-in)
 """
 import sqlite3
 import json
@@ -11,6 +16,38 @@ import zlib
 from contextlib import contextmanager
 from typing import Optional, Tuple, List, Dict
 from pathlib import Path
+
+# Optional psutil for memory monitoring
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+
+
+# ============================================================================
+# MEMORY LOGGING UTILITIES
+# ============================================================================
+
+def get_memory_usage() -> float:
+    """Get current memory usage in MB."""
+    if HAS_PSUTIL:
+        process = psutil.Process(os.getpid())
+        mem_mb = process.memory_info().rss / 1024 / 1024
+        return mem_mb
+    return 0.0
+
+
+def log_memory(prefix: str = ""):
+    """Print current memory usage with optional prefix."""
+    if HAS_PSUTIL:
+        mem_mb = get_memory_usage()
+        print(f"[MEM] {prefix}: {mem_mb:.1f} MB")
+
+
+# ============================================================================
+# DATABASE CONFIGURATION
+# ============================================================================
 
 # Database file location - in user's app data or project directory
 def get_db_path() -> str:
@@ -1014,6 +1051,23 @@ def is_db_available() -> bool:
             return True
     except Exception:
         return False
+
+
+def set_db_path(path: str):
+    """Set a custom database file path."""
+    global DB_PATH
+    DB_PATH = path
+
+
+def reset_database():
+    """
+    Remove and reinitialize the database.
+    WARNING: This will delete all data!
+    """
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+        print(f"Removed existing database: {DB_PATH}")
+    init_db()
 
 
 # Initialize database when module is first imported

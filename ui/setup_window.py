@@ -19,7 +19,7 @@ import cv2
 from core.image_processing import qpolygonf_from_pts
 # -------- Setup & Run (connects to REAL PipelineWorker signals) --------
 class SetupAndRunWindow(QtWidgets.QMainWindow):
-    processing_done = QtCore.pyqtSignal(pd.DataFrame, object, object, object, object, object, bool, list)  # df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, exception, from_database, uncertain_detections
+    processing_done = QtCore.pyqtSignal(pd.DataFrame, object, object, object, object, object, bool, list, object)  # df_all, page_base_pix, page_dfs, page_bgr_arrays, track_skeleton, exception, from_database, uncertain_detections, learned_patterns
     started_processing = QtCore.pyqtSignal()
 
     def __init__(self, main_app_ref: 'MainWindow'):
@@ -1237,12 +1237,13 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 pending['track_skeleton'],
                 None,  # No exception
                 True,  # from_database=True
-                pending.get('uncertain_detections', [])
+                pending.get('uncertain_detections', []),
+                pending.get('learned_patterns', None)
             )
         else:
             # Normal analysis completed
             self.on_status("Analyse abgeschlossen.")
-            self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception, False, uncertain_detections or [])  # from_database=False
+            self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception, False, uncertain_detections or [], None)  # from_database=False, no learned_patterns for fresh analysis
 
     def closeEvent(self, e: QtGui.QCloseEvent):
         if hasattr(self, "worker") and self.worker is not None and self.worker.isRunning():
@@ -1582,8 +1583,12 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 self.on_status("Analyse abgebrochen")
                 self.statusBar().showMessage("Analyse wurde abgebrochen")
     def _update_run_button_state(self):
-        """Enable/disable run button based on whether PDF and model are loaded"""
-        can_run = self.pdf_path is not None and self.model_path is not None
+        """Enable/disable run button based on whether PDF is loaded.
+
+        Model is optional - if no model but saved data exists in database,
+        the workspace can still be loaded without running analysis.
+        """
+        can_run = self.pdf_path is not None
         self.btn_run.setEnabled(can_run)
         if hasattr(self, 'act_run'):
             self.act_run.setEnabled(can_run)
@@ -1978,7 +1983,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 track_skeleton,
                 None,  # No exception
                 True,  # from_database=True
-                uncertain_detections
+                uncertain_detections,
+                learned_patterns
             )
 
             self.on_status(f"Arbeitsbereich '{layout_name}' erfolgreich geladen!")
