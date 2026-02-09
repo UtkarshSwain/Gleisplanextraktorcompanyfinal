@@ -5,7 +5,7 @@ import os
 from PIL import Image, ImageFile
 import cv2
 import re
-from config import POPPLER_PATH, DEBUG_ANGLE_ROUTING, DEBUG_YOLO, DEBUG_TRACK, DEBUG_CUSTOM_SYMBOLS, DEBUG_LINKING, DEBUG_OCR, MAX_OCR_WORKERS, CLASS_THRESH, CLASSES, LINK_RULES, ALIASES, DPI, TILE_SIZE, EXCLUDE_LEGEND_STRIP, LEGEND_STRIP_WIDTH_PERCENT
+from config import POPPLER_PATH, DEBUG_ANGLE_ROUTING, DEBUG_YOLO, DEBUG_TRACK, DEBUG_CUSTOM_SYMBOLS, DEBUG_LINKING, DEBUG_OCR, MAX_OCR_WORKERS, CLASS_THRESH, CLASSES, LINK_RULES, ALIASES, DPI, TILE_SIZE, EXCLUDE_LEGEND_STRIP, LEGEND_STRIP_WIDTH_PERCENT, LEGEND_STRIP_MAX_PIXELS
 from pdf2image import convert_from_path, pdfinfo_from_path
 from core.yolo_detection import run_yolo_on_page, run_combined_detection, box_color, pil_to_bgr, tile_image, OVERLAP_PCT, color_masks
 from ultralytics import YOLO

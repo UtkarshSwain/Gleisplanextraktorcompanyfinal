@@ -90,7 +90,8 @@ ZOOM_SIZE = 2048
 # LEGEND STRIP EXCLUSION - Exclude right edge from detection
 # ============================================================================
 EXCLUDE_LEGEND_STRIP = True  # Master toggle for legend exclusion
-LEGEND_STRIP_WIDTH_PERCENT = 12  # Percentage of width to exclude from right edge
+LEGEND_STRIP_WIDTH_PERCENT = 12  # Percentage of width to exclude (for smaller images)
+LEGEND_STRIP_MAX_PIXELS = 4200  # Maximum pixels to exclude (caps % for large images)
 
 # OCR Threading - CPU optimized
 MAX_OCR_WORKERS = max(2, min(16, (os.cpu_count() or 4)))  # Use more CPU cores

@@ -31,8 +31,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
     activate_bbox_resize = QtCore.pyqtSignal()
     delete_row = QtCore.pyqtSignal(int)  # row_id to delete
 
-    # Signal for confirmed uncertain detections
-    uncertain_confirmed = QtCore.pyqtSignal(list)  # List of confirmed uncertain detections
+    # Signal for jumping to uncertain detection position
     jump_to_position = QtCore.pyqtSignal(tuple)  # (x, y) position to jump to
 
     def __init__(self, result: ValidationResult, uncertain_detections: List[dict] = None, parent=None):
@@ -291,7 +290,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         return table
 
     def _setup_uncertain_tab(self):
-        """Setup the uncertain detections review tab."""
+        """Setup the uncertain detections display tab (read-only)."""
         if not self.uncertain_detections:
             label = QtWidgets.QLabel("Keine unsicheren Erkennungen gefunden.")
             label.setStyleSheet("color: #888888; font-size: 12pt; padding: 20px;")
@@ -300,17 +299,17 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
 
         # Instructions
         info = QtWidgets.QLabel(
-            "Diese Erkennungen haben niedrige Konfidenz. Überprüfen Sie sie und bestätigen Sie gültige.\n"
-            "Klicken Sie 'Zeigen' um zur Position zu springen, dann 'Bestätigen' oder 'Ablehnen'."
+            "Diese Erkennungen haben niedrige Konfidenz.\n"
+            "Klicken Sie 'Zeigen' um zur Position zu springen."
         )
         info.setStyleSheet("color: #aaaaaa; padding: 10px;")
         self.uncertain_layout.addWidget(info)
 
-        # Table for uncertain detections
+        # Table for uncertain detections (display only)
         self.uncertain_table = QtWidgets.QTableWidget()
-        self.uncertain_table.setColumnCount(7)
+        self.uncertain_table.setColumnCount(5)
         self.uncertain_table.setHorizontalHeaderLabels([
-            "Klasse", "Konfidenz", "Position", "Seite", "Zeigen", "Bestätigen", "Status"
+            "Klasse", "Konfidenz", "Position", "Seite", "Zeigen"
         ])
         self.uncertain_table.setRowCount(len(self.uncertain_detections))
 
@@ -319,9 +318,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
         self.uncertain_table.setColumnWidth(1, 100)  # Confidence
         self.uncertain_table.setColumnWidth(2, 150)  # Position
         self.uncertain_table.setColumnWidth(3, 60)   # Page
-        self.uncertain_table.setColumnWidth(4, 80)   # Show
-        self.uncertain_table.setColumnWidth(5, 130)  # Confirm/Reject/Reset (3 buttons)
-        self.uncertain_table.setColumnWidth(6, 100)  # Status
+        self.uncertain_table.setColumnWidth(4, 55)   # Show
 
         self.uncertain_table.horizontalHeader().setStretchLastSection(True)
         self.uncertain_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -368,126 +365,12 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             show_btn.clicked.connect(lambda checked, d=det: self._show_uncertain(d))
             self.uncertain_table.setCellWidget(row, 4, show_btn)
 
-            # Confirm/Reject buttons in a widget
-            btn_widget = QtWidgets.QWidget()
-            btn_layout = QtWidgets.QHBoxLayout(btn_widget)
-            btn_layout.setContentsMargins(2, 2, 2, 2)
-            btn_layout.setSpacing(4)
-
-            confirm_btn = QtWidgets.QPushButton("✓")
-            confirm_btn.setToolTip("Bestätigen")
-            confirm_btn.setStyleSheet("background-color: #90EE90; color: black; font-weight: bold;")
-            confirm_btn.setFixedWidth(30)
-            confirm_btn.clicked.connect(lambda checked, r=row: self._confirm_uncertain(r))
-            btn_layout.addWidget(confirm_btn)
-
-            reject_btn = QtWidgets.QPushButton("✗")
-            reject_btn.setToolTip("Ablehnen")
-            reject_btn.setStyleSheet("background-color: #FFB6C1; color: black; font-weight: bold;")
-            reject_btn.setFixedWidth(30)
-            reject_btn.clicked.connect(lambda checked, r=row: self._reject_uncertain(r))
-            btn_layout.addWidget(reject_btn)
-
-            reset_btn = QtWidgets.QPushButton("↺")
-            reset_btn.setToolTip("Zurücksetzen")
-            reset_btn.setStyleSheet("background-color: #888888; color: white; font-weight: bold;")
-            reset_btn.setFixedWidth(30)
-            reset_btn.clicked.connect(lambda checked, r=row: self._reset_uncertain(r))
-            btn_layout.addWidget(reset_btn)
-
-            self.uncertain_table.setCellWidget(row, 5, btn_widget)
-
-            # Status - sync with existing flags from previous session
-            if det.get('user_confirmed'):
-                status_item = QtWidgets.QTableWidgetItem("✓ Bestätigt")
-                status_item.setForeground(QtGui.QColor(144, 238, 144))  # Light green
-            elif det.get('user_rejected'):
-                status_item = QtWidgets.QTableWidgetItem("✗ Abgelehnt")
-                status_item.setForeground(QtGui.QColor(255, 182, 193))  # Light pink
-            else:
-                status_item = QtWidgets.QTableWidgetItem("Ausstehend")
-                status_item.setForeground(QtGui.QColor(170, 170, 170))
-            self.uncertain_table.setItem(row, 6, status_item)
-
         self.uncertain_layout.addWidget(self.uncertain_table)
-
-        # Bulk action buttons
-        btn_layout = QtWidgets.QHBoxLayout()
-        btn_layout.addStretch()
-
-        confirm_all_btn = QtWidgets.QPushButton("Alle bestätigen")
-        confirm_all_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 8px;")
-        confirm_all_btn.clicked.connect(self._confirm_all_uncertain)
-        btn_layout.addWidget(confirm_all_btn)
-
-        reject_all_btn = QtWidgets.QPushButton("Alle ablehnen")
-        reject_all_btn.setStyleSheet("background-color: #f44336; color: white; padding: 8px;")
-        reject_all_btn.clicked.connect(self._reject_all_uncertain)
-        btn_layout.addWidget(reject_all_btn)
-
-        apply_btn = QtWidgets.QPushButton("Bestätigte übernehmen")
-        apply_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 8px;")
-        apply_btn.clicked.connect(self._apply_confirmed_uncertain)
-        btn_layout.addWidget(apply_btn)
-
-        btn_layout.addStretch()
-        self.uncertain_layout.addLayout(btn_layout)
 
     def _show_uncertain(self, det):
         """Jump to uncertain detection location."""
         pos = (det.get('cx', 0), det.get('cy', 0))
         self.jump_to_position.emit(pos)
-
-    def _confirm_uncertain(self, row):
-        """Confirm a single uncertain detection."""
-        self.uncertain_detections[row]['user_confirmed'] = True
-        status_item = self.uncertain_table.item(row, 6)
-        status_item.setText("✓ Bestätigt")
-        status_item.setForeground(QtGui.QColor(144, 238, 144))  # Light green
-
-    def _reject_uncertain(self, row):
-        """Reject a single uncertain detection."""
-        self.uncertain_detections[row]['user_confirmed'] = False
-        self.uncertain_detections[row]['user_rejected'] = True  # Mark as explicitly rejected
-        status_item = self.uncertain_table.item(row, 6)
-        status_item.setText("✗ Abgelehnt")
-        status_item.setForeground(QtGui.QColor(255, 182, 193))  # Light pink
-
-    def _reset_uncertain(self, row):
-        """Reset a single uncertain detection to pending state."""
-        # Remove both flags
-        if 'user_confirmed' in self.uncertain_detections[row]:
-            del self.uncertain_detections[row]['user_confirmed']
-        if 'user_rejected' in self.uncertain_detections[row]:
-            del self.uncertain_detections[row]['user_rejected']
-        status_item = self.uncertain_table.item(row, 6)
-        status_item.setText("Ausstehend")
-        status_item.setForeground(QtGui.QColor(170, 170, 170))  # Gray
-
-    def _confirm_all_uncertain(self):
-        """Confirm all uncertain detections."""
-        for row in range(len(self.uncertain_detections)):
-            self._confirm_uncertain(row)
-
-    def _reject_all_uncertain(self):
-        """Reject all uncertain detections."""
-        for row in range(len(self.uncertain_detections)):
-            self._reject_uncertain(row)
-
-    def _apply_confirmed_uncertain(self):
-        """Apply confirmed uncertain detections."""
-        confirmed = [d for d in self.uncertain_detections if d.get('user_confirmed', False)]
-        if confirmed:
-            self.uncertain_confirmed.emit(confirmed)
-            QtWidgets.QMessageBox.information(
-                self, "Übernommen",
-                f"{len(confirmed)} bestätigte Erkennung(en) wurden übernommen."
-            )
-        else:
-            QtWidgets.QMessageBox.warning(
-                self, "Keine Auswahl",
-                "Keine Erkennungen wurden bestätigt."
-            )
 
     def _populate_data(self):
         """Populate all tables with data"""

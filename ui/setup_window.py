@@ -901,15 +901,15 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         if not self.pdf_path:
             QtWidgets.QMessageBox.warning(self, "Fehler: Kein Gleisplan", "Bitte einen Gleisplan auswählen (PDF oder Bild).")
             return
-        if not self.model_path:
-            QtWidgets.QMessageBox.warning(self, "Fehler: Kein YOLO Model", "Bitte ein YOLO .pt Model auswählen.")
-            return
-        
+
         layout_name = os.path.basename(self.pdf_path)  # Use just filename as layout name
         force_rerun = self.check_force_rerun.isChecked()
 
-        # Always run full analysis - loading from DB is done via Database Manager
         if force_rerun:
+            # Force rerun requires model
+            if not self.model_path:
+                QtWidgets.QMessageBox.warning(self, "Fehler: Kein YOLO Model", "Bitte ein YOLO .pt Model auswählen.")
+                return
             self.on_status(" Neu-Analyse erzwungen")
             # Delete existing saved data to start fresh
             try:
@@ -918,8 +918,49 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 self.on_status("Alte gespeicherte Daten gelöscht")
             except Exception as e:
                 print(f"Could not delete old workspace data: {e}")
+            self._run_full_analysis()
+        else:
+            # Check if saved workspace exists - load from database if so
+            try:
+                from database_sqlite import get_workspace_data
+                result = get_workspace_data(layout_name)
+                if result is not None:
+                    # Loading from database - no model needed
+                    self.on_status(f"Gespeicherte Daten gefunden, rendere Seiten...")
+                    # Store workspace data for loading after pages are rendered
+                    if len(result) == 3:
+                        workspace_data, track_skeleton, image_dimensions = result
+                        learned_patterns, uncertain_detections = None, []
+                    else:
+                        workspace_data, track_skeleton, image_dimensions, learned_patterns, uncertain_detections = result
 
-        self._run_full_analysis()
+                    self._pending_workspace_data = {
+                        'layout_name': layout_name,
+                        'data': workspace_data,
+                        'track_skeleton': track_skeleton,
+                        'image_dimensions': image_dimensions,
+                        'learned_patterns': learned_patterns,
+                        'uncertain_detections': uncertain_detections or []
+                    }
+                    # Render pages without running analysis
+                    self._run_page_rendering_only()
+                else:
+                    # No saved data - need model for analysis
+                    if not self.model_path:
+                        QtWidgets.QMessageBox.warning(self, "Fehler: Kein YOLO Model",
+                            "Keine gespeicherten Daten gefunden.\nBitte ein YOLO .pt Model auswählen für die Analyse.")
+                        return
+                    self.on_status("Keine gespeicherten Daten gefunden, starte Analyse...")
+                    self._run_full_analysis()
+            except Exception as e:
+                print(f"Error checking for saved workspace: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fallback to analysis - need model
+                if not self.model_path:
+                    QtWidgets.QMessageBox.warning(self, "Fehler: Kein YOLO Model", "Bitte ein YOLO .pt Model auswählen.")
+                    return
+                self._run_full_analysis()
 
     def _cleanup_worker(self):
         """Clean up worker and disconnect signals to prevent memory leaks and duplicate callbacks"""
@@ -974,6 +1015,42 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.worker.page_processed.connect(self._on_worker_page_ready)
         self.worker.done.connect(self._on_worker_done)
         self.worker.track_detection_progress.connect(self.on_status)
+        self.worker.start()
+
+    def _run_page_rendering_only(self):
+        """Render PDF pages without running YOLO analysis (for loading from database)."""
+        self._cleanup_worker()
+
+        self.on_status("Rendere Seiten...")
+
+        self.started_processing.emit()
+        QtWidgets.QApplication.instance().setOverrideCursor(QtCore.Qt.WaitCursor)
+        self.btn_run.setEnabled(False)
+        self.act_run.setEnabled(False)
+        self.menu_act_run.setEnabled(False)
+        self.act_stop.setEnabled(True)
+        self.menu_act_stop.setEnabled(True)
+
+        self.progress.setValue(0)
+        self.scene.clear()
+
+        self._page_base_pix.clear()
+        self._page_dfs.clear()
+        self._page_bgr_arrays.clear()
+
+        # Create worker with run_analysis=False to only render pages
+        self.worker = PipelineWorker(
+            self.pdf_path,
+            self.model_path or "",  # Model not needed for rendering only
+            self.ocr_engine,
+            run_analysis=False,  # Key: don't run YOLO
+            detect_tracks=False
+        )
+
+        self.worker.progress.connect(self.progress.setValue)
+        self.worker.status.connect(self.on_status)
+        self.worker.page_processed.connect(self._on_worker_page_ready)
+        self.worker.done.connect(self._on_worker_done)
         self.worker.start()
 
     def _display_page_preview(self, page_num: int):
@@ -1132,7 +1209,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         if not hasattr(self, 'worker') or self.worker is None:
             return
 
-        self.on_status("Analyse abgeschlossen.")
         QtWidgets.QApplication.instance().restoreOverrideCursor()
         self.btn_run.setEnabled(True)
         self.act_run.setEnabled(True)
@@ -1140,8 +1216,33 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.act_stop.setEnabled(False)
         self.menu_act_stop.setEnabled(False)
 
-        # Pass all dictionaries, track_skeleton, and the exception to the next window
-        self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception, False, uncertain_detections or [])  # from_database=False
+        # Check if we were loading from database (pages rendered, now load saved data)
+        if self._pending_workspace_data is not None:
+            self.on_status("Lade gespeicherte Daten...")
+            pending = self._pending_workspace_data
+            self._pending_workspace_data = None  # Clear pending data
+
+            # Convert saved data to DataFrame
+            import pandas as pd
+            saved_df = pd.DataFrame(pending['data'])
+
+            self.on_status(f"Arbeitsbereich '{pending['layout_name']}' mit {len(saved_df)} Erkennungen geladen!")
+
+            # Emit with saved data, from_database=True
+            self.processing_done.emit(
+                saved_df,
+                self._page_base_pix,
+                {},  # page_dfs will be rebuilt in workspace widget
+                self._page_bgr_arrays,
+                pending['track_skeleton'],
+                None,  # No exception
+                True,  # from_database=True
+                pending.get('uncertain_detections', [])
+            )
+        else:
+            # Normal analysis completed
+            self.on_status("Analyse abgeschlossen.")
+            self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception, False, uncertain_detections or [])  # from_database=False
 
     def closeEvent(self, e: QtGui.QCloseEvent):
         if hasattr(self, "worker") and self.worker is not None and self.worker.isRunning():
@@ -1837,8 +1938,10 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             # Handle both old format (3 values) and new format (5 values)
             if len(result) == 3:
                 workspace_data, track_skeleton, image_dimensions = result
+                learned_patterns, uncertain_detections = None, []
             else:
-                workspace_data, track_skeleton, image_dimensions, _, _ = result
+                workspace_data, track_skeleton, image_dimensions, learned_patterns, uncertain_detections = result
+                uncertain_detections = uncertain_detections or []
 
             # Emit signal to open in AuditingWindow with saved data
             self.on_status(f"Öffne Arbeitsbereich mit {len(workspace_data)} Erkennungen...")
@@ -1860,7 +1963,9 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                     'layout_name': layout_name,
                     'data': workspace_data,
                     'track_skeleton': track_skeleton,
-                    'image_dimensions': image_dimensions
+                    'image_dimensions': image_dimensions,
+                    'learned_patterns': learned_patterns,
+                    'uncertain_detections': uncertain_detections
                 }
                 return
 
@@ -1873,7 +1978,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 track_skeleton,
                 None,  # No exception
                 True,  # from_database=True
-                []  # No uncertain detections from database
+                uncertain_detections
             )
 
             self.on_status(f"Arbeitsbereich '{layout_name}' erfolgreich geladen!")

@@ -5,6 +5,7 @@ Allows quick actions: change class, re-run OCR, delete, etc.
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from typing import TYPE_CHECKING, Optional
+import pandas as pd
 
 if TYPE_CHECKING:
     from ui.workspace_widget import WorkspaceWidget
@@ -110,7 +111,14 @@ class BBoxContextMenu:
         menu.exec_(pos)
 
     def _change_class(self, row_id: int, new_class: str):
-        """Change the class of a detection and re-run OCR"""
+        """
+        Change the class of a detection and re-run OCR.
+
+        This method:
+        1. Updates the class in df_all and page_dfs
+        2. Re-runs OCR with new class parameters and saves result to dataframe
+        3. Refreshes tree and overlay (tree is rebuilt from updated dataframe)
+        """
         try:
             # Find row
             row_mask = self.workspace.df_all['row_id'] == row_id
@@ -125,7 +133,8 @@ class BBoxContextMenu:
                 self.workspace,
                 "Klasse ändern",
                 f"Klasse von '{old_class}' zu '{new_class}' ändern?\n\n"
-                f"OCR wird automatisch mit der neuen Klasse ausgeführt.",
+                f"OCR wird automatisch mit der neuen Klasse ausgeführt.\n"
+                f"Die Überlagerung und Tabelle werden aktualisiert.",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
             )
 
@@ -140,6 +149,7 @@ class BBoxContextMenu:
 
             # Update class in dataframe
             self.workspace.df_all.loc[row_idx, 'cls'] = new_class
+            print(f" Updated cls in df_all: {old_class} → {new_class}")
 
             # Update in page_dfs
             page = int(self.workspace.df_all.loc[row_idx, 'page'])
@@ -148,21 +158,15 @@ class BBoxContextMenu:
                 if page_mask.any():
                     page_idx = self.workspace.page_dfs[page][page_mask].index[0]
                     self.workspace.page_dfs[page].loc[page_idx, 'cls'] = new_class
+                    print(f" Updated cls in page_dfs[{page}]")
 
-            # Update tree widget
-            item = self.workspace.row_id_to_tree_item.get(row_id)
-            if item:
-                # Update tree item appearance based on new class
-                self.workspace.tree.blockSignals(True)
-                # The tree structure might need to change based on class
-                # For now, just update the display
-                self.workspace.tree.blockSignals(False)
+            # Re-run OCR with new class parameters and SAVE to dataframe
+            print(f" Running OCR with new class '{new_class}'...")
+            self._rerun_ocr_and_save(row_id, row_idx, new_class, page)
 
-            # Re-run OCR with new class
-            print(f" Class changed: {old_class} → {new_class}, running OCR...")
-            self.workspace.on_rerun_ocr(row_id, 'horizontal')
-
-            # Refresh graphics
+            # Refresh graphics - rebuild overlay with new class styling
+            # Note: on_page_changed also calls _populate_tree which rebuilds the tree
+            # from page_dfs (which now has the updated class)
             self.workspace._rebuild_row_specs_for_current_page()
             self.workspace.on_page_changed(self.workspace.current_page)
 
@@ -176,6 +180,69 @@ class BBoxContextMenu:
                 "Fehler",
                 f"Fehler beim Ändern der Klasse:\n{str(e)}"
             )
+
+    def _rerun_ocr_and_save(self, row_id: int, row_idx, new_class: str, page: int):
+        """
+        Re-run OCR with new class parameters and save result to dataframe.
+
+        Unlike workspace.on_rerun_ocr which only updates tree display,
+        this method also persists the OCR result to df_all and page_dfs.
+        """
+        from core.ocr_engine import (
+            ocr_coordinate_horizontal, ocr_signal_name,
+            ocr_numeric_cardinal_box, ocr_generic_name, NUMERIC_OK
+        )
+
+        try:
+            if self.workspace.current_page_bgr_array is None:
+                print(" No BGR array available, skipping OCR")
+                return
+
+            row = self.workspace.df_all.loc[row_idx]
+            det = self.workspace._reconstruct_det_from_row(row)
+
+            # Override class in det with new class
+            det['cls'] = new_class
+            det['name'] = new_class
+
+            new_text = ""
+            is_coord = False
+
+            if new_class == "coordinate":
+                is_coord = True
+                new_text = ocr_coordinate_horizontal(det, self.workspace.current_page_bgr_array, "paddleocr")
+            elif new_class == "signal":
+                new_text = ocr_signal_name(det, self.workspace.current_page_bgr_array, "paddleocr")
+            elif new_class in {"gks_gesteuert", "gks_festkodiert"}:
+                new_text = ocr_numeric_cardinal_box(det, self.workspace.current_page_bgr_array)
+            else:
+                new_text = ocr_generic_name(det, self.workspace.current_page_bgr_array, "paddleocr",
+                                           allow_numeric=(new_class in NUMERIC_OK), cls_name=new_class)
+
+            print(f" OCR result for {new_class}: '{new_text}'")
+
+            # Determine which column to update
+            if is_coord:
+                col_to_update = 'coord_text'
+            else:
+                col_to_update = 'anchor_text'
+
+            # Update dataframe
+            self.workspace.df_all.loc[row_idx, col_to_update] = new_text
+
+            # Update page_dfs
+            if page in self.workspace.page_dfs:
+                page_mask = self.workspace.page_dfs[page]['row_id'] == row_id
+                if page_mask.any():
+                    page_idx = self.workspace.page_dfs[page][page_mask].index[0]
+                    self.workspace.page_dfs[page].loc[page_idx, col_to_update] = new_text
+
+            print(f" Saved OCR result to dataframe: {col_to_update}='{new_text}'")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f" OCR failed: {e}")
 
     def _jump_to_tree(self, row_id: int):
         """Jump to detection in tree widget"""
