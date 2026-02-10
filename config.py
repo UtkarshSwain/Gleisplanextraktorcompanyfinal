@@ -22,8 +22,6 @@ import os
 TESSERACT_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\tesseract\tesseract.exe"
  
 POPPLER_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\poppler-25.12.0\Library\bin"
-#TESSERACT_PATH = None
-#POPPLER_PATH = None
 
 # ============================================================================
 # DEBUG FLAGS - Set to True to enable debug output for specific modules
@@ -31,28 +29,31 @@ POPPLER_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\v
 # ============================================================================
 
 # Enables debug output for signal text recognition using PaddleOCR and Tesseract, including extraction attempts and confidence scores.
-DEBUG_SIGNALS = True
+DEBUG_SIGNALS = False
 
 # Enables debug output for angle calculations used in text orientation detection, coordinate OCR rotation attempts, and perspective cropping.
-DEBUG_ANGLE_ROUTING = True
+DEBUG_ANGLE_ROUTING = False
 
 # Enables debug output for general OCR operations including PaddleOCR initialization, weichen block text extraction, GKS box recognition, and text cleaning.
-DEBUG_OCR = True
+DEBUG_OCR = False
 
 # Enables debug output for coordinate-to-symbol linking, Fahrtrichtung detection based on GKS positions, haltetafel/haltepunkt linking, and signal merging logic.
-DEBUG_LINKING = True
+DEBUG_LINKING = False
 
 # Enables debug output for track skeleton detection, track bounds calculation, and Fahrtrichtung fallback when GKS-based detection fails.
-DEBUG_TRACK = True
+DEBUG_TRACK = False
 
 # Enables debug output for custom symbol detection from the database, OCR processing for custom symbols, and text region detection around detected symbols.
-DEBUG_CUSTOM_SYMBOLS = True
+DEBUG_CUSTOM_SYMBOLS = False
 
 # Enables debug output for YOLO model loading, class order verification, and detection counts per class during object detection.
-DEBUG_YOLO = True
+DEBUG_YOLO = False
 
 # Enables debug output for UI bounding box resize handles, tracking handle movements and coordinate updates when resizing detection boxes.
-DEBUG_UI_BBOX = True
+DEBUG_UI_BBOX = False
+
+# Enables debug output for comparison engine (Hungarian algorithm matching, score calculations, element pairing decisions).
+DEBUG_COMPARISON = True
 
 # Debug output helper - writes to debug.txt
 _DEBUG_FILE = None

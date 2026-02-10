@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -c \"from ui import SetupAndRunWindow; from pdfcomparison.dialogs import HelpDialog; print\\(''All imports OK''\\)\")"
+    ]
+  }
+}

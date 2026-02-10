@@ -248,15 +248,6 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         self.moved_table.itemSelectionChanged.connect(self._on_table_selection_changed)
         self.results_tabs.addTab(self.moved_table, "↔ Verschoben")
 
-        # Modified tab
-        self.modified_table = QtWidgets.QTableWidget()
-        self.modified_table.setColumnCount(6)
-        self.modified_table.setHorizontalHeaderLabels(["Klasse", "Text", "Feld", "Alt", "Neu", "Seite"])
-        self.modified_table.horizontalHeader().setStretchLastSection(False)
-        self.modified_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
-        self.modified_table.itemSelectionChanged.connect(self._on_table_selection_changed)
-        self.results_tabs.addTab(self.modified_table, " Modifiziert")
-        
         layout.addWidget(self.results_tabs)
 
         # Buttons
@@ -319,9 +310,6 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
             # Column 3 = "Neue km-Position" → go to NEW workspace first
             is_new_primary = (clicked_col != 2)  # Default to new, unless "Alte" column clicked
             self._highlight_in_workspace(change, is_new=is_new_primary, show_both=True)
-        elif current_tab == 4:  # Modified tab
-            # For modified, show both old and new
-            self._highlight_in_workspace(change, is_new=True, show_both=True)
 
     def _highlight_in_workspace(self, change: ElementChange, is_new: bool, show_both: bool = False):
         """
@@ -452,7 +440,6 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
             <li><b> Hinzugefügt:</b> Elemente, die in Gleisplan 2 (Neu) vorhanden sind, aber nicht in Gleisplan 1 (Alt).</li>
             <li><b> Gelöscht:</b> Elemente, die in Gleisplan 1 (Alt) vorhanden waren, aber in Gleisplan 2 (Neu) fehlen.</li>
             <li><b>↔ Verschoben:</b> Elemente mit gleicher Kennung, aber unterschiedlicher Position.</li>
-            <li><b> Modifiziert:</b> Elemente, die in beiden Gleisplänen vorhanden sind, sich aber in wichtigen Eigenschaften (Text, Koordinatenwert, Fahrtrichtung) unterscheiden.</li>
         </ul>
 
         <h3>Wichtige Hinweise</h3>
@@ -540,6 +527,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         print("="*70 + "\n")
         
         #  NOW run comparison
+        # Debug mode is controlled by DEBUG_COMPARISON in config.py
         try:
             engine = LayoutComparisonEngine()
             result = engine.compare(ws1.df_all, ws2.df_all)
@@ -580,9 +568,6 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
     ↔ VERSCHOBEN: {summary.get('total_moved', 0)} Element(e)
     Gleiche Kennung, aber unterschiedliche Position
 
-     MODIFIZIERT: {summary['total_modified']} Element(e)
-    Feldwerte geändert (Text, Koordinatenwert, etc.)
-
      UNVERÄNDERT: {summary['total_unchanged']} Element(e)
 
     ═══════════════════════════════════════════════════════
@@ -597,9 +582,8 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
                 added = counts.get('added', 0)
                 deleted = counts.get('deleted', 0)
                 moved = counts.get('moved', 0)
-                modified = counts.get('modified', 0)
 
-                if added or deleted or moved or modified:
+                if added or deleted or moved:
                     summary_text += f"\n{cls}:\n"
                     if added:
                         summary_text += f"    {added} hinzugefügt\n"
@@ -607,8 +591,6 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
                         summary_text += f"    {deleted} gelöscht\n"
                     if moved:
                         summary_text += f"   ↔ {moved} verschoben\n"
-                    if modified:
-                        summary_text += f"    {modified} modifiziert\n"
         else:
             summary_text += "\n(Keine Änderungen nach Klasse)\n"
         
@@ -621,9 +603,8 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
                 added = counts.get('added', 0)
                 deleted = counts.get('deleted', 0)
                 moved = counts.get('moved', 0)
-                modified = counts.get('modified', 0)
 
-                if added or deleted or moved or modified:
+                if added or deleted or moved:
                     summary_text += f"Seite {page}:\n"
                     if added:
                         summary_text += f"    {added} hinzugefügt\n"
@@ -631,8 +612,6 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
                         summary_text += f"    {deleted} gelöscht\n"
                     if moved:
                         summary_text += f"   ↔ {moved} verschoben\n"
-                    if modified:
-                        summary_text += f"    {modified} modifiziert\n"
                     summary_text += "\n"
         
         summary_text += "\n Tipp: Klicken Sie auf eine Zeile, um das Element im Layout zu sehen.\n"
@@ -643,7 +622,6 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         self._populate_added_deleted_table(self.added_table, result['added'], is_added=True)
         self._populate_added_deleted_table(self.deleted_table, result['deleted'], is_added=False)
         self._populate_moved_table(self.moved_table, result.get('moved', []))
-        self._populate_modified_table(self.modified_table, result['modified'])
     
     def _is_empty(self, value) -> bool:
         """Check if value is empty/None (but 0.0 is NOT empty - it's a valid coordinate)"""
@@ -752,13 +730,12 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
             old_str = self._format_value(old_coord) if old_coord is not None else ""
             table.setItem(i, 2, QtWidgets.QTableWidgetItem(old_str))
 
-            # Column 3: New km position with delta
+            # Column 3: New km position with delta (+ = forward, - = backward)
             new_coord = spatial.get('new_coord')
             delta_m = spatial.get('delta_meters')
             new_str = self._format_value(new_coord) if new_coord is not None else ""
             if delta_m is not None:
-                sign = '+' if delta_m > 0 else ''
-                new_str += f" ({sign}{delta_m:.1f}m)"
+                new_str += f" ({delta_m:+.1f}m)"  # +50.0m or -50.0m
             table.setItem(i, 3, QtWidgets.QTableWidgetItem(new_str))
 
             # Column 4: Page
@@ -766,83 +743,6 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
 
             # Store the change object for later use (click-to-highlight)
             table.item(i, 0).setData(QtCore.Qt.UserRole, change)
-
-    def _populate_modified_table(self, table: QtWidgets.QTableWidget, changes: List):
-        """Populate modified table with field-level changes"""
-        # Count total rows needed (one row per changed field)
-        total_rows = 0
-        for change in changes:
-            if change.field_changes:
-                total_rows += len(change.field_changes)
-        
-        table.setRowCount(total_rows)
-        
-        row_idx = 0
-        for change in changes:
-            if not change.field_changes:
-                continue
-            
-            data = change.new_data or {}
-
-            for field, diff in change.field_changes.items():
-                # Column 0: Class with change indicator
-                table.setItem(row_idx, 0, QtWidgets.QTableWidgetItem(f" {data.get('cls', '')}"))
-                
-                # Column 1: Anchor text
-                table.setItem(row_idx, 1, QtWidgets.QTableWidgetItem(str(data.get('anchor_text', ''))))
-                
-                # Column 2: Field name (human-readable)
-                field_names = {
-                    'cls': 'Klasse',
-                    'anchor_text': 'Text/Nummer',
-                    'coord_text': 'Koordinatentext',
-                    'coord_value': 'Koordinatenwert',
-                    'gi_gl': 'GI/GL',
-                    'fahrtrichtung': 'Fahrtrichtung',
-                    'page': 'Seite',
-                    'angle': 'Winkel'
-                }
-                field_display = field_names.get(field, field)
-                table.setItem(row_idx, 2, QtWidgets.QTableWidgetItem(field_display))
-                
-                # Column 3 & 4: Old and new values with arrow
-                old_val = diff.get('old')
-                new_val = diff.get('new')
-                
-                # Format coordinate values with delta
-                if field == 'coord_value':
-                    # Format old value
-                    if old_val is not None and not (isinstance(old_val, float) and math.isnan(old_val)):
-                        old_str = f"{float(old_val):.4f}"
-                    else:
-                        old_str = "(leer)"
-                    
-                    # Format new value with delta
-                    if new_val is not None and not (isinstance(new_val, float) and math.isnan(new_val)):
-                        new_str = f"{float(new_val):.4f}"
-                        
-                        # Add delta if both values exist
-                        if 'delta_meters' in diff and diff['delta_meters'] is not None:
-                            delta_m = diff['delta_meters']
-                            sign = "+" if delta_m > 0 else ""
-                            new_str += f" ({sign}{delta_m:.1f}m)"
-                    else:
-                        new_str = "(leer)"
-                else:
-                    # Format other values
-                    old_str = str(old_val) if old_val is not None and str(old_val).strip() else "(leer)"
-                    new_str = str(new_val) if new_val is not None and str(new_val).strip() else "(leer)"
-                
-                table.setItem(row_idx, 3, QtWidgets.QTableWidgetItem(old_str))
-                table.setItem(row_idx, 4, QtWidgets.QTableWidgetItem(new_str))
-                
-                # Column 5: Page
-                table.setItem(row_idx, 5, QtWidgets.QTableWidgetItem(str(data.get('page', ''))))
-                
-                # Store the change object for later use (click-to-highlight)
-                table.item(row_idx, 0).setData(QtCore.Qt.UserRole, change)
-                
-                row_idx += 1               
 
     def _pop_out_workspace(self, is_new: bool):
         """

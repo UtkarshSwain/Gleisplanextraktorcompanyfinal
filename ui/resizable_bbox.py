@@ -169,6 +169,10 @@ class ResizableBBoxItem(QtWidgets.QGraphicsRectItem):
         elif change == QtWidgets.QGraphicsItem.ItemSceneChange:
             if value is None:  # Being removed from scene
                 self.handles.clear()
+                # Stop any pending OCR timer to prevent callbacks on deleted item
+                if hasattr(self, '_ocr_timer'):
+                    self._ocr_timer.stop()
+                    self._pending_rect = None
         return super().itemChange(change, value)
 
     def handle_moved(self, handle_type: str, new_pos: QtCore.QPointF):
@@ -214,7 +218,7 @@ class ResizableBBoxItem(QtWidgets.QGraphicsRectItem):
         self._update_handle_positions()
 
     def on_handle_released(self):
-        """Called when a handle is released - trigger OCR if bbox changed"""
+        """Called when a handle is released - trigger OCR if bbox changed (debounced)"""
         if self.is_resizing:
             self.is_resizing = False
             new_rect = self.rect()
@@ -225,16 +229,36 @@ class ResizableBBoxItem(QtWidgets.QGraphicsRectItem):
                 debug_print('ui_bbox', f"Old: {self.original_rect}")
                 debug_print('ui_bbox', f"New: {new_rect}")
 
-                # Trigger OCR update in workspace
-                self.workspace.on_bbox_resized(
-                    self.row_id,
-                    new_rect.x(),
-                    new_rect.y(),
-                    new_rect.width(),
-                    new_rect.height()
-                )
+                # Store pending update for debounced OCR
+                self._pending_rect = new_rect
+
+                # Debounce: Use timer to delay OCR (prevents UI freeze during rapid adjustments)
+                if not hasattr(self, '_ocr_timer'):
+                    self._ocr_timer = QtCore.QTimer()
+                    self._ocr_timer.setSingleShot(True)
+                    self._ocr_timer.timeout.connect(self._do_ocr_update)
+
+                self._ocr_timer.stop()  # Cancel any pending OCR
+                self._ocr_timer.start(300)  # 300ms debounce delay
             else:
                 debug_print('ui_bbox', f"Bbox unchanged, skipping OCR")
+
+    def _do_ocr_update(self):
+        """Execute OCR update after debounce delay"""
+        # Safety check: only proceed if item is still in scene and has valid workspace
+        if not self.scene() or not hasattr(self, 'workspace') or self.workspace is None:
+            self._pending_rect = None
+            return
+        if hasattr(self, '_pending_rect') and self._pending_rect is not None:
+            rect = self._pending_rect
+            self.workspace.on_bbox_resized(
+                self.row_id,
+                rect.x(),
+                rect.y(),
+                rect.width(),
+                rect.height()
+            )
+            self._pending_rect = None
 
     def mouseReleaseEvent(self, event):
         """When mouse released after resizing, trigger OCR"""
@@ -557,6 +581,10 @@ class ResizablePolygonBBoxItem(QtWidgets.QGraphicsPolygonItem):
         elif change == QtWidgets.QGraphicsItem.ItemSceneChange:
             if value is None:  # Being removed from scene
                 self.handles.clear()
+                # Stop any pending OCR timer to prevent callbacks on deleted item
+                if hasattr(self, '_ocr_timer'):
+                    self._ocr_timer.stop()
+                    self._pending_polygon = None
         return super().itemChange(change, value)
 
     def handle_moved(self, handle_type: str, new_pos: QtCore.QPointF):
@@ -613,33 +641,55 @@ class ResizablePolygonBBoxItem(QtWidgets.QGraphicsPolygonItem):
             handle.setFlag(QtWidgets.QGraphicsItem.ItemSendsGeometryChanges, True)
 
     def on_handle_released(self):
-        """Called when a handle is released - trigger OCR if polygon changed"""
+        """Called when a handle is released - trigger OCR if polygon changed (debounced)"""
         if self.is_resizing:
             self.is_resizing = False
             new_poly = self.polygon()
 
             if new_poly != self.original_polygon:
-                print(f" Rotated bbox resized for row_id {self.row_id}")
+                debug_print('ui_bbox', f"Rotated bbox resized for row_id {self.row_id}")
 
-                # Get actual polygon points (4 corners)
-                poly_points = [(new_poly.at(i).x(), new_poly.at(i).y()) for i in range(4)]
+                # Store pending update for debounced OCR
+                self._pending_polygon = new_poly
 
-                # Get bounding rect of polygon
-                rect = new_poly.boundingRect()
+                # Debounce: Use timer to delay OCR (prevents UI freeze during rapid adjustments)
+                if not hasattr(self, '_ocr_timer'):
+                    self._ocr_timer = QtCore.QTimer()
+                    self._ocr_timer.setSingleShot(True)
+                    self._ocr_timer.timeout.connect(self._do_ocr_update)
 
-                # Trigger OCR update with actual polygon points
-                self.workspace.on_bbox_resized(
-                    self.row_id,
-                    rect.x(),
-                    rect.y(),
-                    rect.width(),
-                    rect.height(),
-                    is_rotated=True,
-                    angle=self.angle,
-                    poly_points=poly_points  # Pass actual polygon points
-                )
+                self._ocr_timer.stop()  # Cancel any pending OCR
+                self._ocr_timer.start(300)  # 300ms debounce delay
             else:
-                print(f"Polygon unchanged, skipping OCR")
+                debug_print('ui_bbox', f"Polygon unchanged, skipping OCR")
+
+    def _do_ocr_update(self):
+        """Execute OCR update after debounce delay"""
+        # Safety check: only proceed if item is still in scene and has valid workspace
+        if not self.scene() or not hasattr(self, 'workspace') or self.workspace is None:
+            self._pending_polygon = None
+            return
+        if hasattr(self, '_pending_polygon') and self._pending_polygon is not None:
+            new_poly = self._pending_polygon
+
+            # Get actual polygon points (4 corners)
+            poly_points = [(new_poly.at(i).x(), new_poly.at(i).y()) for i in range(4)]
+
+            # Get bounding rect of polygon
+            rect = new_poly.boundingRect()
+
+            # Trigger OCR update with actual polygon points
+            self.workspace.on_bbox_resized(
+                self.row_id,
+                rect.x(),
+                rect.y(),
+                rect.width(),
+                rect.height(),
+                is_rotated=True,
+                angle=self.angle,
+                poly_points=poly_points
+            )
+            self._pending_polygon = None
 
     def mouseReleaseEvent(self, event):
         """Trigger OCR when done resizing"""

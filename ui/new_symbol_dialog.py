@@ -914,6 +914,7 @@ class NewSymbolDialog(QDialog):
                 break
         self.text_region = None
         self.text_region_offset = None
+        self.text_region_offset_data = None  # Clear pre-calculated offset
         self.text_region_label.setText("Kein Text-Bereich definiert")
         self.text_region_label.setStyleSheet("color: gray; font-style: italic;")
         self.btn_delete_text_region.setEnabled(False)
@@ -1060,6 +1061,7 @@ class NewSymbolDialog(QDialog):
                 break
         self.text_region = None
         self.text_region_offset = None
+        self.text_region_offset_data = None  # Clear pre-calculated offset for new image
         self.text_region_label.setText("Kein Text-Bereich definiert")
         self.text_region_label.setStyleSheet("color: gray; font-style: italic;")
         self.btn_delete_text_region.setEnabled(False)
@@ -1236,10 +1238,31 @@ class NewSymbolDialog(QDialog):
             tw = int(x2 - x1)
             th = int(y2 - y1)
 
-            self.text_region_label.setText(
-                f" Text-Bereich: Offset ({dx:+d}, {dy:+d}), Größe {tw}x{th}px"
-            )
-            self.text_region_label.setStyleSheet("color: green; font-weight: bold;")
+            # Store offset immediately to avoid multi-image coordinate mismatch bug
+            # This ensures we use the CURRENT image's symbol coordinates, not all_crops[0]
+            sym_w = int(sym_x2 - sym_x1)
+            sym_h = int(sym_y2 - sym_y1)
+            self.text_region_offset_data = {
+                "dx": dx,
+                "dy": dy,
+                "width": tw,
+                "height": th,
+                "ref_sym_width": sym_w,
+                "ref_sym_height": sym_h
+            }
+
+            # Warn if offset is unreasonably large
+            max_reasonable = max(sym_w, sym_h) * 5
+            if abs(dx) > max_reasonable or abs(dy) > max_reasonable:
+                self.text_region_label.setText(
+                    f"⚠️ Offset sehr groß: ({dx:+d}, {dy:+d}) - bitte prüfen!"
+                )
+                self.text_region_label.setStyleSheet("color: orange; font-weight: bold;")
+            else:
+                self.text_region_label.setText(
+                    f"✓ Text-Bereich: Offset ({dx:+d}, {dy:+d}), Größe {tw}x{th}px"
+                )
+                self.text_region_label.setStyleSheet("color: green; font-weight: bold;")
         else:
             self.text_region_label.setText(f" Text-Bereich: {int(x2-x1)}x{int(y2-y1)}px")
             self.text_region_label.setStyleSheet("color: green;")
@@ -1404,38 +1427,13 @@ class NewSymbolDialog(QDialog):
             selected_method = method_map.get(self.method_combo.currentText(), "auto")
             print(f"[DEBUG] Selected method: {selected_method} (note: not yet passed to detector)")
 
-            # Calculate text region offset if defined
+            # Use pre-calculated text region offset (stored in _on_text_region_drawn)
+            # This fixes the multi-image coordinate mismatch bug where
+            # _on_text_region_drawn used self.examples[0] but _save_symbol used self.all_crops[0]
             text_region_offset = None
-            if self.text_region and len(self.all_crops) > 0:
-                # Use first crop's bbox (from first image) for consistent reference
-                # This ensures ref_sym_width/height match the first template used in detection
-                _, first_bbox = self.all_crops[0]
-                sym_x1, sym_y1, sym_x2, sym_y2 = first_bbox
-                sym_cx = (sym_x1 + sym_x2) / 2
-                sym_cy = (sym_y1 + sym_y2) / 2
-                sym_w = sym_x2 - sym_x1
-                sym_h = sym_y2 - sym_y1
-
-                txt_x1, txt_y1, txt_x2, txt_y2 = self.text_region
-                txt_cx = (txt_x1 + txt_x2) / 2
-                txt_cy = (txt_y1 + txt_y2) / 2
-
-                # Offset from symbol center to text region center
-                dx = int(txt_cx - sym_cx)
-                dy = int(txt_cy - sym_cy)
-                tw = int(txt_x2 - txt_x1)
-                th = int(txt_y2 - txt_y1)
-
-                text_region_offset = {
-                    "dx": dx,  # X offset from symbol center
-                    "dy": dy,  # Y offset from symbol center
-                    "width": tw,  # Width of text region
-                    "height": th,  # Height of text region
-                    # Reference symbol size for scale compensation
-                    "ref_sym_width": int(sym_w),
-                    "ref_sym_height": int(sym_h),
-                }
-                print(f"[DEBUG] Text region offset: {text_region_offset}")
+            if self.text_region and hasattr(self, 'text_region_offset_data') and self.text_region_offset_data:
+                text_region_offset = self.text_region_offset_data
+                print(f"[DEBUG] Using pre-calculated text region offset: {text_region_offset}")
 
             # Validate custom regex pattern if used
             if self.has_text_check.isChecked() and self.text_pattern_combo.currentText() == "Benutzerdefiniert...":

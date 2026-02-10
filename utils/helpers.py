@@ -1,7 +1,34 @@
+"""
+Helpers - Hilfsfunktionen fuer Gleisplanerkennung
+
+Dieses Modul enthaelt allgemeine Hilfsfunktionen, die von mehreren
+Modulen verwendet werden.
+
+Kategorien:
+    Qt-Hilfsfunktionen:
+        _is_deleted(): Prueft ob Qt-Objekt geloescht wurde
+
+    YOLO-Hilfsfunktionen:
+        iou(): Intersection over Union berechnen
+        nms(): Non-Maximum Suppression
+        color_masks(): Rot/Gelb-Masken extrahieren
+
+    Winkel-Hilfsfunktionen:
+        _is_cardinal(): Prueft ob Winkel nahe 0°/90°/180°/270°
+        _is_angular(): Prueft ob Winkel deutlich geneigt (>15°)
+        _norm_angle(): Normalisiert Winkel auf -45° bis +45°
+        get_params_for_angle(): Gibt winkelabhaengige OCR-Parameter
+
+    Konstanten:
+        ANGLE_TOL: Toleranz fuer Kardinal-Winkelpruefung (15°)
+
+Abhaengigkeiten:
+    cv2, numpy, PyQt5
+"""
 import cv2
 import numpy as np
-from typing import List, Dict, Tuple, Optional, Any 
-from config import ALIASES, CLASS_REMAP, VERTICAL_PARAMS,HORIZONTAL_PARAMS,ANGULAR_PARAMS 
+from typing import List, Dict, Tuple, Optional, Any
+from config import VERTICAL_PARAMS, HORIZONTAL_PARAMS, ANGULAR_PARAMS
 from typing import Optional
 from PyQt5 import QtCore
 
@@ -23,12 +50,6 @@ def _is_deleted(qobj: Optional[QtCore.QObject]) -> bool:
 # ============================================================================
 #YOLO HELPERS
 # ============================================================================
-def _alias_name(n: str) -> str:
-    return ALIASES.get(n, n)
-
-def canon_name(n: str) -> str:
-    n0 = _alias_name(n)
-    return CLASS_REMAP.get(n0, n0)
 def iou(a, b):
     x1 = max(a[0], b[0])
     y1 = max(a[1], b[1])

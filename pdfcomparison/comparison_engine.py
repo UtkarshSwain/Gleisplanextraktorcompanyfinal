@@ -6,10 +6,28 @@ Handles all 13 classes with spatial + semantic matching
 import pandas as pd
 import numpy as np
 import math
+import re
 from typing import Dict, List, Tuple, Optional, Set
 from dataclasses import dataclass
 from enum import Enum
 from scipy.optimize import linear_sum_assignment
+
+# Import debug flag from central config
+try:
+    from config import DEBUG_COMPARISON
+except ImportError:
+    DEBUG_COMPARISON = False
+
+# Debug output file handle (module-level for persistence)
+_DEBUG_FILE = None
+
+def _debug_print(message: str):
+    """Write debug message to output.txt only"""
+    global _DEBUG_FILE
+    if _DEBUG_FILE is None:
+        _DEBUG_FILE = open('output.txt', 'w', encoding='utf-8')
+    _DEBUG_FILE.write(message + '\n')
+    _DEBUG_FILE.flush()  # Ensure immediate write
 
 # ============================================================================
 # COMPARISON RESULT TYPES
@@ -58,7 +76,7 @@ class ElementChange:
 class LayoutComparisonEngine:
     """
     Compares two track layouts with intelligent matching.
-    
+
     Features:
     - UUID-based matching (when available)
     - Spatial fallback matching (for legacy data)
@@ -66,13 +84,20 @@ class LayoutComparisonEngine:
     - Class-specific rules
     - Spatial movement detection
     """
-    
+
+    # Debug flag - controlled by DEBUG_COMPARISON in config.py
+    DEBUG = DEBUG_COMPARISON
+
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or self._default_config()
-    
+        # Use DEBUG_COMPARISON from config.py (can be overridden by config dict)
+        LayoutComparisonEngine.DEBUG = self.config.get('debug', DEBUG_COMPARISON)
+
     def _default_config(self) -> Dict:
         """Default comparison configuration"""
         return {
+            # Note: Debug mode is controlled by DEBUG_COMPARISON in config.py
+
             # Matching thresholds
             'coordinate_tolerance': 0.0001,  # 0.1m (10cm) in km - only truly identical positions
             'spatial_distance_threshold': 200,  # pixels
@@ -105,11 +130,7 @@ class LayoutComparisonEngine:
                     'tracked_fields': ['coord_value']
                 },
 
-                # Coordinate class - special handling
-                'coordinate': {
-                    'identifier': 'coord_text',
-                    'tracked_fields': ['coord_value']
-                },
+                # NOTE: coordinate class is excluded from comparison entirely
 
                 # Non-OCR symbol classes - track by coord_text
                 'gm_block': {
@@ -187,21 +208,16 @@ class LayoutComparisonEngine:
         dict_old = self._df_to_dict(df_old)
         dict_new = self._df_to_dict(df_new)
         
-        # Filter out standalone coordinates (not linked to anchors)
+        # Exclude coordinate class entirely from comparison
+        # (coordinate elements are for reference only, not tracked as changes)
         dict_old = {
             k: v for k, v in dict_old.items()
-            if v.get('cls') != 'coordinate' or (
-                v.get('cls') == 'coordinate' and 
-                self._is_linked_to_anchor(v, dict_old)
-            )
+            if v.get('cls') != 'coordinate'
         }
-        
+
         dict_new = {
             k: v for k, v in dict_new.items()
-            if v.get('cls') != 'coordinate' or (
-                v.get('cls') == 'coordinate' and 
-                self._is_linked_to_anchor(v, dict_new)
-            )
+            if v.get('cls') != 'coordinate'
         }
 
         # Exclude weichen_block class
@@ -272,7 +288,6 @@ class LayoutComparisonEngine:
             'added': changes['added'],
             'deleted': changes['deleted'],
             'moved': changes['moved'],        # FA-011: Verschoben
-            'modified': changes['modified'],
             'unchanged': changes['unchanged'],
             'summary': summary
         }
@@ -429,6 +444,8 @@ class LayoutComparisonEngine:
 
         for cls in old_by_class:
             if cls not in new_by_class:
+                if self.DEBUG:
+                    _debug_print(f"  [DEBUG] Class '{cls}': {len(old_by_class[cls])} in old, 0 in new → all DELETED")
                 continue  # All elements of this class are deleted
 
             old_items = list(old_by_class[cls].items())
@@ -436,6 +453,10 @@ class LayoutComparisonEngine:
 
             if not old_items or not new_items:
                 continue
+
+            if self.DEBUG:
+                _debug_print(f"\n  [DEBUG] Hungarian matching for class '{cls}':")
+                _debug_print(f"    Old elements: {len(old_items)}, New elements: {len(new_items)}")
 
             # Build cost matrix (negative scores for minimization)
             n_old = len(old_items)
@@ -447,8 +468,16 @@ class LayoutComparisonEngine:
                     score = self._calculate_match_score(old_elem, new_elem)
                     cost_matrix[i, j] = -score  # Negative for minimization
 
+                    if self.DEBUG and score > 0.5:
+                        old_label = old_elem.get('anchor_text') or old_elem.get('coord_text') or old_id[:8]
+                        new_label = new_elem.get('anchor_text') or new_elem.get('coord_text') or new_id[:8]
+                        _debug_print(f"    Score[{i},{j}]: {score:.3f} | Old: {old_label} → New: {new_label}")
+
             # Hungarian algorithm finds optimal assignment
             row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+            if self.DEBUG:
+                _debug_print(f"    Hungarian assignment: {list(zip(row_ind, col_ind))}")
 
             # Extract matches above threshold
             for i, j in zip(row_ind, col_ind):
@@ -457,6 +486,21 @@ class LayoutComparisonEngine:
                     old_id = old_items[i][0]
                     new_id = new_items[j][0]
                     matches[old_id] = new_id
+
+                    if self.DEBUG:
+                        old_elem = old_items[i][1]
+                        new_elem = new_items[j][1]
+                        old_label = old_elem.get('anchor_text') or old_elem.get('coord_text') or 'N/A'
+                        new_label = new_elem.get('anchor_text') or new_elem.get('coord_text') or 'N/A'
+                        old_coord = old_elem.get('coord_value')
+                        new_coord = new_elem.get('coord_value')
+                        _debug_print(f"    ✓ MATCHED (score={score:.3f}): '{old_label}' @ {old_coord} → '{new_label}' @ {new_coord}")
+                elif self.DEBUG:
+                    old_elem = old_items[i][1]
+                    new_elem = new_items[j][1]
+                    old_label = old_elem.get('anchor_text') or old_elem.get('coord_text') or 'N/A'
+                    new_label = new_elem.get('anchor_text') or new_elem.get('coord_text') or 'N/A'
+                    _debug_print(f"    ✗ REJECTED (score={score:.3f} < 0.7): '{old_label}' → '{new_label}'")
 
         return matches
 
@@ -481,38 +525,54 @@ class LayoutComparisonEngine:
     def _calculate_match_score(self, row1: Dict, row2: Dict) -> float:
         """
         Calculate similarity score between two elements.
-        
+
         Matching strategy:
         - OCR classes (signal, gks_*): Match by anchor_text + coord_value
-        - Non-OCR symbol classes: Match by SPATIAL POSITION first
+        - Non-OCR symbol classes: Match by SPATIAL POSITION + coord_value
         - Coordinate class: Match by coord_text
-        
+
+        Args:
+            row1: Old element data
+            row2: New element data
+
         Returns: 0.0 (no match) to 1.0 (perfect match)
         """
         # Must be same class
         cls = row1.get('cls')
         if cls != row2.get('cls'):
             return 0.0
-        
+
         # Must be same page (or adjacent pages)
         page1 = row1.get('page', 0)
         page2 = row2.get('page', 0)
         if abs(page1 - page2) > 1:
             return 0.0
-        
+
         # ============================================================
         # MATCHING STRATEGY BY CLASS TYPE
         # ============================================================
-        
+        # NOTE: OCR vs Non-OCR have INTENTIONALLY different coord tolerances:
+        #
+        # OCR classes (signal, gks_*): No hard coord cutoff (up to 500m)
+        #   - These have UNIQUE identifiers (signal names, GKS numbers)
+        #   - Same name = same element, regardless of distance
+        #   - Distance only affects score tiebreaking for duplicates
+        #
+        # Non-OCR classes (sverbinder, gm_block, etc.): 100m hard cutoff
+        #   - These have AUTO-GENERATED names (not unique)
+        #   - Must rely on coord_value for identity
+        #   - Elements >100m apart are considered different elements
+        # ============================================================
+
         # OCR classes: Match by text + coordinate value
         if cls in {'signal', 'gks_festkodiert', 'gks_gesteuert'}:
             return self._match_ocr_element(row1, row2)
-        
+
         # Coordinate class: Match by coord_text
         elif cls == 'coordinate':
             return self._match_coordinate_element(row1, row2)
-        
-        # Non-OCR symbol classes: Match by SPATIAL POSITION
+
+        # Non-OCR symbol classes: Match by SPATIAL POSITION + coord_value
         else:
             return self._match_symbol_element(row1, row2)
 
@@ -543,7 +603,7 @@ class LayoutComparisonEngine:
         if cls in {'gks_festkodiert', 'gks_gesteuert'}:
             if text1 != text2:
                 return 0.0  # Different GKS number = different element
-            score += 0.7  # Exact match
+            score += 0.6  # Exact match (allows spatial differentiation while staying above 0.7 threshold)
         else:
             # For signals: allow fuzzy match (OCR might have minor errors)
             text_sim = self._text_similarity(text1, text2)
@@ -551,7 +611,7 @@ class LayoutComparisonEngine:
                 return 0.0
             score += 0.7 * text_sim
 
-        # Coordinate value similarity (secondary)
+        # Coordinate value similarity (secondary) - TIERED scoring
         coord_val1 = row1.get('coord_value')
         coord_val2 = row2.get('coord_value')
 
@@ -561,34 +621,86 @@ class LayoutComparisonEngine:
 
         if val1_valid and val2_valid:
             coord_diff = abs(coord_val1 - coord_val2)
-            if coord_diff < 0.5:  # Within 500m
-                score += 0.2
+            # Normal scoring: closer coordinates get higher scores
+            # Fine-grained tiers help differentiate duplicates with similar coords
+            if coord_diff < 0.001:  # < 1m (essentially identical)
+                score += 0.15
+            elif coord_diff < 0.005:  # < 5m
+                score += 0.12
+            elif coord_diff < 0.01:  # < 10m
+                score += 0.10
+            elif coord_diff < 0.02:  # < 20m
+                score += 0.08
+            elif coord_diff < 0.05:  # < 50m
+                score += 0.06
+            elif coord_diff < 0.1:  # < 100m
+                score += 0.04
+            elif coord_diff < 0.5:  # < 500m
+                score += 0.02
 
-        # Spatial proximity (tertiary)
-        spatial_sim = self._spatial_similarity(row1, row2)
-        score += 0.1 * spatial_sim
+        # Spatial proximity - TIERED scoring (critical for GKS duplicates)
+        # This ensures when multiple GKS have same anchor_text, the spatially closest pair matches
+        cx1 = row1.get('obb_cx') or row1.get('cx') or 0
+        cy1 = row1.get('obb_cy') or row1.get('cy') or 0
+        cx2 = row2.get('obb_cx') or row2.get('cx') or 0
+        cy2 = row2.get('obb_cy') or row2.get('cy') or 0
+
+        try:
+            distance = ((float(cx1) - float(cx2))**2 + (float(cy1) - float(cy2))**2)**0.5
+        except (ValueError, TypeError):
+            distance = 9999
+
+        # Tiered spatial bonus - important for distinguishing duplicates
+        # Higher bonuses ensure correct pairing when multiple GKS have same anchor_text
+        if distance < 50:
+            spatial_bonus = 0.30  # Very close - high confidence
+        elif distance < 100:
+            spatial_bonus = 0.26
+        elif distance < 150:
+            spatial_bonus = 0.22
+        elif distance < 250:
+            spatial_bonus = 0.18
+        elif distance < 400:
+            spatial_bonus = 0.14
+        elif distance < 600:
+            spatial_bonus = 0.12
+        else:
+            spatial_bonus = 0.10  # Far but still ensures 0.7+ threshold with base 0.6
+
+        score += spatial_bonus
+
+        if self.DEBUG:
+            coord_str = f"{coord_diff:.4f}" if val1_valid and val2_valid else "N/A"
+            _debug_print(f"      [OCR Match] {text1} vs {text2}: base=0.6/0.7, coord_diff={coord_str}, dist={distance:.1f}px, spatial_bonus={spatial_bonus:.2f} → total={score:.3f}")
 
         return min(score, 1.0)
 
     def _match_coordinate_element(self, row1: Dict, row2: Dict) -> float:
         """
         Match coordinate elements by coord_text.
-        
+
         Example:
             "45.234" matches "45.234" (same coordinate)
         """
         text1 = str(row1.get('coord_text') or '').strip()
         text2 = str(row2.get('coord_text') or '').strip()
-        
+
         if not text1 or not text2:
+            if self.DEBUG:
+                _debug_print(f"      [Coord Match] REJECTED: text1='{text1}', text2='{text2}' (empty)")
             return 0.0
-        
+
         if text1 == text2:
+            if self.DEBUG:
+                _debug_print(f"      [Coord Match] '{text1}' == '{text2}': perfect match → 1.0")
             return 1.0  # Perfect match
-        
+
         # Fuzzy match for slight variations
         text_sim = self._text_similarity(text1, text2)
-        return text_sim if text_sim > 0.9 else 0.0
+        score = text_sim if text_sim > 0.9 else 0.0
+        if self.DEBUG:
+            _debug_print(f"      [Coord Match] '{text1}' vs '{text2}': similarity={text_sim:.3f} → {score:.3f}")
+        return score
 
     def _is_auto_generated_name(self, anchor_text: str, cls: str) -> bool:
         """
@@ -606,8 +718,6 @@ class LayoutComparisonEngine:
         Returns:
             True if auto-generated, False if user-defined
         """
-        import re
-
         if not anchor_text or not cls:
             return False
 
@@ -654,8 +764,6 @@ class LayoutComparisonEngine:
         Returns:
             Signal name if found, None otherwise
         """
-        import re
-
         if not anchor_text:
             return None
 
@@ -715,21 +823,26 @@ class LayoutComparisonEngine:
                     except (ValueError, TypeError):
                         distance = 9999
 
-                    # Tiered spatial bonus (consistent with _match_symbol_element)
+                    # Tiered spatial bonus (MUST match _match_symbol_element tiers)
                     if distance < 50:
                         spatial_bonus = 0.10
-                    elif distance < 150:
+                    elif distance < 100:
                         spatial_bonus = 0.07
-                    elif distance < 300:
+                    elif distance < 200:
                         spatial_bonus = 0.04
-                    elif distance < 500:
+                    elif distance < 350:
                         spatial_bonus = 0.02
                     else:
                         spatial_bonus = 0.0
 
-                    return min(score + spatial_bonus, 1.0)
+                    final_score = min(score + spatial_bonus, 1.0)
+                    if self.DEBUG:
+                        _debug_print(f"      [Haltepunkt Match] signal1='{signal1}' vs signal2='{signal2}': base=0.9, dist={distance:.1f}px, spatial_bonus={spatial_bonus:.2f} → total={final_score:.3f}")
+                    return final_score
                 else:
                     # Different signal names = different haltepunkts
+                    if self.DEBUG:
+                        _debug_print(f"      [Haltepunkt Match] REJECTED: signal1='{signal1}' ≠ signal2='{signal2}'")
                     return 0.0
 
             # If only one has signal name, or neither has, fall through to standard matching
@@ -757,8 +870,8 @@ class LayoutComparisonEngine:
         val1 = row1.get('coord_value')
         val2 = row2.get('coord_value')
 
-        # Try numeric comparison first (with 0.04 km = ±20m tolerance for matching)
-        COORD_MATCH_TOLERANCE = 0.04  # ±20 meters (40m total range) - elements within this are same element
+        # Try numeric comparison first (with 0.1 km = ±50m tolerance for matching)
+        COORD_MATCH_TOLERANCE = 0.1  # ±50 meters (100m total range) - elements within this are same element
 
         # Check for valid coord_values (not None AND not NaN)
         val1_valid = val1 is not None and not (isinstance(val1, float) and math.isnan(val1))
@@ -772,13 +885,17 @@ class LayoutComparisonEngine:
                 if numeric_diff < 0.001:  # < 1m = essentially same position
                     score += 0.85
                 elif numeric_diff < 0.01:  # < 10m = very close
-                    score += 0.8
+                    score += 0.82
                 elif numeric_diff < 0.02:  # < 20m = close
-                    score += 0.75
-                elif numeric_diff < COORD_MATCH_TOLERANCE:  # < 40m = same element, moved more
-                    score += 0.7
+                    score += 0.78
+                elif numeric_diff < 0.04:  # < 40m = medium distance
+                    score += 0.74
+                elif numeric_diff < 0.07:  # < 70m = far
+                    score += 0.72
+                elif numeric_diff < COORD_MATCH_TOLERANCE:  # < 100m = same element, moved more
+                    score += 0.70
                 else:
-                    # > 40m difference = different elements
+                    # > 100m difference = different elements
                     return 0.0
             except (ValueError, TypeError):
                 # Fallback to string comparison
@@ -796,6 +913,7 @@ class LayoutComparisonEngine:
         elif not text1 and not text2:
             # Both have no coord_text - use TIERED spatial matching
             # This allows fallback matching with decreasing confidence
+            # NOTE: These scores must be high enough to pass 0.7 threshold after spatial bonus
             cx1 = row1.get('obb_cx') or row1.get('cx') or 0
             cy1 = row1.get('obb_cy') or row1.get('cy') or 0
             cx2 = row2.get('obb_cx') or row2.get('cx') or 0
@@ -808,15 +926,19 @@ class LayoutComparisonEngine:
 
             # Tiered scoring based on distance
             # Hungarian algorithm will prefer higher scores (closer matches)
+            # Scores are set to ensure final score (with spatial bonus) passes 0.7 threshold
             if distance < 50:
                 # Tier 1: Very close - high confidence (same PDF re-processed)
-                score += 0.8
-            elif distance < 150:
-                # Tier 2: Medium distance - good confidence (minor layout shift)
-                score += 0.6
-            elif distance < 300:
-                # Tier 3: Far - lower confidence (larger layout changes)
-                score += 0.4
+                score += 0.85  # + 0.15 spatial = 1.0
+            elif distance < 100:
+                # Tier 2: Close - good confidence
+                score += 0.80  # + 0.10 spatial = 0.90
+            elif distance < 200:
+                # Tier 3: Medium distance - moderate confidence (layout shift)
+                score += 0.72  # + 0.05 spatial = 0.77
+            elif distance < 350:
+                # Tier 4: Far - lower confidence (larger layout changes)
+                score += 0.68  # + 0.02 spatial = 0.70 (just passes)
             else:
                 # Too far apart - no match
                 return 0.0
@@ -840,19 +962,32 @@ class LayoutComparisonEngine:
 
         # Tiered spatial bonus - adds to coord_value score
         # Example: coord within 10m (0.8) + spatial < 50px (0.15) = 0.95 (very confident match)
-        # Example: coord within 30m (0.7) + spatial < 300px (0.05) = 0.75 (good match)
+        # Example: coord within 30m (0.7) + spatial < 200px (0.05) = 0.75 (good match)
+        # Tiers aligned with no-coord-text fallback scoring above
         if distance < 50:
             spatial_bonus = 0.15  # Very close spatially
-        elif distance < 150:
-            spatial_bonus = 0.10  # Reasonably close
-        elif distance < 300:
+        elif distance < 100:
+            spatial_bonus = 0.10  # Close
+        elif distance < 200:
             spatial_bonus = 0.05  # Medium distance
-        elif distance < 500:
+        elif distance < 350:
             spatial_bonus = 0.02  # Far but still adds small bonus
         else:
             spatial_bonus = 0.0   # Too far for any bonus
 
         score += spatial_bonus
+
+        if self.DEBUG:
+            # Handle case where numeric_diff might not be defined (no-coord-text path)
+            if val1_valid and val2_valid:
+                try:
+                    coord_str = f"{abs(float(val1) - float(val2)):.4f}km"
+                except (ValueError, TypeError):
+                    coord_str = "N/A"
+            else:
+                coord_str = f"text:{text1[:8] if text1 else 'None'}" if text1 or text2 else "no-coord"
+            anchor_info = f"anchor1={anchor1[:15] if anchor1 else 'None'}, anchor2={anchor2[:15] if anchor2 else 'None'}"
+            _debug_print(f"      [Symbol Match] {cls}: coord={coord_str}, dist={distance:.1f}px, spatial_bonus={spatial_bonus:.2f}, {anchor_info} → total={score:.3f}")
 
         return min(score, 1.0)
 
@@ -931,7 +1066,6 @@ class LayoutComparisonEngine:
                 'added': [...],
                 'deleted': [...],
                 'moved': [...],      # FA-011: Verschoben
-                'modified': [...],
                 'unchanged': [...]
             }
         """
@@ -939,17 +1073,27 @@ class LayoutComparisonEngine:
             'added': [],
             'deleted': [],
             'moved': [],         # FA-011: Same identifier, different position
-            'modified': [],
             'unchanged': []
         }
         
         #  FIXED: matches is now {old_id: new_id}, not {key: {old_key, new_key}}
         matched_old = set(matches.keys())
         matched_new = set(matches.values())
-        
+
         # Deleted elements
+        if self.DEBUG:
+            deleted_count = sum(1 for old_id in dict_old if old_id not in matched_old)
+            _debug_print(f"\n  [DEBUG] DELETED elements: {deleted_count}")
+
         for old_id, old_elem in dict_old.items():
             if old_id not in matched_old:
+                if self.DEBUG:
+                    cls = old_elem.get('cls', '?')
+                    anchor = old_elem.get('anchor_text') or 'N/A'
+                    coord_text = old_elem.get('coord_text') or 'N/A'
+                    coord_val = old_elem.get('coord_value')
+                    _debug_print(f"    DELETED [{cls}] anchor='{anchor}' coord_text='{coord_text}' coord_value={coord_val}")
+
                 changes['deleted'].append(ElementChange(
                     change_type=ChangeType.DELETED,
                     severity=ChangeSeverity.MAJOR,
@@ -957,10 +1101,21 @@ class LayoutComparisonEngine:
                     page=old_elem.get('page', 0),
                     old_data=old_elem
                 ))
-        
+
         # Added elements
+        if self.DEBUG:
+            added_count = sum(1 for new_id in dict_new if new_id not in matched_new)
+            _debug_print(f"\n  [DEBUG] ADDED elements: {added_count}")
+
         for new_id, new_elem in dict_new.items():
             if new_id not in matched_new:
+                if self.DEBUG:
+                    cls = new_elem.get('cls', '?')
+                    anchor = new_elem.get('anchor_text') or 'N/A'
+                    coord_text = new_elem.get('coord_text') or 'N/A'
+                    coord_val = new_elem.get('coord_value')
+                    _debug_print(f"    ADDED [{cls}] anchor='{anchor}' coord_text='{coord_text}' coord_value={coord_val}")
+
                 changes['added'].append(ElementChange(
                     change_type=ChangeType.ADDED,
                     severity=ChangeSeverity.MAJOR,
@@ -968,8 +1123,11 @@ class LayoutComparisonEngine:
                     page=new_elem.get('page', 0),
                     new_data=new_elem
                 ))
-        
+
         # Modified/moved/unchanged elements
+        if self.DEBUG:
+            _debug_print(f"\n  [DEBUG] Classifying {len(matches)} matched elements:")
+
         for old_id, new_id in matches.items():
             old_elem = dict_old[old_id]
             new_elem = dict_new[new_id]
@@ -984,6 +1142,25 @@ class LayoutComparisonEngine:
 
             # Check if coord_value changed (this means element MOVED along the track)
             coord_value_changed = field_changes and 'coord_value' in field_changes
+
+            if self.DEBUG:
+                cls = old_elem.get('cls', '?')
+                old_anchor = old_elem.get('anchor_text') or 'N/A'
+                new_anchor = new_elem.get('anchor_text') or 'N/A'
+                old_coord_text = old_elem.get('coord_text') or 'N/A'
+                new_coord_text = new_elem.get('coord_text') or 'N/A'
+                old_coord_val = old_elem.get('coord_value')
+                new_coord_val = new_elem.get('coord_value')
+                _debug_print(f"\n    [{cls}] anchor: '{old_anchor}' → '{new_anchor}'")
+                _debug_print(f"           coord_text: '{old_coord_text}' → '{new_coord_text}'")
+                _debug_print(f"           coord_value: {old_coord_val} → {new_coord_val}")
+                if coord_value_changed:
+                    delta = field_changes['coord_value'].get('delta_meters')
+                    _debug_print(f"           → VERSCHOBEN: delta = {delta:+.1f}m" if delta is not None else "           → VERSCHOBEN: delta = N/A")
+                elif field_changes:
+                    _debug_print(f"           → MODIFIZIERT: {list(field_changes.keys())}")
+                else:
+                    _debug_print(f"           → UNCHANGED")
 
             if coord_value_changed:
                 # FA-011: VERSCHOBEN - Element moved to different km position
@@ -1009,20 +1186,6 @@ class LayoutComparisonEngine:
                     new_data=new_elem,
                     field_changes=remaining_changes,  # Other changes if any
                     spatial_change=move_info,
-                    match_confidence=1.0
-                ))
-            elif field_changes:
-                # MODIFIZIERT - Field changes but NOT coord_value (e.g., fahrtrichtung)
-                severity = self._determine_severity(field_changes, None)
-                changes['modified'].append(ElementChange(
-                    change_type=ChangeType.MODIFIED,
-                    severity=severity,
-                    element_class=new_elem.get('cls', ''),
-                    page=new_elem.get('page', 0),
-                    old_data=old_elem,
-                    new_data=new_elem,
-                    field_changes=field_changes,
-                    spatial_change=None,  # Ignore spatial pixel changes
                     match_confidence=1.0
                 ))
             else:
@@ -1085,8 +1248,8 @@ class LayoutComparisonEngine:
                 old_coord_val = old_row.get('coord_value')
                 new_coord_val = new_row.get('coord_value')
 
-                # Use matching tolerance (40m) not change detection tolerance (1m)
-                RENUMBER_TOLERANCE = 0.04  # 40m - same as matching tolerance
+                # Use matching tolerance (100m) not change detection tolerance (1m)
+                RENUMBER_TOLERANCE = 0.1  # 100m - same as matching tolerance
                 coords_numerically_same = False
 
                 if old_coord_val is not None and new_coord_val is not None:
@@ -1138,6 +1301,7 @@ class LayoutComparisonEngine:
             if field == 'coord_value':
                 if not self._coords_equal(old_val, new_val):
                     # Calculate delta - must check for BOTH None AND NaN
+                    # Keep sign to show direction: + = forward (increasing km), - = backward (decreasing km)
                     delta = None
                     if old_val is not None and new_val is not None:
                         # Also check for NaN (NaN passes 'is not None' check!)
@@ -1145,7 +1309,7 @@ class LayoutComparisonEngine:
                         new_is_nan = isinstance(new_val, float) and math.isnan(new_val)
                         if not old_is_nan and not new_is_nan:
                             try:
-                                delta = abs(float(new_val) - float(old_val))
+                                delta = float(new_val) - float(old_val)  # Signed delta (no abs)
                             except (ValueError, TypeError):
                                 delta = None
 
@@ -1154,7 +1318,7 @@ class LayoutComparisonEngine:
                         'new': new_val,
                         'delta': delta,
                         'delta_meters': delta * 1000 if delta is not None else None,
-                        'description': f'{old_id_str} moved by {delta * 1000:.1f}m' if delta is not None else None,
+                        'description': f'{old_id_str} moved by {delta * 1000:+.1f}m' if delta is not None else None,
                         'element_identifier': old_id_str  #  Track which element moved
                     }
             
@@ -1168,34 +1332,9 @@ class LayoutComparisonEngine:
                     }
         
         # ============================================================
-        # STEP 3: Check angle changes (minimum 10 degrees)
+        # STEP 3: Spatial change detection (skip for coordinate class)
         # ============================================================
-        old_angle = old_row.get('angle')
-        new_angle = new_row.get('angle')
-        
-        if old_angle is not None and new_angle is not None:
-            # Normalize angles to 0-360 range
-            old_angle_norm = old_angle % 360
-            new_angle_norm = new_angle % 360
-            
-            # Calculate smallest angle difference (accounting for wrap-around)
-            angle_diff = abs(new_angle_norm - old_angle_norm)
-            if angle_diff > 180:
-                angle_diff = 360 - angle_diff
-            
-            # Only report if change >= 10 degrees
-            if angle_diff >= self.config.get('min_angle_change', 10.0):
-                field_changes['angle'] = {
-                    'old': old_angle,
-                    'new': new_angle,
-                    'delta': angle_diff,
-                    'direction': 'clockwise' if new_angle_norm > old_angle_norm else 'counter-clockwise',
-                    'element_identifier': old_id_str  #  Track which element rotated
-                }
-        
-        # ============================================================
-        # STEP 4: Spatial change detection (skip for coordinate class)
-        # ============================================================
+        # NOTE: Angle changes are intentionally NOT tracked
         spatial_change = None
         if cls != 'coordinate':
             spatial_change = self._detect_spatial_change(old_row, new_row)
@@ -1303,7 +1442,7 @@ class LayoutComparisonEngine:
             # Large coordinate change (>20m)
             if 'coord_value' in field_changes:
                 delta_m = field_changes['coord_value'].get('delta_meters', 0)
-                if delta_m and delta_m > 20:  # >20m (delta_meters is already in meters)
+                if delta_m and abs(delta_m) > 20:  # >20m (use abs since delta can be negative)
                     return ChangeSeverity.MAJOR
         
         # Large spatial movement (>100px)
@@ -1320,7 +1459,7 @@ class LayoutComparisonEngine:
             # Medium coordinate change (5-20m)
             if 'coord_value' in field_changes:
                 delta_m = field_changes['coord_value'].get('delta_meters', 0)
-                if delta_m and delta_m > 5:  # >5m (delta_meters is already in meters)
+                if delta_m and abs(delta_m) > 5:  # >5m (use abs since delta can be negative)
                     return ChangeSeverity.MODERATE
             
             # Significant field changes
@@ -1373,7 +1512,7 @@ class LayoutComparisonEngine:
         Generate summary statistics from comparison results.
 
         Args:
-            changes: Dictionary with 'added', 'deleted', 'moved', 'modified', 'unchanged' lists
+            changes: Dictionary with 'added', 'deleted', 'moved', 'unchanged' lists
 
         Returns:
             Dictionary with summary statistics
@@ -1382,7 +1521,6 @@ class LayoutComparisonEngine:
             'total_added': len(changes['added']),
             'total_deleted': len(changes['deleted']),
             'total_moved': len(changes['moved']),        # FA-011: Verschoben
-            'total_modified': len(changes['modified']),
             'total_unchanged': len(changes['unchanged']),
             'by_severity': {
                 'major': 0,
@@ -1393,12 +1531,12 @@ class LayoutComparisonEngine:
             'by_page': {}
         }
 
-        # Count by severity (for moved and modified)
-        for change in changes['moved'] + changes['modified']:
+        # Count by severity (for moved)
+        for change in changes['moved']:
             summary['by_severity'][change.severity.value] += 1
 
         # Count by class
-        all_changes = changes['added'] + changes['deleted'] + changes['moved'] + changes['modified']
+        all_changes = changes['added'] + changes['deleted'] + changes['moved']
 
         for change in all_changes:
             cls = change.element_class
@@ -1407,8 +1545,7 @@ class LayoutComparisonEngine:
                 summary['by_class'][cls] = {
                     'added': 0,
                     'deleted': 0,
-                    'moved': 0,
-                    'modified': 0
+                    'moved': 0
                 }
 
             summary['by_class'][cls][change.change_type.value] += 1
@@ -1421,8 +1558,7 @@ class LayoutComparisonEngine:
                 summary['by_page'][page] = {
                     'added': 0,
                     'deleted': 0,
-                    'moved': 0,
-                    'modified': 0
+                    'moved': 0
                 }
 
             summary['by_page'][page][change.change_type.value] += 1
@@ -1490,9 +1626,8 @@ class LayoutComparisonEngine:
         
         if not old_text and not new_text:
             return None
-        
+
         # Split into alphanumeric components
-        import re
         old_components = re.findall(r'\w+', old_text)
         new_components = re.findall(r'\w+', new_text)
         

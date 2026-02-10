@@ -1,3 +1,29 @@
+"""
+YOLO Detection - Objekterkennung mit YOLOv8 OBB
+
+Dieses Modul implementiert die YOLO-basierte Objekterkennung fuer
+Gleisplansymbole mit orientierten Bounding Boxes (OBB).
+
+Kernfunktionen:
+    run_yolo_on_page(): Hauptfunktion - erkennt alle Symbole auf einer Seite
+    tile_image(): Unterteilt grosse Bilder in ueberlappende Kacheln
+    nms(): Non-Maximum Suppression fuer Duplikatfilterung
+    color_masks(): Extrahiert Rot/Gelb-Masken fuer Farbklassifikation
+
+Kachelungsstrategie:
+    - Grosse A0-Gleisplaene werden in 2048px Kacheln unterteilt
+    - 40% Ueberlappung verhindert abgeschnittene Erkennungen
+    - 320px Halo gibt zusaetzlichen Kontext an Kachelraendern
+    - Ergebnisse werden per NMS ueber alle Kacheln zusammengefuehrt
+
+Konfidenz-System:
+    - Zwei-Stufen-Schwellwerte: CLASS_THRESH (bestaetigt) und UNCERTAIN (zur Pruefung)
+    - Per-Klasse Schwellwerte in config.py definiert
+    - Unsichere Erkennungen werden zur manuellen Pruefung markiert
+
+Abhaengigkeiten:
+    ultralytics (YOLOv8), cv2, numpy
+"""
 from typing import List, Dict, Tuple
 import numpy as np
 import cv2
@@ -7,11 +33,8 @@ import math
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PIL import Image, ImageFile
 from core.image_processing import _normalize_xywhr,obb_xywhr_to_polygon,polygon_to_aabb_xyxy
-from utils.helpers import _is_near, _norm_angle, get_params_for_angle, _debug_angle
+from utils.helpers import _is_near, _norm_angle, get_params_for_angle, _debug_angle, iou, nms, color_masks, box_color
 from core.linking import _check_oriented_direction, _check_axis_aligned_direction
-# ============================================================================
-# YOLO DETECTION (with angle-aware expansion)
-# ============================================================================
 
 def pil_to_bgr(im: Image.Image) -> np.ndarray:
     return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
@@ -30,49 +53,6 @@ def draw_box(bgr, x1, y1, x2, y2, color=(0, 255, 0), label=""):
     cv2.rectangle(bgr, (x1, y1), (x2, y2), color, 2)
     if label:
         cv2.putText(bgr, label, (x1, max(0, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
-
-def iou(a, b):
-    x1 = max(a[0], b[0])
-    y1 = max(a[1], b[1])
-    x2 = min(a[2], b[2])
-    y2 = min(a[3], b[3])
-    inter = max(0, x2 - x1) * max(0, y2 - y1)
-    ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
-    return inter / ua if ua > 0 else 0.0
-
-def nms(boxes: List[Tuple[int, int, int, int]], scores: List[float], thr=0.5):
-    order = np.argsort(scores)[::-1]
-    keep = []
-    while order.size > 0:
-        i = order[0]
-        keep.append(i)
-        remove = [0]
-        for j in range(1, order.size):
-            if iou(boxes[i], boxes[order[j]]) >= thr:
-                remove.append(j)
-        order = np.delete(order, remove)
-    return keep
-
-def color_masks(bgr: np.ndarray):
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    red1 = cv2.inRange(hsv, (0, 120, 120), (10, 255, 255))
-    red2 = cv2.inRange(hsv, (170, 120, 120), (180, 255, 255))
-    red = cv2.bitwise_or(red1, red2)
-    yel = cv2.inRange(hsv, (20, 120, 140), (40, 255, 255))
-    k = np.ones((3, 3), np.uint8)
-    red = cv2.morphologyEx(cv2.morphologyEx(red, cv2.MORPH_CLOSE, k), cv2.MORPH_OPEN, k)
-    yel = cv2.morphologyEx(cv2.morphologyEx(yel, cv2.MORPH_CLOSE, k), cv2.MORPH_OPEN, k)
-    return red, yel
-
-def box_color(mask_red, mask_yel, x1, y1, x2, y2, thr=0.20):
-    area = max(1, (x2 - x1) * (y2 - y1))
-    r = (mask_red[y1:y2, x1:x2] > 0).sum() / area
-    y = (mask_yel[y1:y2, x1:x2] > 0).sum() / area
-    if r >= thr:
-        return "red"
-    if y >= thr:
-        return "yellow"
-    return "none"
 
 def tile_image(bgr: np.ndarray, tile=TILE_SIZE, overlap_pct=OVERLAP_PCT):
     step = int(tile * (1 - overlap_pct / 100.0))

@@ -4,6 +4,37 @@
 # Siemens Mobility GmbH
 # © 2025
 # ============================================================================
+"""
+SetupAndRunWindow - Startfenster fuer Analyse-Konfiguration
+
+Dieses Modul implementiert das Startfenster, in dem der Benutzer
+PDF-/Bilddateien auswaehlt und die Analyse startet.
+
+Hauptklassen:
+    SetupAndRunWindow: QMainWindow fuer Setup und Analyse-Start
+
+Funktionen:
+    - PDF/Bild-Auswahl (Drag-and-Drop unterstuetzt)
+    - YOLO-Modell-Auswahl
+    - OCR-Engine-Auswahl (PaddleOCR/EasyOCR)
+    - Vorschau der ersten Seite
+    - Fortschrittsanzeige waehrend Verarbeitung
+    - Laden gespeicherter Workspaces
+
+Signale:
+    processing_done: Analyse abgeschlossen (DataFrame, Pixmaps, etc.)
+    started_processing: Analyse gestartet
+
+Workflow:
+    1. Benutzer waehlt PDF/Bild
+    2. Benutzer waehlt YOLO-Modell
+    3. Klick auf "Analyse starten"
+    4. PipelineWorker verarbeitet im Hintergrund
+    5. Signal processing_done -> AuditingWindow oeffnet
+
+Abhaengigkeiten:
+    PyQt5, pandas, core.pipelineworker
+"""
 from PyQt5 import QtCore, QtGui, QtWidgets
 from ui.graphics_view import InteractiveGraphicsView
 from ui.database_dialogs import SavedWorkspacesDialog, DatabaseManagerDialog
@@ -965,6 +996,12 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
     def _cleanup_worker(self):
         """Clean up worker and disconnect signals to prevent memory leaks and duplicate callbacks"""
         if hasattr(self, 'worker') and self.worker is not None:
+            # CRITICAL: Wait for thread to finish before disconnecting signals
+            if self.worker.isRunning():
+                self.worker.requestInterruption()
+                self.worker.quit()
+                self.worker.wait(3000)  # Wait up to 3 seconds
+
             try:
                 self.worker.progress.disconnect()
                 self.worker.status.disconnect()
@@ -1244,6 +1281,9 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             # Normal analysis completed
             self.on_status("Analyse abgeschlossen.")
             self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception, False, uncertain_detections or [], None)  # from_database=False, no learned_patterns for fresh analysis
+
+        # Clean up worker after processing is done to allow running another analysis
+        self._cleanup_worker()
 
     def closeEvent(self, e: QtGui.QCloseEvent):
         if hasattr(self, "worker") and self.worker is not None and self.worker.isRunning():

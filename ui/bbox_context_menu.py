@@ -42,8 +42,10 @@ class BBoxContextMenu:
             bbox_item: The graphics item (ResizableBBoxItem or ResizablePolygonBBoxItem)
             pos: Global position for menu
         """
-        row_id = bbox_item.data(0)
+        # Try to get row_id from the item's attribute first, fallback to data(0)
+        row_id = getattr(bbox_item, 'row_id', None) or bbox_item.data(0)
         if row_id is None:
+            print(f"Warning: No row_id found for bbox_item {bbox_item}")
             return
 
         # Get current class

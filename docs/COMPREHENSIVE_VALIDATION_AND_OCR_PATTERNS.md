@@ -7,7 +7,7 @@ Based on comprehensive search through:
 - `core/linking.py` (Coordinate parsing)
 - `uservalidation/data_validator2.py` (Format validation)
 - `uservalidation/ultimate_validator.py` (Advanced validation)
-- `data_validator.py` (Legacy validation)
+- `uservalidation/data_validator2.py` (Data validation)
 - `config.py` (Regex patterns)
 
 ---
@@ -148,7 +148,7 @@ if bracket_incomplete_match:
 
 ### 2.4 Gl. → GL. Uppercase Conversion (multiple places)
 
-**File:** `data_validator.py` and `data_validator2.py`
+**File:** `uservalidation/data_validator2.py`
 
 ```python
 temp_text = re.sub(r'G[l]\.', 'GL.', temp_text)     # Gl. → GL.

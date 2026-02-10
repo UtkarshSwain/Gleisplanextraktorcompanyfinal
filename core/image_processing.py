@@ -1,3 +1,29 @@
+"""
+Image Processing - Bildverarbeitungsfunktionen fuer Gleisplanerkennung
+
+Dieses Modul enthaelt Hilfsfunktionen fuer die Bildverarbeitung,
+insbesondere fuer das Zuschneiden und Transformieren von Erkennungsregionen.
+
+Kernfunktionen:
+    perspective_crop_from_det(): Perspektivkorrektur fuer geneigte Texte
+    rotated_crop_from_det(): Rotierter Zuschnitt mit Padding
+    obb_xywhr_to_polygon(): Konvertiert OBB zu 4-Punkt-Polygon
+    parse_weichen_block(): Parst mehrzeiligen Weichenblock-Text
+
+Bildverbesserung:
+    _enhance_contrast(): CLAHE Kontrastverbesserung
+    _binarize_for_text(): Adaptive Schwellwertbinarisierung
+    _remove_long_lines_oriented(): Entfernt Rahmenlinien bei OCR
+    _upscale_if_tiny(): Skaliert kleine Symbole hoch
+
+Zuschnittstrategien:
+    - Perspektivwarp: Fuer stark geneigte Texte (>15° von Kardinal)
+    - Rotierter Zuschnitt: Fuer leicht geneigte oder horizontale Texte
+    - Adaptive Raender: Basierend auf Neigungswinkel
+
+Abhaengigkeiten:
+    cv2, numpy, PIL
+"""
 from typing import Tuple
 import numpy as np
 import cv2
@@ -6,9 +32,6 @@ import math
 from config import ZOOM_SIZE
 from PyQt5 import QtCore, QtGui, QtWidgets
 from utils.helpers import _dist_to_cardinal
-# ============================================================================
-# IMAGE PROCESSING UTILITIES
-# ============================================================================
 def parse_weichen_block(text: str) -> dict:
     """
     Parse weichen block text into ID and coordinates.

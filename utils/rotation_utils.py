@@ -61,16 +61,17 @@ def transform_offset_forward(dx: float, dy: float, width: float, height: float, 
     # Normalize angle to 0-360
     norm_angle = angle % 360
 
-    # FAST PATH: Use simple swap for exact quadrant angles (most common case)
-    # This avoids trigonometric functions when not needed
+    # FAST PATH: Gleisplan-specific track-relative positioning for quadrant angles
+    # Text stays on consistent SIDE of track (up/down), only LEFT/RIGHT changes
+    # 0°: below-left, 90°: above-left, 180°: below-right, 270°: below-left
     if norm_angle < 5 or norm_angle > 355:  # ~0°
         return dx, dy, width, height
     elif 85 < norm_angle < 95:  # ~90°
-        return dy, -dx, height, width
+        return dx, -dy, height, width       # Y flips (below→above), swap dims
     elif 175 < norm_angle < 185:  # ~180°
-        return -dx, -dy, width, height
+        return -dx, dy, width, height       # X flips only (left→right)
     elif 265 < norm_angle < 275:  # ~270°
-        return -dy, dx, height, width
+        return dx, dy, height, width        # No flip, swap dims only
 
     # ACCURATE PATH: Use trigonometry for non-quadrant angles (45°, 135°, etc.)
     import math
@@ -110,15 +111,16 @@ def transform_offset_reverse(dx: float, dy: float, width: float, height: float, 
     # Normalize angle to 0-360
     norm_angle = angle % 360
 
-    # FAST PATH: Use simple swap for exact quadrant angles
+    # FAST PATH: Gleisplan-specific track-relative positioning for quadrant angles
+    # These are self-inverse transforms (applying forward then reverse returns original)
     if norm_angle < 5 or norm_angle > 355:  # ~0°
         return dx, dy, width, height
-    elif 85 < norm_angle < 95:  # ~90° → reverse is -90°
-        return -dy, dx, height, width
-    elif 175 < norm_angle < 185:  # ~180°
-        return -dx, -dy, width, height
-    elif 265 < norm_angle < 275:  # ~270° → reverse is -270° = +90°
-        return dy, -dx, height, width
+    elif 85 < norm_angle < 95:  # ~90° → reverse of (dx, -dy) is (dx, -dy)
+        return dx, -dy, height, width       # Y flip is self-inverse
+    elif 175 < norm_angle < 185:  # ~180° → reverse of (-dx, dy) is (-dx, dy)
+        return -dx, dy, width, height       # X flip is self-inverse
+    elif 265 < norm_angle < 275:  # ~270° → reverse of (dx, dy) is (dx, dy)
+        return dx, dy, height, width        # No flip is self-inverse
 
     # ACCURATE PATH: Use trigonometry for non-quadrant angles
     import math

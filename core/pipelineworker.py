@@ -1,3 +1,31 @@
+"""
+PipelineWorker - Haupt-Verarbeitungsthread fuer Gleisplanerkennung
+
+Dieses Modul enthaelt den PipelineWorker QThread, der die komplette
+Verarbeitungspipeline fuer PDF- und Bilddateien orchestriert.
+
+Verarbeitungsschritte:
+    1. Datei laden (PDF via pdf2image oder Bild direkt)
+    2. Farben fuer YOLO konvertieren (Farbige Pixel -> Schwarz)
+    3. YOLO Objekterkennung ausfuehren
+    4. Benutzerdefinierte Symbole erkennen (Template-Matching)
+    5. OCR fuer jede Erkennung (Text, Koordinaten)
+    6. Koordinaten-Verknuepfung und Fahrtrichtungserkennung
+    7. Validierung und Qualitaetspruefung
+    8. Ergebnisse als DataFrame emittieren
+
+Hauptklassen:
+    PipelineWorker: QThread fuer asynchrone Verarbeitung
+
+Signale:
+    progress(int): Fortschritt 0-100%
+    status(str): Statusmeldungen
+    page_processed(int, object, DataFrame): Seite fertig
+    done(DataFrame, ...): Verarbeitung abgeschlossen
+
+Abhaengigkeiten:
+    PyQt5, pandas, ultralytics, cv2, pdf2image
+"""
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pandas as pd
 import time
@@ -133,8 +161,10 @@ class PipelineWorker(QtCore.QThread):
             # 2. CONDITIONALLY load model
             if self.run_analysis:
                 # -------- Model load (5%) --------
+                self.status.emit("Lade YOLO-Modell... (kann 30-60 Sekunden dauern)")
                 model = YOLO(self.model_path)
                 self.progress.emit(5)
+                self.status.emit("YOLO-Modell geladen.")
                 set_classes_from_model(model)
                 self.status.emit(f"Erkennbare Klassen ({len(CLASSES)}): {', '.join(CLASSES)}")
                 
@@ -276,9 +306,22 @@ class PipelineWorker(QtCore.QThread):
                     cnt = Counter(d['name'] for d in dets)
                     summary = ", ".join(f"{k}:{v}" for k, v in sorted(cnt.items()))
 
-                    # Status message - simplified for presentation
+                    # Status message - show custom symbol breakdown
                     total_objects = yolo_count + custom_count
-                    self.status.emit(f"Objekterkennung: {total_objects} Objekte erkannt")
+
+                    # Build custom symbol breakdown
+                    custom_breakdown = ""
+                    if custom_count > 0:
+                        custom_by_name = {}
+                        for d in dets:
+                            if d.get('is_custom_symbol', False):
+                                name = d['name']
+                                custom_by_name[name] = custom_by_name.get(name, 0) + 1
+
+                        custom_parts = [f"{count} {name}" for name, count in sorted(custom_by_name.items())]
+                        custom_breakdown = f" (Custom: {', '.join(custom_parts)})"
+
+                    self.status.emit(f"Objekterkennung: {total_objects} Objekte erkannt{custom_breakdown}")
                     emit_progress(pidx - 1, W['raster'] + W['prep'] + W['det'])
 
                     mask_red, mask_yel = color_masks(bgr_color)
@@ -318,6 +361,8 @@ class PipelineWorker(QtCore.QThread):
                             print(f"[OCR Coordinate] Complete flow: '{txt}' → '{txt_fixed}' → value={val}, gi_gl={gi}\n")
                         
                         c_color = box_color(mask_red, mask_yel, c["x1"], c["y1"], c["x2"], c["y2"])
+                        # Ensure coordinate text is uppercase
+                        txt_fixed = txt_fixed.upper() if txt_fixed else txt_fixed
                         return (id(c), dict(text=txt_fixed, value=val, gi=gi, color=c_color))
 
                     if coords:
@@ -426,8 +471,12 @@ class PipelineWorker(QtCore.QThread):
                                 parsed = parse_weichen_block(ocr_result)
                                 name_txt = parsed['id']
                                 weichen_coords = parsed['coordinates']
+                                # Uppercase weichen coordinates
+                                weichen_coords = [c.upper() if c else c for c in weichen_coords]
                             else:
                                 name_txt = ocr_result
+                        # Ensure anchor text is uppercase
+                        name_txt = name_txt.upper() if name_txt else name_txt
                         return (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf)
 
                     if anchors:
@@ -756,10 +805,19 @@ class PipelineWorker(QtCore.QThread):
                         print(f"{'='*70}")
 
                     #  STEP 2: Now process ALL elements (including haltetafel)
+                    # Initialize counters for NO_OCR_CLASSES to generate unique names
+                    # Note: haltepunkt has its own counter logic in its special handling section
+                    no_ocr_counters = {cls: 1 for cls in NO_OCR_CLASSES if cls != "haltepunkt"}
+
                     for (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf) in anchor_results:
                         row_id = len(all_rows)
                         fahrtrichtung = None
                         fahrtrichtung_source = 'none'  #  CHANGE 2: Default source
+
+                        # Generate counter-based names for NO_OCR_CLASSES (except haltepunkt which has special handling)
+                        if a["name"] in no_ocr_counters:
+                            name_txt = f"{a['name']} {no_ocr_counters[a['name']]}"
+                            no_ocr_counters[a["name"]] += 1
                         
                         #  NEW: SKIP if this signal is haltepunkt-referenced
                         if a["name"] == "signal" and id(a) in haltepunkt_referenced_signals:
@@ -833,6 +891,10 @@ class PipelineWorker(QtCore.QThread):
                             # ========================================
                             # STEP 3: Create row
                             # ========================================
+                            # Ensure text is uppercase
+                            haltepunkt_name = haltepunkt_name.upper() if haltepunkt_name else haltepunkt_name
+                            coord_txt = coord_txt.upper() if coord_txt else coord_txt
+
                             element_for_uuid = {
                                 'cls': a["name"],
                                 'page': pidx,

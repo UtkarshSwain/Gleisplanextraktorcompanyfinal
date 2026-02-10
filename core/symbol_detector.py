@@ -693,6 +693,15 @@ class NewSymbolDetector:
                 kept_cx, kept_cy = kept_det.center
                 kept_x1, kept_y1, kept_x2, kept_y2 = kept_det.bbox
 
+                # Check 0: Angle-aware - different orientations (0° vs 180°) are not duplicates
+                # This handles cases where same symbol appears in opposite orientations
+                if hasattr(det, 'angle') and hasattr(kept_det, 'angle'):
+                    angle_diff = abs(det.angle - kept_det.angle) % 360
+                    angle_diff = min(angle_diff, 360 - angle_diff)
+                    if angle_diff > 90:
+                        # Significantly different orientations - not duplicates
+                        continue
+
                 # Check 1: Center distance
                 dx = det_cx - kept_cx
                 dy = det_cy - kept_cy

@@ -8,7 +8,7 @@ Based on exhaustive search through:
 - `core/linking.py` (coordinate parsing, signal filtering)
 - `core/image_processing.py` (weichen_block parsing)
 - `uservalidation/*.py` (validation checks)
-- `data_validator.py` (legacy validation)
+- `uservalidation/data_validator2.py` (data validation)
 - All other validation-related files
 
 ---

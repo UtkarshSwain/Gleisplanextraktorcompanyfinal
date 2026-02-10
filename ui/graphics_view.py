@@ -1,3 +1,30 @@
+"""
+InteractiveGraphicsView - Zoombare Bildansicht mit Zeichenfunktionen
+
+Dieses Modul implementiert die interaktive Grafikanzeige fuer
+Gleisplanbilder mit Erkennungsoverlays.
+
+Hauptklassen:
+    InteractiveGraphicsView: QGraphicsView mit erweiterter Interaktion
+
+Funktionen:
+    - Zoom: Strg+Mausrad (1.25x Faktor)
+    - Pan: Mausziehen oder Umschalt+Mausrad
+    - Zeichenmodus: Rechtecke und rotierte Rechtecke zeichnen
+    - Kontextmenue: Auskoppeln/Andocken der Grafik
+
+Signale:
+    zoomChanged(float): Zoomstufe geaendert
+    rect_drawn(QRectF): Achsenparalleles Rechteck gezeichnet
+    rotated_rect_drawn(QRectF, float): Rotiertes Rechteck gezeichnet
+
+Zeichenmodus (2-stufig fuer rotierte Rechtecke):
+    1. Stufe: Grundlinie zeichnen (definiert Winkel)
+    2. Stufe: Hoehe festlegen (senkrecht zur Grundlinie)
+
+Abhaengigkeiten:
+    PyQt5
+"""
 from PyQt5 import QtCore, QtGui, QtWidgets
 from typing import List, Dict, Tuple, Optional, Any
 import math

@@ -1,3 +1,32 @@
+"""
+WorkspaceWidget - Haupt-Bearbeitungsbereich fuer einzelne Gleisplaene
+
+Dieses Modul implementiert das zentrale Bearbeitungs-Widget, das alle
+Erkennungen eines Layouts darstellt und Bearbeitungsfunktionen bietet.
+
+Hauptklassen:
+    WorkspaceWidget: Container fuer Grafik- und Tabellenansicht
+
+Komponenten:
+    - InteractiveGraphicsView: Zoombare Bildansicht mit Erkennungsboxen
+    - AuditingTreeWidget: Sortier-/filterbare Tabelle aller Erkennungen
+    - Toolbar: Zoom, Validierung, Export-Steuerelemente
+
+Funktionen:
+    - Risiko-basierte Hervorhebung (Gruen/Gelb/Rot)
+    - Inline-Bearbeitung von OCR-Ergebnissen
+    - Manuelle Koordinaten-Verknuepfung
+    - Fahrtrichtungs-Neuberechnung
+    - Excel-Export mit Spaltenauswahl
+
+Risiko-System:
+    - Berechnet Risikoscore pro Erkennung
+    - Faktoren: Konfidenz, fehlende Koordinaten, Formatfehler
+    - Farbliche Markierung in Tabelle und Grafik
+
+Abhaengigkeiten:
+    PyQt5, pandas, numpy, cv2
+"""
 from PyQt5 import QtCore, QtGui, QtWidgets
 from typing import List, Dict, Tuple, Optional, Any
 import pandas as pd
@@ -88,6 +117,40 @@ def bbox_to_rotated_poly(x1, y1, x2, y2, angle_deg):
     rotated[:, 1] += cy
 
     return rotated.astype(np.float32)
+
+def pixmap_to_bgr_array(pixmap: QtGui.QPixmap) -> Optional[np.ndarray]:
+    """
+    Convert QPixmap to BGR numpy array for OpenCV processing.
+
+    Used as fallback when BGR arrays aren't available (e.g., after loading
+    from database where only pixmaps are stored).
+
+    Args:
+        pixmap: QPixmap to convert
+
+    Returns:
+        np.ndarray: BGR array (H, W, 3) suitable for cv2 operations, or None if failed
+    """
+    if pixmap is None or pixmap.isNull():
+        return None
+
+    try:
+        qimg = pixmap.toImage().convertToFormat(QtGui.QImage.Format_RGBA8888)
+        width = qimg.width()
+        height = qimg.height()
+
+        if width == 0 or height == 0:
+            return None
+
+        ptr = qimg.bits()
+        ptr.setsize(height * width * 4)
+        arr = np.array(ptr).reshape(height, width, 4)
+        # Convert RGBA to BGR for OpenCV
+        bgr_array = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+        return bgr_array
+    except Exception as e:
+        print(f"Error converting pixmap to BGR array: {e}")
+        return None
 
 # ============================================================================
 # RISK SCORE HELPERS - Using shared validation_config.py
@@ -1180,11 +1243,14 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     self.df_all[col] = None
                 print(f"   Added missing OCR columns to loaded data: {missing_ocr_cols}")
 
-            # IMPORTANT: Deep copy all data structures to avoid sharing references with setup_window
-            # Without these copies, setup_window operations would affect this workspace's data
-            self.page_base_pix = {k: v.copy() for k, v in page_base_pix.items()}  # QPixmap.copy()
+            # MEMORY OPTIMIZATION: Use references for read-only data
+            # - QPixmaps are read-only in workspace, no copy needed
+            # - BGR arrays are read-only (used for OCR cropping), no copy needed
+            # - DataFrames MUST be copied because workspace modifies them (adds columns, edits values)
+            self.page_base_pix = page_base_pix  # Reference (read-only)
+            self.page_bgr_arrays = page_bgr_arrays  # Reference (read-only)
+            # Always copy DataFrames - workspace modifies them extensively
             self.page_dfs = {k: self._ensure_hidden_column(v.copy()) for k, v in page_dfs.items()}
-            self.page_bgr_arrays = {k: np.copy(v) for k, v in page_bgr_arrays.items()}  # Deep copy numpy arrays
 
             # FIX: Rebuild page_dfs from df_all when loading from database
             if from_database and not self.page_dfs and not self.df_all.empty:
@@ -1230,14 +1296,6 @@ class WorkspaceWidget(QtWidgets.QWidget):
             # Build row specs per page
             self.all_page_row_specs.clear()
             for pidx, df_page in self.page_dfs.items():
-                
-                #  ADD DEBUG: Check _hidden column in page df (disabled for performance)
-                # if '_hidden' in df_page.columns:
-                #     page_hidden_count = df_page['_hidden'].sum()
-                #     print(f"  Page {pidx}: {page_hidden_count} hidden rows out of {len(df_page)}")
-                # else:
-                #     print(f"WARNING: Page {pidx} missing _hidden column!")
-                
                 specs = {}
                 for _, row in df_page.iterrows():
                     label = f"{row['cls']} {row.get('conf', 0.0):.2f}"
@@ -1277,10 +1335,6 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     angle = row.get('angle', 0.0)
                     angle_raw = row.get('angle_raw', angle)
 
-                    # Debug output for angle detection (disabled for performance)
-                    # if pd.notna(angle) or pd.notna(angle_raw):
-                    #     print(f"Row {row['row_id']} ({row['cls']}): angle={angle}, angle_raw={angle_raw}")
-
                     # Try angle first, then angle_raw
                     use_angle = angle if pd.notna(angle) and angle != 0.0 else angle_raw
 
@@ -1289,7 +1343,6 @@ class WorkspaceWidget(QtWidgets.QWidget):
                             pts = bbox_to_rotated_poly(x1, y1, x2, y2, float(use_angle))
                             spec.update({"is_poly": True, "pts": pts})
                             specs[int(row['row_id'])] = spec
-                            # print(f"Created ROTATED polygon for row {row['row_id']}, angle={use_angle:.1f}°")  # Disabled for performance
                             continue
                         except Exception as e:
                             print(f"Failed to create rotated poly: {e}")
@@ -1303,14 +1356,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 
                 self.all_page_row_specs[pidx] = specs
 
-                #  DEBUG: Show what was built (disabled for performance - uncomment for debugging)
-                # print(f" Page {pidx}: Built {len(specs)} row specs")
-                # print(f"Classes: {df_page['cls'].value_counts().to_dict()}")
-
             max_page = max(self.page_dfs.keys()) if self.page_dfs else 1
-            # Page control removed - single page view only
-            # self.page_spin.setMaximum(max_page)
-            # self.page_spin.setValue(1)
             
             # Store track skeleton (copy to avoid shared reference with setup_window)
             self.track_skeleton = np.copy(track_skeleton) if track_skeleton is not None else None
@@ -1525,6 +1571,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
         
         if not is_same_page:
             # Full rebuild when changing pages
+            # MEMORY: Clear item references before scene.clear() to allow GC
+            self.current_row_items.clear()
             self.scene.clear()
             _, _, _, _, bg = self._get_theme_colors()
             self.scene.setBackgroundBrush(QtGui.QBrush(bg))
@@ -3482,10 +3530,24 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         self.page_dfs[page].loc[page_idx, 'ax2'] = x2
                         self.page_dfs[page].loc[page_idx, 'ay2'] = y2
 
-            # Get BGR array for current page
+            # Get BGR array for current page (rebuild from pixmap if needed)
             bgr_array = self.page_bgr_arrays.get(page)
             if bgr_array is None:
-                raise Exception(f"BGR array not found for page {page}")
+                # Rebuild from pixmap (fallback for database-loaded workspaces)
+                pix = self.page_base_pix.get(page)
+                if pix is not None:
+                    bgr_array = pixmap_to_bgr_array(pix)
+                    if bgr_array is not None:
+                        self.page_bgr_arrays[page] = bgr_array  # Cache for future use
+                        print(f"Rebuilt BGR array from pixmap for page {page}")
+
+                if bgr_array is None:
+                    QtWidgets.QMessageBox.warning(
+                        self, "Bilddaten fehlen",
+                        f"Bilddaten für Seite {page} nicht verfügbar.\n"
+                        "Bitte laden Sie das PDF neu."
+                    )
+                    return
 
             # Reconstruct detection dict using the standard method (includes all fields)
             # First, get the updated row after coordinate changes
@@ -3941,10 +4003,24 @@ class WorkspaceWidget(QtWidgets.QWidget):
             print(f" Edge deltas: x1={delta_x1:+d}, y1={delta_y1:+d}, x2={delta_x2:+d}, y2={delta_y2:+d}")
             print(f" Display: offset=({offset_x:+d}, {offset_y:+d}), size_delta=({width_delta:+d}, {height_delta:+d})")
 
-            # Get BGR array for current page
+            # Get BGR array for current page (rebuild from pixmap if needed)
             bgr_array = self.page_bgr_arrays.get(page)
             if bgr_array is None:
-                raise Exception(f"BGR array not found for page {page}")
+                # Rebuild from pixmap (fallback for database-loaded workspaces)
+                pix = self.page_base_pix.get(page)
+                if pix is not None:
+                    bgr_array = pixmap_to_bgr_array(pix)
+                    if bgr_array is not None:
+                        self.page_bgr_arrays[page] = bgr_array  # Cache for future use
+                        print(f"Rebuilt BGR array from pixmap for page {page}")
+
+                if bgr_array is None:
+                    QtWidgets.QMessageBox.warning(
+                        self, "Bilddaten fehlen",
+                        f"Bilddaten für Seite {page} nicht verfügbar.\n"
+                        "Bitte laden Sie das PDF neu."
+                    )
+                    return
 
             # Run OCR on NEW region
             import cv2
@@ -4081,11 +4157,17 @@ class WorkspaceWidget(QtWidgets.QWidget):
                             print(f"Current frame: dx={current_dx}, dy={current_dy}, w={current_width}, h={current_height}")
                             print(f"Template (0°): dx={absolute_dx}, dy={absolute_dy}, w={final_width}, h={final_height}")
 
+                            # Calculate reference symbol size for scale compensation
+                            ref_sym_width = int(sym_x2 - sym_x1)
+                            ref_sym_height = int(sym_y2 - sym_y1)
+
                             print(f" Saving to template: dx={absolute_dx}, dy={absolute_dy}, "
-                                  f"width={final_width}, height={final_height}")
+                                  f"width={final_width}, height={final_height}, "
+                                  f"ref_sym=({ref_sym_width}x{ref_sym_height})")
 
                             self._save_ocr_adjustment_to_template(
-                                cls, absolute_dx, absolute_dy, final_width, final_height
+                                cls, absolute_dx, absolute_dy, final_width, final_height,
+                                ref_sym_width, ref_sym_height
                             )
                         else:
                             print(f"Cannot save to template: No OCR region data")
@@ -7453,7 +7535,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self._update_single_row_overlay(rid)
 
     def _save_ocr_adjustment_to_template(self, symbol_class: str, dx: int, dy: int,
-                                         width: int, height: int):
+                                         width: int, height: int,
+                                         ref_sym_width: int = None, ref_sym_height: int = None):
         """
         Save OCR region offset to symbol template definition.
 
@@ -7463,6 +7546,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
             dy: Absolute Y offset from symbol center in pixels
             width: Absolute width of OCR region in pixels
             height: Absolute height of OCR region in pixels
+            ref_sym_width: Reference symbol width for scale compensation
+            ref_sym_height: Reference symbol height for scale compensation
         """
         try:
             from core.symbol_detector import NewSymbolDetector
@@ -7483,11 +7568,17 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 symbol.text_region_offset['width'] = width
                 symbol.text_region_offset['height'] = height
 
+                # Store reference symbol size for scale compensation
+                if ref_sym_width is not None and ref_sym_height is not None:
+                    symbol.text_region_offset['ref_sym_width'] = ref_sym_width
+                    symbol.text_region_offset['ref_sym_height'] = ref_sym_height
+
                 # Save to config
                 detector._save_config()
 
                 print(f" Saved OCR region to template '{symbol_class}'")
-                print(f"dx={dx}, dy={dy}, width={width}, height={height}")
+                print(f"dx={dx}, dy={dy}, width={width}, height={height}, "
+                      f"ref_sym=({ref_sym_width}x{ref_sym_height})")
 
                 QtWidgets.QMessageBox.information(
                     self,

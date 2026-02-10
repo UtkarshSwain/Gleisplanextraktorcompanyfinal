@@ -1,3 +1,30 @@
+"""
+OCR Engine - Texterkennung fuer Gleisplansymbole
+
+Dieses Modul implementiert die Texterkennungspipeline fuer verschiedene
+Symbolklassen mit unterschiedlichen OCR-Strategien.
+
+Kernfunktionen:
+    paddleocr_recognize(): Hauptfunktion fuer PaddleOCR-Erkennung
+    ocr_signal_name(): Signalbezeichnung erkennen (z.B. "A1234")
+    ocr_coordinate_unified(): Koordinatentext erkennen (z.B. "0,1234 Gl.113")
+    ocr_anchor_name(): Allgemeine Textfelder erkennen
+    preprocess_for_paddleocr(): Bildvorverarbeitung pro Klasse
+
+Winkelabhaengige Verarbeitung:
+    - Kardinal (±15° von 0°/180°): Standardverarbeitung
+    - Angular (>15°): Perspektivkorrektur + Rotation
+    - Verschiedene Vorverarbeitung pro Symbolklasse
+
+Klassenspezifische Strategien:
+    - Signal: Alphanumerisch (Muster: [A-Z]{1,4}[0-9]{1,4})
+    - GKS: Rein numerisch (3-4 Ziffern)
+    - Koordinaten: Dezimalzahlen mit Gleisreferenz
+    - Weichen-Block: Mehrzeiliger Text
+
+Abhaengigkeiten:
+    paddleocr, cv2, numpy, PIL
+"""
 from typing import Tuple, Optional
 import numpy as np
 import cv2
@@ -2536,17 +2563,20 @@ def _ocr_custom_symbol_single_position(
         # Normalize angle to 0-360
         norm_angle = sym_angle % 360
 
-        # Map direction based on rotation (use ranges to handle slight variations)
-        if 45 <= norm_angle < 135:  # ~90° rotation
-            direction_map = {"left": "below", "right": "above", "above": "left", "below": "right"}
+        # Map direction based on rotation - TRACK-RELATIVE positioning for Gleisplans
+        # Text stays on same SIDE of track, only LEFT/RIGHT changes with signal direction
+        # 0°: below-left → 90°: above-left → 180°: below-right → 270°: below-left
+        # NOTE: Use narrow ranges to match rotation_utils.py behavior (quadrant angles only)
+        # For non-quadrant angles (45°, 135°, etc.), no direction change (fallback uses auto-detection)
+        if 85 < norm_angle < 95:  # ~90° rotation - Y flips only (below↔above)
+            direction_map = {"above": "below", "below": "above"}  # left/right unchanged
             effective_position = direction_map.get(text_position, text_position)
-        elif 135 <= norm_angle < 225:  # ~180° rotation
-            direction_map = {"left": "right", "right": "left", "above": "below", "below": "above"}
+        elif 175 < norm_angle < 185:  # ~180° rotation - X flips only (left↔right)
+            direction_map = {"left": "right", "right": "left"}  # above/below unchanged
             effective_position = direction_map.get(text_position, text_position)
-        elif 225 <= norm_angle < 315:  # ~270° rotation
-            direction_map = {"left": "above", "right": "below", "above": "right", "below": "left"}
-            effective_position = direction_map.get(text_position, text_position)
-        # else: 0° or 315-360° - no change needed
+        elif 265 < norm_angle < 275:  # ~270° rotation - no flip
+            pass  # All directions stay same (just dimension swap in bbox)
+        # else: 0° or 315-360° or non-quadrant angles - no change needed
 
         if DEBUG_CUSTOM_SYMBOLS:
             print(f"Rotation adjustment: {text_position} @ {sym_angle:.1f}° → {effective_position}")

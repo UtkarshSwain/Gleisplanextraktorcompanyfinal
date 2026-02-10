@@ -4,6 +4,29 @@
 # Siemens Mobility GmbH
 # © 2025
 # ============================================================================
+"""
+AuditingWindow - Hauptfenster fuer Bearbeitung und Korrektur
+
+Dieses Modul implementiert das Hauptbearbeitungsfenster mit Tab-Verwaltung
+fuer mehrere gleichzeitig geoeffnete Gleisplaene.
+
+Hauptklassen:
+    AuditingWindow: QMainWindow mit Tab-Widget und Menueleiste
+
+Funktionen:
+    - Multi-Tab-Verwaltung: Mehrere Layouts gleichzeitig offen
+    - Tab-Auskopplung: Tabs als eigene Fenster abtrennen
+    - Datenbankintegration: Speichern/Laden von Workspaces
+    - Menueleiste: Datei, Ansicht, Tools, Hilfe
+    - Statusleiste: Zeilen-/Auswahlzaehler
+
+Signale/Slots:
+    - tabCloseRequested: Speicherdialog bei Tab-Schliessung
+    - currentChanged: UI-Aktualisierung bei Tab-Wechsel
+
+Abhaengigkeiten:
+    PyQt5, pandas
+"""
 from PyQt5 import QtCore, QtGui, QtWidgets
 from typing import List, Dict, Tuple, Optional, Any
 import os

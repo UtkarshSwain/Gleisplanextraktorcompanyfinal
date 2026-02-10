@@ -1,3 +1,29 @@
+"""
+Linking - Symbol-Koordinaten-Verknuepfung und Fahrtrichtungserkennung
+
+Dieses Modul implementiert die Verknuepfungslogik zwischen erkannten
+Symbolen und ihren zugehoerigen Koordinaten sowie die Fahrtrichtungserkennung.
+
+Kernfunktionen:
+    link_anchor_to_coord(): Verknuepft Symbol mit naechster Koordinate
+    detect_fahrtrichtung(): Bestimmt Fahrtrichtung basierend auf GKS-Position
+    find_nearest_track_perpendicular(): Findet Gleis per Raycast
+    merge_duplicate_signals(): Fusioniert doppelte Signalerkennungen
+    link_haltetafel_to_gks(): Verknuepft Haltetafeln mit GKS
+
+Fahrtrichtungs-Algorithmen:
+    1. GKS-basiert: Position des GKS relativ zum Signal
+    2. Gleis-senkrecht: Raycast zum Gleisskelett (falls GKS fehlt)
+    3. Numerischer Fallback: Basierend auf Koordinatenwerten
+
+Richtungserkennung:
+    - Beruecksichtigt Symbolwinkel fuer "oben/unten/links/rechts"
+    - Rotiert Koordinatensystem fuer geneigte Symbole
+    - Separate Logik fuer kardinal vs. angular ausgerichtete Symbole
+
+Abhaengigkeiten:
+    numpy, pandas, math
+"""
 from typing import Dict, List, Optional, Tuple
 import math
 import re
@@ -5,9 +31,6 @@ import pandas as pd
 import numpy as np
 from config import LINK_RULES, COORD_RE, DEBUG_ANGLE_ROUTING, DEBUG_LINKING, DEBUG_TRACK
 from utils.helpers import _is_cardinal,_norm_angle,_is_angular,ANGLE_TOL,_is_near,_debug_angle
-# ====================================================================================
-# NAME WINDOWS + LINKING (unchanged from Code 1)
-# ============================================================================
 
 NAME_RULES_EXTRA = {
     "gm_block": dict(inside=True, right=True, below=True),
