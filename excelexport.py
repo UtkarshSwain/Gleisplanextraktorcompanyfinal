@@ -3,7 +3,8 @@ import json
 import re
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pandas as pd
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl import load_workbook
 
 
 # =============================================================================
@@ -1958,7 +1959,6 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
         )
 
         # Load existing workbook
-        from openpyxl import load_workbook
         try:
             wb = load_workbook(file_path)
         except PermissionError:
@@ -1984,10 +1984,16 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
         start_col_idx = column_index_from_string(start_col)
         skipped_cells = 0  # Count skipped formula cells
 
+        # Import MergedCell to check for merged cells
+        from openpyxl.cell.cell import MergedCell
+
         row_offset = 0
         if include_header:
             for col_idx, col_name in enumerate(df.columns):
                 cell = ws.cell(row=start_row, column=start_col_idx + col_idx)
+                # Skip merged cells (read-only)
+                if isinstance(cell, MergedCell):
+                    continue
                 # Skip if cell has formula and skip_formula_cells is enabled
                 if skip_formula_cells and cell.value and isinstance(cell.value, str) and cell.value.startswith('='):
                     skipped_cells += 1
@@ -1998,6 +2004,9 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
         for row_num, (_, row) in enumerate(df.iterrows()):
             for col_idx, value in enumerate(row):
                 cell = ws.cell(row=start_row + row_offset + row_num, column=start_col_idx + col_idx)
+                # Skip merged cells (read-only)
+                if isinstance(cell, MergedCell):
+                    continue
                 # Skip if cell has formula and skip_formula_cells is enabled
                 if skip_formula_cells and cell.value and isinstance(cell.value, str) and cell.value.startswith('='):
                     skipped_cells += 1
