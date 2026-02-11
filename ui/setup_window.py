@@ -45,6 +45,7 @@ import os
 from utils.dpi_utils import get_adaptive_window_size, center_window, scale_value
 from pdfcomparison.dialogs import HelpDialog
 from core.pipelineworker import PipelineWorker
+from core.profile_manager import ProfileManager
 import time
 import cv2
 from core.image_processing import qpolygonf_from_pts
@@ -64,6 +65,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.resize(w, h)
         center_window(self)
         self.pdf_path = None; self.model_path = None; self.ocr_engine = "paddleocr"
+        self.profile_path = "profiles/siemens_track_plans.yaml"  # Default profile
+        self.layout_config = None  # Will be loaded when analysis starts
         self.view = InteractiveGraphicsView(self)
         self.view.setStyleSheet("""
             QGraphicsView {
@@ -445,9 +448,66 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
         top.addWidget(self.model_frame)
 
-        # Step 3: Run - Compact
-        self.run_frame = self._create_step_frame_compact(
+        # Step 3: Profile Selection - Compact
+        self.profile_frame = self._create_step_frame_compact(
             step_num="03",
+            title="PROFIL"
+        )
+        profile_layout = self.profile_frame.layout()
+
+        self.combo_profile = QtWidgets.QComboBox()
+        self.combo_profile.addItems([
+            "Siemens Gleispläne"
+            # Future layout types will be added here
+        ])
+        self.combo_profile.setMinimumHeight(scale_value(36))
+        self.combo_profile.setStyleSheet("""
+            QComboBox {
+                font-size: 9pt;
+                font-weight: 600;
+                padding: 8px 12px;
+                border-radius: 8px;
+                background: #2c2f3f;
+                color: white;
+                border: 1px solid #4a4e69;
+            }
+            QComboBox:hover {
+                border-color: #00adef;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 24px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid white;
+                margin-right: 8px;
+            }
+            QComboBox QAbstractItemView {
+                background: #2c2f3f;
+                color: white;
+                selection-background-color: #00adef;
+            }
+        """)
+        self.combo_profile.setToolTip("Wählen Sie das Erkennungsprofil")
+        self.combo_profile.currentIndexChanged.connect(self.on_profile_changed)
+        profile_layout.addWidget(self.combo_profile)
+
+        self.lbl_profile = QtWidgets.QLabel("Siemens Gleispläne")
+        self.lbl_profile.setStyleSheet(f"font-size: 8pt; font-weight: normal; color: #a0a4b8; padding: {scale_value(6)}px 0px;")
+        self.lbl_profile.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_profile.setMinimumHeight(scale_value(24))
+        self.lbl_profile.setWordWrap(True)
+        profile_layout.addWidget(self.lbl_profile)
+        profile_layout.addStretch()
+
+        top.addWidget(self.profile_frame)
+
+        # Step 4: Run - Compact
+        self.run_frame = self._create_step_frame_compact(
+            step_num="04",
             title="AUSFÜHREN"
         )
         run_layout = self.run_frame.layout()
@@ -822,6 +882,30 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             self._add_recent_model(fn)  #  Track recent file
             self._update_run_button_state()  #  Update button state
     def on_ocr_changed(self, txt:str): self.ocr_engine = txt; self.on_status(f"OCR-Engine geändert zu: {txt}")
+
+    def on_profile_changed(self, index: int):
+        """Handle profile/layout type selection change."""
+        # Each layout type has its own profile with tuned parameters
+        profile_map = {
+            0: ("profiles/siemens_track_plans.yaml", "Siemens Gleispläne"),
+            # Future layout types:
+            # 1: ("profiles/other_layout.yaml", "Other Layout Type"),
+        }
+        self.profile_path, description = profile_map.get(index, profile_map[0])
+        self.lbl_profile.setText(description)
+        self.on_status(f"Layout-Typ: {description}")
+
+    def _load_profile(self) -> bool:
+        """Load the selected profile configuration."""
+        try:
+            self.layout_config = ProfileManager.load_profile(self.profile_path)
+            self.on_status(f"Profil geladen: {self.layout_config.profile_name}")
+            return True
+        except Exception as e:
+            self.on_status(f"Fehler beim Laden des Profils: {e}")
+            self.layout_config = None
+            return False
+
     def on_status(self, msg:str):
         ts = time.strftime("%H:%M:%S"); self.log.appendPlainText(f"[{ts}] {msg}")
 
@@ -1039,14 +1123,19 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         # Track detection is now always enabled for better user experience
         detect_tracks = True  # Always detect tracks automatically
 
+        # Load the selected profile configuration
+        if not self._load_profile():
+            self.on_status("Warnung: Profil konnte nicht geladen werden, verwende Standardwerte")
+
         self.worker = PipelineWorker(
             self.pdf_path,
             self.model_path,
             self.ocr_engine,
             run_analysis=True,
-            detect_tracks=detect_tracks
+            detect_tracks=detect_tracks,
+            config=self.layout_config
         )
-        
+
         self.worker.progress.connect(self.progress.setValue)
         self.worker.status.connect(self.on_status)
         self.worker.page_processed.connect(self._on_worker_page_ready)

@@ -33,12 +33,12 @@ import os
 from PIL import Image, ImageFile
 import cv2
 import re
-from config import POPPLER_PATH, DEBUG_ANGLE_ROUTING, DEBUG_YOLO, DEBUG_TRACK, DEBUG_CUSTOM_SYMBOLS, DEBUG_LINKING, DEBUG_OCR, MAX_OCR_WORKERS, CLASS_THRESH, CLASSES, LINK_RULES, ALIASES, DPI, TILE_SIZE, EXCLUDE_LEGEND_STRIP, LEGEND_STRIP_WIDTH_PERCENT, LEGEND_STRIP_MAX_PIXELS
+from typing import TYPE_CHECKING
 from pdf2image import convert_from_path, pdfinfo_from_path
-from core.yolo_detection import run_yolo_on_page, run_combined_detection, box_color, pil_to_bgr, tile_image, OVERLAP_PCT, color_masks
+from core.yolo_detection import run_yolo_on_page, run_combined_detection, box_color, pil_to_bgr, tile_image, color_masks
 from ultralytics import YOLO
 from collections import Counter
-from core.ocr_engine import ocr_coordinate_unified, _clean_coordinate_overlap, _fix_coordinate_brackets
+from core.ocr_engine import ocr_coordinate_unified, _clean_coordinate_overlap, _fix_coordinate_brackets, configure_from_config as configure_ocr
 from core.linking import parse_coord
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from core.ocr_engine import ocr_anchor_name, ocr_best_angle, ocr_text, ocr_custom_symbol_text
@@ -50,10 +50,71 @@ from core.linking import (
 )
 import numpy as np
 import gc
-from config import set_classes_from_model, canon_name
 import uuid  # Keep for backward compatibility
 from utils.uuid_utils import generate_deterministic_uuid, extract_base_layout_name
 import logging
+
+# Type hint for LayoutConfig without circular import
+if TYPE_CHECKING:
+    from core.config_models import LayoutConfig
+
+# Module-level defaults (can be overridden by config)
+POPPLER_PATH = None
+DEBUG_ANGLE_ROUTING = False
+DEBUG_YOLO = False
+DEBUG_TRACK = False
+DEBUG_CUSTOM_SYMBOLS = False
+DEBUG_LINKING = False
+DEBUG_OCR = False
+MAX_OCR_WORKERS = 8
+DPI = 500
+TILE_SIZE = 2048
+EXCLUDE_LEGEND_STRIP = True
+LEGEND_STRIP_WIDTH_PERCENT = 12
+LEGEND_STRIP_MAX_PIXELS = 4000
+OVERLAP_PCT = 40
+
+# Default class thresholds
+CLASS_THRESH = {
+    "signal": 0.40, "gm_block": 0.22, "gks_festkodiert": 0.85,
+    "gks_gesteuert": 0.5, "weichen_block": 0.42, "isolierstoß": 0.09,
+    "haltepunkt": 0.32, "sverbinder": 0.50, "coordinate": 0.10,
+    "prellbock": 0.30, "haltetafel": 0.55, "weichenende": 0.7,
+    "weichengruppenende": 0.7
+}
+
+# Default class list
+CLASSES = list(CLASS_THRESH.keys())
+
+# Default linking rules
+LINK_RULES = {
+    "signal": {"mode": "below"},
+    "gm_block": {"mode": "below"},
+    "gks_gesteuert": {"mode": "either"},
+    "gks_festkodiert": {"mode": "either"},
+    "weichen_block": {"mode": "inside", "block": True},
+    "isolierstoß": {"mode": "above", "tilted_ok": True},
+    "haltepunkt": {"mode": "either"},
+    "sverbinder": {"mode": "above"},
+    "prellbock": {"mode": "right_or_below", "dx_multiplier": 2.0, "prefer_horizontal": True},
+    "haltetafel": {"mode": "either", "dx_multiplier": 2.0},
+    "weichenende": {"mode": "either", "dx_multiplier": 3.0, "prefer_horizontal": True},
+    "weichengruppenende": {"mode": "either", "dx_multiplier": 3.0, "prefer_horizontal": True, "search_left": True},
+}
+
+ALIASES = {}
+
+
+def canon_name(name: str) -> str:
+    """Canonicalize class name using aliases."""
+    return ALIASES.get(name.lower(), name.lower()) if name else name
+
+
+def set_classes_from_model(model):
+    """Set CLASSES from model names."""
+    global CLASSES
+    if hasattr(model, 'names') and model.names:
+        CLASSES = list(model.names.values())
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +159,8 @@ class PipelineWorker(QtCore.QThread):
     # Supported image formats (loaded directly without conversion)
     IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
 
-    def __init__(self, file_path: str, model_path: str, ocr_engine: str, parent=None, run_analysis=True, detect_tracks=False):
+    def __init__(self, file_path: str, model_path: str, ocr_engine: str, parent=None,
+                 run_analysis=True, detect_tracks=False, config: 'LayoutConfig' = None):
         super().__init__(parent)
         self.file_path = file_path  # Can be PDF or image file
         self.pdf_path = file_path   # Keep for backward compatibility
@@ -107,12 +169,71 @@ class PipelineWorker(QtCore.QThread):
         self._is_interrupted = False
         self.run_analysis = run_analysis
         self.detect_tracks = detect_tracks
+        self.config = config  # Store LayoutConfig for use throughout pipeline
+
+        # Configure module-level variables from config
+        if config is not None:
+            self._configure_from_config(config)
 
         # Storage for uncertain (low-confidence) detections for user review
         self.uncertain_detections = []
 
         # Determine if input is an image file
         self._is_image_file = file_path.lower().endswith(self.IMAGE_EXTENSIONS)
+
+    def _configure_from_config(self, config: 'LayoutConfig') -> None:
+        """Configure module-level variables from LayoutConfig."""
+        global POPPLER_PATH, DEBUG_ANGLE_ROUTING, DEBUG_YOLO, DEBUG_TRACK
+        global DEBUG_CUSTOM_SYMBOLS, DEBUG_LINKING, DEBUG_OCR, MAX_OCR_WORKERS
+        global DPI, TILE_SIZE, EXCLUDE_LEGEND_STRIP, LEGEND_STRIP_WIDTH_PERCENT
+        global LEGEND_STRIP_MAX_PIXELS, CLASS_THRESH, CLASSES, LINK_RULES, ALIASES, OVERLAP_PCT
+
+        # Debug flags
+        DEBUG_ANGLE_ROUTING = config.debug_angle_routing
+        DEBUG_YOLO = config.debug_yolo
+        DEBUG_TRACK = config.debug_track
+        DEBUG_CUSTOM_SYMBOLS = config.debug_custom_symbols
+        DEBUG_LINKING = config.debug_linking
+        DEBUG_OCR = config.debug_ocr
+
+        # Paths
+        if config.poppler_path:
+            POPPLER_PATH = config.poppler_path
+
+        # Detection params
+        if hasattr(config, 'detection'):
+            det = config.detection
+            DPI = det.dpi
+            TILE_SIZE = det.tile_size
+            OVERLAP_PCT = det.overlap_pct
+            EXCLUDE_LEGEND_STRIP = det.exclude_legend_strip
+            LEGEND_STRIP_WIDTH_PERCENT = det.legend_strip_width_percent
+            LEGEND_STRIP_MAX_PIXELS = det.legend_strip_max_pixels
+
+        # OCR params
+        if hasattr(config, 'ocr'):
+            MAX_OCR_WORKERS = config.ocr.max_workers
+
+        # Class thresholds from config
+        CLASS_THRESH = {}
+        CLASSES = []
+        LINK_RULES = {}
+        for cls_def in config.classes:
+            CLASS_THRESH[cls_def.name] = cls_def.confidence_threshold
+            CLASSES.append(cls_def.name)
+            if cls_def.linking_rule:
+                LINK_RULES[cls_def.name] = {
+                    "mode": cls_def.linking_rule.mode,
+                    "dx_multiplier": cls_def.linking_rule.dx_multiplier,
+                    "dy_multiplier": cls_def.linking_rule.dy_multiplier,
+                    "prefer_horizontal": cls_def.linking_rule.prefer_horizontal,
+                    "search_left": cls_def.linking_rule.search_left,
+                    "tilted_ok": cls_def.linking_rule.tilted_ok,
+                    "block": cls_def.linking_rule.block,
+                }
+
+        # Configure OCR module
+        configure_ocr(config)
         
     def requestInterruption(self) -> None:
         self._is_interrupted = True
@@ -264,7 +385,7 @@ class PipelineWorker(QtCore.QThread):
                     t_det = time.perf_counter()
                     # Use combined detection: YOLO + Custom Symbols
                     # HSV-trained model handles colors directly (no preprocessing needed)
-                    all_dets = run_combined_detection(model, bgr_color, detect_custom=True)
+                    all_dets = run_combined_detection(model, bgr_color, self.config, detect_custom=True)
 
                     # Separate confirmed and uncertain detections
                     confirmed_dets = [d for d in all_dets if d.get('detection_status', 'confirmed') == 'confirmed']
@@ -686,7 +807,7 @@ class PipelineWorker(QtCore.QThread):
                     for (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf) in anchor_results:
                         if a["name"] in ["gks_festkodiert", "gks_gesteuert"]:
                             available_coords = [c for c in coords if id(c) not in used_coord_ids]
-                            linked = link_anchor_to_coord(a, available_coords, learned_patterns)
+                            linked = link_anchor_to_coord(a, available_coords, config=self.config, learned_patterns=learned_patterns)
                             
                             if linked is not None:
                                 used_coord_ids.add(id(linked))
@@ -728,7 +849,7 @@ class PipelineWorker(QtCore.QThread):
 
                     for sverbinder_det in sverbinder_dets:
                         available_coords = [c for c in coords if id(c) not in used_coord_ids]
-                        linked = link_anchor_to_coord(sverbinder_det, available_coords, learned_patterns)
+                        linked = link_anchor_to_coord(sverbinder_det, available_coords, config=self.config, learned_patterns=learned_patterns)
                         
                         if linked is not None:
                             used_coord_ids.add(id(linked))
@@ -785,7 +906,7 @@ class PipelineWorker(QtCore.QThread):
                             sverbinder_coord_id_set = set(id(c) for c in sverbinder_coord_map.values())
                             available_coords = [c for c in coords if id(c) not in used_coord_ids and id(c) not in sverbinder_coord_id_set]
 
-                            linked = link_anchor_to_coord(haltepunkt_det, available_coords, learned_patterns)
+                            linked = link_anchor_to_coord(haltepunkt_det, available_coords, config=self.config, learned_patterns=learned_patterns)
 
                             if linked is not None:
                                 haltepunkt_coord_ids.add(id(linked))
@@ -968,7 +1089,7 @@ class PipelineWorker(QtCore.QThread):
                         if a["name"] == "haltetafel":
                             # First try normal coordinate linking
                             available_coords = [c for c in coords if id(c) not in used_coord_ids]
-                            linked = link_anchor_to_coord(a, available_coords, learned_patterns)
+                            linked = link_anchor_to_coord(a, available_coords, config=self.config, learned_patterns=learned_patterns)
                             
                             # If no direct coordinate found, try linking via GKS
                             if linked is None:
@@ -1134,7 +1255,7 @@ class PipelineWorker(QtCore.QThread):
                         if a["name"] == "isolierstoß":
                             # First: Try normal linking (mode="above")
                             available_coords = [c for c in coords if id(c) not in used_coord_ids]
-                            linked = link_anchor_to_coord(a, available_coords, learned_patterns)
+                            linked = link_anchor_to_coord(a, available_coords, config=self.config, learned_patterns=learned_patterns)
 
                             # If normal linking fails, try fallback (search all around for unlinked coords)
                             if linked is None:
@@ -1215,7 +1336,7 @@ class PipelineWorker(QtCore.QThread):
                             available_coords = [c for c in coords if id(c) not in all_claimed]
                         else:
                             available_coords = [c for c in coords if id(c) not in used_coord_ids]
-                        linked = link_anchor_to_coord(a, available_coords, learned_patterns)
+                        linked = link_anchor_to_coord(a, available_coords, config=self.config, learned_patterns=learned_patterns)
                         
                         coord_txt, coord_val, gi = None, None, None
                         cbbox = (None, None, None, None)

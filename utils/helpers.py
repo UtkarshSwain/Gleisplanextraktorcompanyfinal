@@ -27,10 +27,99 @@ Abhaengigkeiten:
 """
 import cv2
 import numpy as np
-from typing import List, Dict, Tuple, Optional, Any
-from config import VERTICAL_PARAMS, HORIZONTAL_PARAMS, ANGULAR_PARAMS
-from typing import Optional
+from typing import List, Dict, Tuple, Optional, Any, TYPE_CHECKING
 from PyQt5 import QtCore
+
+# Type hint for LayoutConfig without circular import
+if TYPE_CHECKING:
+    from core.config_models import LayoutConfig
+
+# ============================================================================
+# DEBUG UTILITY
+# ============================================================================
+
+# Debug flags - module-level defaults
+DEBUG_SIGNALS = False
+DEBUG_ANGLE_ROUTING = False
+DEBUG_OCR = False
+DEBUG_LINKING = False
+DEBUG_TRACK = False
+DEBUG_CUSTOM_SYMBOLS = False
+DEBUG_YOLO = False
+DEBUG_UI_BBOX = False
+DEBUG_COMPARISON = False
+
+# Debug file handle
+_DEBUG_FILE = None
+
+def debug_print(category: str, message: str):
+    """
+    Print debug message to debug.txt if category is enabled.
+
+    Categories: signals, angle_routing, ocr, linking, track, custom_symbols, yolo, ui_bbox, comparison
+    """
+    global _DEBUG_FILE
+
+    # Check if category is enabled
+    flag_name = f"DEBUG_{category.upper()}"
+    if not globals().get(flag_name, False):
+        return
+
+    # Open file on first use (overwrites previous debug.txt)
+    if _DEBUG_FILE is None:
+        _DEBUG_FILE = open('debug.txt', 'w', encoding='utf-8')
+
+    _DEBUG_FILE.write(f"[{category.upper()}] {message}\n")
+    _DEBUG_FILE.flush()
+
+
+def configure_debug_from_config(config: 'LayoutConfig') -> None:
+    """Configure debug flags from a LayoutConfig object."""
+    global DEBUG_SIGNALS, DEBUG_ANGLE_ROUTING, DEBUG_OCR, DEBUG_LINKING
+    global DEBUG_TRACK, DEBUG_CUSTOM_SYMBOLS, DEBUG_YOLO, DEBUG_UI_BBOX, DEBUG_COMPARISON
+
+    if config is None:
+        return
+
+    DEBUG_SIGNALS = getattr(config, 'debug_signals', False)
+    DEBUG_ANGLE_ROUTING = getattr(config, 'debug_angle_routing', False)
+    DEBUG_OCR = getattr(config, 'debug_ocr', False)
+    DEBUG_LINKING = getattr(config, 'debug_linking', False)
+    DEBUG_TRACK = getattr(config, 'debug_track', False)
+    DEBUG_CUSTOM_SYMBOLS = getattr(config, 'debug_custom_symbols', False)
+    DEBUG_YOLO = getattr(config, 'debug_yolo', False)
+    DEBUG_UI_BBOX = getattr(config, 'debug_ui_bbox', False)
+    DEBUG_COMPARISON = getattr(config, 'debug_comparison', False)
+
+
+# ============================================================================
+# DEFAULT PARAMETERS
+# ============================================================================
+
+# Default parameters for backward compatibility (when config is not passed)
+_DEFAULT_CARDINAL_PARAMS = {
+    "detection_padding": {
+        "coordinate": 4, "signal": 4, "weichenende": 8, "haltetafel": 4,
+        "prellbock": 4, "gks_gesteuert": 8, "gks_festkodiert": 8,
+        "weichengruppenende": 4, "weichen_block": 2,
+    },
+    "expansion_factor": {
+        "coordinate": (1.0, 1.0), "signal": (1.0, 1.0),
+        "gks_gesteuert": (0.6, 0.6), "gks_festkodiert": (0.6, 0.6),
+        "weichen_block": (1.1, 1.0),
+    }
+}
+
+_DEFAULT_ANGULAR_PARAMS = {
+    "detection_padding": {
+        "coordinate": 4, "signal": 8, "weichenende": 4, "haltetafel": 4,
+        "prellbock": 4, "gks_gesteuert": 6, "gks_festkodiert": 6,
+    },
+    "expansion_factor": {
+        "coordinate": (1.0, 1.0), "signal": (1.0, 1.05),
+        "gks_gesteuert": (0.75, 0.75), "gks_festkodiert": (0.75, 0.75),
+    }
+}
 
 try:
     import sip
@@ -166,61 +255,79 @@ def _is_angular(deg: float) -> bool:
 
 
 
-def get_params_for_angle(angle_deg: float, class_name: str) -> Tuple[int, Tuple[float, float]]:
+def get_params_for_angle(angle_deg: float, class_name: str, config: 'LayoutConfig' = None) -> Tuple[int, Tuple[float, float]]:
     """
     Return (padding, expansion_factor) based on RAW text orientation.
-    
+
     Uses RAW angle to distinguish horizontal vs vertical BEFORE dimension swap.
-    
+
     Args:
         angle_deg: RAW angle from YOLO (in degrees, range [-90, 90])
         class_name: Detection class name
-        
+        config: Optional LayoutConfig for parameters (uses defaults if None)
+
     Returns:
         (padding_px, (expand_x, expand_y))
     """
+    # Use config values if provided, otherwise use defaults
+    if config is not None:
+        cardinal_padding = config.ocr.cardinal_detection_padding
+        cardinal_expansion = config.ocr.cardinal_expansion_factor
+        angular_padding = config.ocr.angular_detection_padding
+        angular_expansion = config.ocr.angular_expansion_factor
+    else:
+        cardinal_padding = _DEFAULT_CARDINAL_PARAMS["detection_padding"]
+        cardinal_expansion = _DEFAULT_CARDINAL_PARAMS["expansion_factor"]
+        angular_padding = _DEFAULT_ANGULAR_PARAMS["detection_padding"]
+        angular_expansion = _DEFAULT_ANGULAR_PARAMS["expansion_factor"]
+
     # Normalize to [0, 360) for consistent checking
     a = _norm_angle(angle_deg)
-    
+
     # Check if near any cardinal direction using RAW angle
     if _is_near(a, 0.0) or _is_near(a, 180.0):
         # Horizontal text
-        pad = HORIZONTAL_PARAMS["detection_padding"].get(class_name, 8)
-        exp = HORIZONTAL_PARAMS["expansion_factor"].get(class_name, (1.0, 1.0))
+        pad = cardinal_padding.get(class_name, 8)
+        exp = cardinal_expansion.get(class_name, (1.0, 1.0))
     elif _is_near(a, 90.0) or _is_near(a, 270.0):
         # Vertical text (also axis-aligned, same large boxes)
-        pad = VERTICAL_PARAMS["detection_padding"].get(class_name, 8)
-        exp = VERTICAL_PARAMS["expansion_factor"].get(class_name, (1.0, 1.0))
+        pad = cardinal_padding.get(class_name, 8)
+        exp = cardinal_expansion.get(class_name, (1.0, 1.0))
     else:
         # Angular text (tilted)
-        pad = ANGULAR_PARAMS["detection_padding"].get(class_name, 4)
-        exp = ANGULAR_PARAMS["expansion_factor"].get(class_name, (1.0, 1.0))
-    
+        pad = angular_padding.get(class_name, 4)
+        exp = angular_expansion.get(class_name, (1.0, 1.0))
+
     return pad, exp
-def _debug_angle(prefix: str, det: dict, decision: str, extra: str = ""):
+def _debug_angle(prefix: str, det: dict, decision: str, extra: str = "", config: 'LayoutConfig' = None):
     """
-    Print angle routing debug info if DEBUG_ANGLE_ROUTING is enabled.
-    
+    Print angle routing debug info if debug_angle_routing is enabled.
+
     Args:
         prefix: Context (e.g., "DETECTION", "OCR_COORD", "OCR_SIGNAL")
         det: Detection dictionary with angle info
         decision: What category it was assigned
         extra: Optional extra info
+        config: Optional LayoutConfig for debug flag (falls back to global if None)
     """
-    from config import DEBUG_ANGLE_ROUTING
-    
-    if not DEBUG_ANGLE_ROUTING:
+    # Check debug flag from config or fall back to module-level default
+    if config is not None:
+        debug_enabled = config.debug_angle_routing
+    else:
+        debug_enabled = DEBUG_ANGLE_ROUTING
+
+    if not debug_enabled:
         return
-    
+
     ang_raw = float(det.get("angle_raw", 0.0))
     ang_norm = float(det.get("angle", ang_raw))
     cls_name = det.get("name", det.get("cls", "unknown"))
-    
+
     dist = _dist_to_cardinal(ang_raw)
-    
+
     msg = f"[{prefix:12s}] {cls_name:15s} | raw={ang_raw:6.2f}° norm={ang_norm:6.2f}° dist={dist:5.2f}° → {decision:10s}"
-    
+
     if extra:
         msg += f" | {extra}"
-    
+
     print(msg)

@@ -25,19 +25,134 @@ Klassenspezifische Strategien:
 Abhaengigkeiten:
     paddleocr, cv2, numpy, PIL
 """
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List, Dict, Any, TYPE_CHECKING
 import numpy as np
 import cv2
 from PIL import Image
 import re
 import threading
 import logging
-from config import DEBUG_ANGLE_ROUTING, DEBUG_OCR, DEBUG_CUSTOM_SYMBOLS, PADDLEOCR_PARAMS, DEBUG_SIGNALS, SIG_LINE_THICK, SIG_USE_TIGHTEN, SIGNAL_TEXT_HEIGHT_HINT, SIG_SCORE_MIN, CLASS_ID_PATTERNS, COORD_RE, CARDINAL_PARAMS, NUMERIC_OK, TESSERACT_PATH
-from core.image_processing import perspective_crop_from_det, rotated_crop_from_det, rotated_crop_pil, _upscale_if_tiny,_remove_long_lines_oriented, _pil_to_gray_np, _enhance_contrast, _binarize_for_text, _invert, crop_pil, _deskew_small
-from utils.helpers import _is_cardinal,_debug_angle
-from typing import List, Dict, Tuple, Optional, Any
-from core.linking import LINK_RULES, name_windows_for
 import os
+
+from core.image_processing import perspective_crop_from_det, rotated_crop_from_det, rotated_crop_pil, _upscale_if_tiny,_remove_long_lines_oriented, _pil_to_gray_np, _enhance_contrast, _binarize_for_text, _invert, crop_pil, _deskew_small
+from utils.helpers import _is_cardinal, _debug_angle
+from core.linking import name_windows_for
+
+# Type hint for LayoutConfig without circular import
+if TYPE_CHECKING:
+    from core.config_models import LayoutConfig
+
+# Module-level debug flags (defaults, can be overridden by config)
+DEBUG_ANGLE_ROUTING = False
+DEBUG_OCR = False
+DEBUG_CUSTOM_SYMBOLS = False
+DEBUG_SIGNALS = False
+
+# Default OCR parameters (can be overridden by config)
+SIG_LINE_THICK = 5
+SIG_USE_TIGHTEN = False
+SIGNAL_TEXT_HEIGHT_HINT = None
+SIG_SCORE_MIN = 1.3
+TESSERACT_PATH = None
+
+# Default regex patterns
+COORD_RE = None
+try:
+    COORD_RE = re.compile(r'^\s*([+-]?\d{1,3}[,\.]\d{3,4})\s*(?:(?:GI|Gl)\.?\s*([A-Za-z0-9./-]{1,6}))?\s*$')
+except Exception:
+    pass
+
+CLASS_ID_PATTERNS = {
+    "signal": r"^[A-ZÄÖÜ]{1,4}\d{1,4}$",
+    "gks_gesteuert": r"^\d{3,4}$",
+    "gks_festkodiert": r"^\d{3,4}$",
+}
+
+NUMERIC_OK = {"gks_gesteuert", "gks_festkodiert", "weichen_block", "prellbock"}
+
+# Default cardinal params
+CARDINAL_PARAMS = {
+    "detection_padding": {
+        "coordinate": 4, "signal": 4, "weichenende": 8, "haltetafel": 4,
+        "prellbock": 4, "gks_gesteuert": 8, "gks_festkodiert": 8,
+        "weichengruppenende": 4, "weichen_block": 2,
+    },
+    "expansion_factor": {
+        "coordinate": (1.0, 1.0), "signal": (1.0, 1.0),
+        "gks_gesteuert": (0.6, 0.6), "gks_festkodiert": (0.6, 0.6),
+        "weichen_block": (1.1, 1.0),
+    }
+}
+
+# Default linking rules (used when config is not passed)
+LINK_RULES = {
+    "signal": {"mode": "below"},
+    "gm_block": {"mode": "below"},
+    "gks_gesteuert": {"mode": "either"},
+    "gks_festkodiert": {"mode": "either"},
+    "weichen_block": {"mode": "inside", "block": True},
+    "isolierstoß": {"mode": "above", "tilted_ok": True},
+    "haltepunkt": {"mode": "either"},
+    "sverbinder": {"mode": "above"},
+    "prellbock": {"mode": "right_or_below", "dx_multiplier": 2.0, "prefer_horizontal": True},
+    "haltetafel": {"mode": "either", "dx_multiplier": 2.0},
+    "weichenende": {"mode": "either", "dx_multiplier": 3.0, "prefer_horizontal": True},
+    "weichengruppenende": {"mode": "either", "dx_multiplier": 3.0, "prefer_horizontal": True, "search_left": True},
+}
+
+
+def configure_from_config(config: 'LayoutConfig') -> None:
+    """
+    Configure module-level variables from LayoutConfig.
+
+    Call this once at the start of processing to set debug flags and parameters
+    from the loaded profile.
+
+    Args:
+        config: LayoutConfig loaded from YAML profile
+    """
+    global DEBUG_ANGLE_ROUTING, DEBUG_OCR, DEBUG_CUSTOM_SYMBOLS, DEBUG_SIGNALS
+    global SIG_LINE_THICK, SIG_USE_TIGHTEN, SIGNAL_TEXT_HEIGHT_HINT, SIG_SCORE_MIN
+    global TESSERACT_PATH, COORD_RE, CLASS_ID_PATTERNS, NUMERIC_OK, CARDINAL_PARAMS
+
+    if config is None:
+        return
+
+    # Debug flags
+    DEBUG_ANGLE_ROUTING = config.debug_angle_routing
+    DEBUG_OCR = config.debug_ocr
+    DEBUG_CUSTOM_SYMBOLS = config.debug_custom_symbols
+    DEBUG_SIGNALS = config.debug_signals
+
+    # OCR parameters
+    if hasattr(config, 'ocr'):
+        ocr = config.ocr
+        SIG_LINE_THICK = getattr(ocr, 'sig_line_thick', SIG_LINE_THICK)
+        SIG_USE_TIGHTEN = getattr(ocr, 'sig_use_tighten', SIG_USE_TIGHTEN)
+        SIGNAL_TEXT_HEIGHT_HINT = getattr(ocr, 'signal_text_height_hint', SIGNAL_TEXT_HEIGHT_HINT)
+        SIG_SCORE_MIN = getattr(ocr, 'sig_score_min', SIG_SCORE_MIN)
+
+        # Cardinal params from config
+        if hasattr(ocr, 'cardinal_detection_padding'):
+            CARDINAL_PARAMS["detection_padding"] = ocr.cardinal_detection_padding
+        if hasattr(ocr, 'cardinal_expansion_factor'):
+            CARDINAL_PARAMS["expansion_factor"] = ocr.cardinal_expansion_factor
+
+    # Validation patterns
+    if hasattr(config, 'validation'):
+        val = config.validation
+        if val.coordinate_re is not None:
+            COORD_RE = val.coordinate_re
+        if val.class_id_patterns:
+            CLASS_ID_PATTERNS.update(val.class_id_patterns)
+        if val.numeric_ok_classes:
+            NUMERIC_OK = set(val.numeric_ok_classes)
+
+    # Tesseract path
+    if hasattr(config, 'poppler_path') and config.poppler_path:
+        # Note: poppler_path might be used for tesseract on some systems
+        pass
+
 
 # ============================================================================
 # TESSERACT PATH CONFIGURATION

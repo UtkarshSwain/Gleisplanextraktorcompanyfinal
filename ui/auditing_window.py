@@ -686,7 +686,6 @@ class AuditingWindow(QtWidgets.QMainWindow):
         try:
             from core.symbol_detector import NewSymbolDetector, DetectionResult
             from core.yolo_detection import tile_image, nms, TILE_SIZE, OVERLAP_PCT
-            from config import TILE_SIZE
 
             detector = NewSymbolDetector()
 

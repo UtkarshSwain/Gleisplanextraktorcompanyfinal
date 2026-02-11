@@ -24,14 +24,20 @@ Zuschnittstrategien:
 Abhaengigkeiten:
     cv2, numpy, PIL
 """
-from typing import Tuple
+from typing import Tuple, TYPE_CHECKING
 import numpy as np
 import cv2
 from PIL import Image
 import math
-from config import ZOOM_SIZE
 from PyQt5 import QtCore, QtGui, QtWidgets
 from utils.helpers import _dist_to_cardinal
+
+# Type hint for LayoutConfig without circular import
+if TYPE_CHECKING:
+    from core.config_models import LayoutConfig
+
+# Default zoom size (can be overridden by config)
+ZOOM_SIZE = 2048
 def parse_weichen_block(text: str) -> dict:
     """
     Parse weichen block text into ID and coordinates.

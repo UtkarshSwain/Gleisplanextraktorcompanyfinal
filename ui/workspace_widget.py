@@ -50,7 +50,7 @@ from ui.graphics_view import InteractiveGraphicsView
 from ui.resizable_bbox import ResizableBBoxItem, ResizablePolygonBBoxItem
 from core.ocr_engine import paddleocr_recognize, ocr_numeric_cardinal_box, ocr_numeric_tilted_box, ocr_generic_name, NUMERIC_OK
 from ui.ocr_adjustment_dialog import OCRAdjustmentDialog, OCRAdjustmentTracker, AutoLearningSuggestionDialog
-from config import ZOOM_SIZE
+from core.image_processing import ZOOM_SIZE
 from utils.helpers import _is_deleted
 from core.image_processing import qpolygonf_from_pts
 from PIL import Image, ImageFile

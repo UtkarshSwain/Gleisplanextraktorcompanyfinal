@@ -24,17 +24,24 @@ Konfidenz-System:
 Abhaengigkeiten:
     ultralytics (YOLOv8), cv2, numpy
 """
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, TYPE_CHECKING
 import numpy as np
 import cv2
 from ultralytics import YOLO
-from config import TILE_SIZE, OVERLAP_PCT, PRED_IMGSZ, CLASS_THRESH, CLASSES, TILE_HALO, DEBUG_ANGLE_ROUTING, canon_name, OBB_ONLY, NMS_THRESHOLDS, UNCERTAIN_THRESH_MULTIPLIER, MIN_UNCERTAIN_THRESH, MIN_UNCERTAIN_THRESH_DEFAULT, EXCLUDE_LEGEND_STRIP, LEGEND_STRIP_WIDTH_PERCENT, LEGEND_STRIP_MAX_PIXELS
 import math
+
+# Type hint for LayoutConfig without circular import
+if TYPE_CHECKING:
+    from core.config_models import LayoutConfig
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PIL import Image, ImageFile
 from core.image_processing import _normalize_xywhr,obb_xywhr_to_polygon,polygon_to_aabb_xyxy
 from utils.helpers import _is_near, _norm_angle, get_params_for_angle, _debug_angle, iou, nms, color_masks, box_color
 from core.linking import _check_oriented_direction, _check_axis_aligned_direction
+
+# Module-level defaults for backward compatibility (when config is not passed)
+TILE_SIZE = 2048
+OVERLAP_PCT = 40
 
 def pil_to_bgr(im: Image.Image) -> np.ndarray:
     return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
@@ -54,7 +61,25 @@ def draw_box(bgr, x1, y1, x2, y2, color=(0, 255, 0), label=""):
     if label:
         cv2.putText(bgr, label, (x1, max(0, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
-def tile_image(bgr: np.ndarray, tile=TILE_SIZE, overlap_pct=OVERLAP_PCT):
+def tile_image(bgr: np.ndarray, config: 'LayoutConfig' = None, tile: int = None, overlap_pct: int = None):
+    """
+    Tile image using configuration parameters.
+
+    Args:
+        bgr: Input image array
+        config: LayoutConfig containing tile_size and overlap_pct (preferred)
+        tile: Tile size (fallback if config not provided)
+        overlap_pct: Overlap percentage (fallback if config not provided)
+    """
+    # Use config values if provided, otherwise use explicit params or defaults
+    if config is not None:
+        tile = config.detection.tile_size
+        overlap_pct = config.detection.overlap_pct
+    else:
+        # Fallback to provided values or defaults
+        tile = tile if tile is not None else 2048
+        overlap_pct = overlap_pct if overlap_pct is not None else 40
+
     step = int(tile * (1 - overlap_pct / 100.0))
     H, W = bgr.shape[:2]
     xs = list(range(0, max(1, W - tile + 1), step))
@@ -72,22 +97,32 @@ def tile_image(bgr: np.ndarray, tile=TILE_SIZE, overlap_pct=OVERLAP_PCT):
             tiles.append(((vx1, vy1, vx2, vy2), crop))
     return tiles
 
-def run_yolo_on_page(model, page_bgr: np.ndarray) -> List[dict]:
-    """YOLO detection with angle-aware parameter selection."""
-    assert OBB_ONLY, "This build expects OBB-only weights"
-    tiles = tile_image(page_bgr, tile=TILE_SIZE, overlap_pct=OVERLAP_PCT)
+def run_yolo_on_page(model, page_bgr: np.ndarray, config: 'LayoutConfig') -> List[dict]:
+    """
+    YOLO detection with angle-aware parameter selection.
+
+    Args:
+        model: YOLO model instance
+        page_bgr: Page image as BGR numpy array
+        config: LayoutConfig with detection parameters
+    """
+    assert config.detection.obb_only, "This build expects OBB-only weights"
+    tiles = tile_image(page_bgr, config=config)
     dets: List[dict] = []
 
     H, W = page_bgr.shape[:2]
+    tile_halo = config.detection.tile_halo
+    pred_imgsz = config.detection.pred_imgsz
+    class_names = config.get_class_names()
 
     for (vx1, vy1, vx2, vy2), _crop_unused in tiles:
-        hx1 = max(0, vx1 - TILE_HALO)
-        hy1 = max(0, vy1 - TILE_HALO)
-        hx2 = min(W, vx2 + TILE_HALO)
-        hy2 = min(H, vy2 + TILE_HALO)
+        hx1 = max(0, vx1 - tile_halo)
+        hy1 = max(0, vy1 - tile_halo)
+        hx2 = min(W, vx2 + tile_halo)
+        hy2 = min(H, vy2 + tile_halo)
         halo_crop = page_bgr[hy1:hy2, hx1:hx2]
 
-        r = model.predict(source=halo_crop, imgsz=PRED_IMGSZ, conf=0.01, verbose=False)[0]
+        r = model.predict(source=halo_crop, imgsz=pred_imgsz, conf=0.01, verbose=False)[0]
         obb = getattr(r, "obb", None)
         if obb is None or len(obb) == 0:
             continue
@@ -119,19 +154,19 @@ def run_yolo_on_page(model, page_bgr: np.ndarray) -> List[dict]:
                 continue
 
             cls_i = int(obb.cls[i]) if has_cls else -1
-            if cls_i < 0 or cls_i >= len(CLASSES):
+            if cls_i < 0 or cls_i >= len(class_names):
                 continue
-            raw_name = CLASSES[cls_i]
-            name = canon_name(raw_name)
+            raw_name = class_names[cls_i]
+            name = config.canon_name(raw_name)
             conf = float(obb.conf[i]) if has_conf else 0.0
 
             # Determine detection status based on confidence thresholds
-            class_thresh = CLASS_THRESH.get(name, 0.25)
+            class_thresh = config.get_confidence_threshold(name)
             # Ensure uncertain_thresh is always below class_thresh
-            # Use per-class MIN_UNCERTAIN_THRESH with fallback to default
-            min_uncertain = MIN_UNCERTAIN_THRESH.get(name, MIN_UNCERTAIN_THRESH_DEFAULT)
+            # Use per-class min_uncertain_thresh with fallback to default
+            min_uncertain = config.get_min_uncertain_threshold(name)
             effective_min = min(min_uncertain, class_thresh * 0.9)
-            uncertain_thresh = max(class_thresh * UNCERTAIN_THRESH_MULTIPLIER, effective_min)
+            uncertain_thresh = max(class_thresh * config.detection.uncertain_thresh_multiplier, effective_min)
 
             if conf >= class_thresh:
                 detection_status = 'confirmed'
@@ -145,10 +180,10 @@ def run_yolo_on_page(model, page_bgr: np.ndarray) -> List[dict]:
 
             # ANGLE-AWARE PARAMETER SELECTION
             ang_deg_raw = math.degrees(theta_raw)
-            pad_px, (exp_x, exp_y) = get_params_for_angle(ang_deg_raw, name)
+            pad_px, (exp_x, exp_y) = get_params_for_angle(ang_deg_raw, name, config)
 
             # DEBUG: Show detection parameter selection
-            if DEBUG_ANGLE_ROUTING:
+            if config.debug_angle_routing:
                 
                 a = _norm_angle(ang_deg_raw)
                 if _is_near(a, 0.0) or _is_near(a, 180.0):
@@ -191,16 +226,16 @@ def run_yolo_on_page(model, page_bgr: np.ndarray) -> List[dict]:
             ))
 
     final: List[dict] = []
-    unique_names = sorted(set(canon_name(n) for n in CLASSES))
+    unique_names = sorted(set(config.canon_name(n) for n in class_names))
     for name in unique_names:
         ss = [d for d in dets if d["name"] == name]
         if not ss:
             continue
         boxes = [(d["x1"], d["y1"], d["x2"], d["y2"]) for d in ss]
         scores = [d["conf"] for d in ss]
-        
-        #  Use class-specific NMS threshold
-        nms_thr = NMS_THRESHOLDS.get(name, NMS_THRESHOLDS.get("default", 0.5))
+
+        # Use class-specific NMS threshold from config
+        nms_thr = config.get_nms_threshold(name)
         keep = nms(boxes, scores, thr=nms_thr)
 
         final.extend([ss[i] for i in keep])
@@ -212,20 +247,21 @@ def run_yolo_on_page(model, page_bgr: np.ndarray) -> List[dict]:
 # COMBINED DETECTION: YOLO + CUSTOM SYMBOLS
 # ============================================================================
 
-def run_combined_detection(model, page_bgr: np.ndarray, detect_custom: bool = True) -> List[dict]:
+def run_combined_detection(model, page_bgr: np.ndarray, config: 'LayoutConfig', detect_custom: bool = True) -> List[dict]:
     """
     Run both YOLO detection and custom symbol detection on a page.
 
     Args:
         model: YOLO model
         page_bgr: BGR image of the page
+        config: LayoutConfig with detection parameters
         detect_custom: Whether to run custom symbol detection
 
     Returns:
         Combined list of detections with 'is_custom_symbol' flag
     """
     # Run YOLO detection (existing)
-    yolo_dets = run_yolo_on_page(model, page_bgr)
+    yolo_dets = run_yolo_on_page(model, page_bgr, config)
 
     # Mark all YOLO detections
     for det in yolo_dets:
@@ -234,10 +270,10 @@ def run_combined_detection(model, page_bgr: np.ndarray, detect_custom: bool = Tr
         det['detection_source'] = 'YOLO'
 
     # Filter detections in legend strip (right edge) if enabled - apply EARLY to all paths
-    if EXCLUDE_LEGEND_STRIP:
+    if config.detection.exclude_legend_strip:
         W = page_bgr.shape[1]
-        percent_width = int(W * LEGEND_STRIP_WIDTH_PERCENT / 100.0)
-        exclude_width = min(percent_width, LEGEND_STRIP_MAX_PIXELS)  # Cap at max pixels
+        percent_width = int(W * config.detection.legend_strip_width_percent / 100.0)
+        exclude_width = min(percent_width, config.detection.legend_strip_max_pixels)
         threshold_x = W - exclude_width
         yolo_dets = [d for d in yolo_dets if d['cx'] < threshold_x]
 
@@ -262,7 +298,7 @@ def run_combined_detection(model, page_bgr: np.ndarray, detect_custom: bool = Tr
             return yolo_dets
 
         # Run custom detection on same tiles as YOLO
-        custom_dets = _run_custom_detection_on_tiles(detector, page_bgr, yolo_dets)
+        custom_dets = _run_custom_detection_on_tiles(detector, page_bgr, yolo_dets, config)
 
         # Link custom symbols to coordinates (rotation-aware)
         if custom_dets:
@@ -296,10 +332,10 @@ def run_combined_detection(model, page_bgr: np.ndarray, detect_custom: bool = Tr
                 custom_dets = linked_custom_dets
 
         # Filter custom detections in legend strip (yolo_dets already filtered above)
-        if EXCLUDE_LEGEND_STRIP and custom_dets:
+        if config.detection.exclude_legend_strip and custom_dets:
             W = page_bgr.shape[1]
-            percent_width = int(W * LEGEND_STRIP_WIDTH_PERCENT / 100.0)
-            exclude_width = min(percent_width, LEGEND_STRIP_MAX_PIXELS)  # Cap at max pixels
+            percent_width = int(W * config.detection.legend_strip_width_percent / 100.0)
+            exclude_width = min(percent_width, config.detection.legend_strip_max_pixels)
             threshold_x = W - exclude_width
             custom_dets = [d for d in custom_dets if d['cx'] < threshold_x]
 
@@ -316,7 +352,7 @@ def run_combined_detection(model, page_bgr: np.ndarray, detect_custom: bool = Tr
         return yolo_dets
 
 
-def _run_custom_detection_on_tiles(detector, page_bgr: np.ndarray, yolo_dets: List[dict]) -> List[dict]:
+def _run_custom_detection_on_tiles(detector, page_bgr: np.ndarray, yolo_dets: List[dict], config: 'LayoutConfig') -> List[dict]:
     """
     Run custom symbol detection on the same tiles as YOLO.
     Uses multi-threading to speed up processing.
@@ -325,6 +361,7 @@ def _run_custom_detection_on_tiles(detector, page_bgr: np.ndarray, yolo_dets: Li
         detector: NewSymbolDetector instance
         page_bgr: Full page BGR image
         yolo_dets: YOLO detections (to avoid duplicate areas)
+        config: LayoutConfig with detection parameters
 
     Returns:
         List of custom symbol detections
@@ -334,7 +371,7 @@ def _run_custom_detection_on_tiles(detector, page_bgr: np.ndarray, yolo_dets: Li
     from core.symbol_detector import DetectionResult
 
     H, W = page_bgr.shape[:2]
-    tiles = tile_image(page_bgr, tile=TILE_SIZE, overlap_pct=OVERLAP_PCT)
+    tiles = tile_image(page_bgr, config=config)
 
     # Use multi-threading for template matching
     max_workers = min(os.cpu_count() or 4, 8)

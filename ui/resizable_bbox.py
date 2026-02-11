@@ -7,7 +7,7 @@ Includes context menu for quick actions (change class, re-run OCR, delete)
 from PyQt5 import QtCore, QtGui, QtWidgets
 from typing import Optional, Tuple, TYPE_CHECKING
 import numpy as np
-from config import debug_print
+from utils.helpers import debug_print
 
 if TYPE_CHECKING:
     from ui.workspace_widget import WorkspaceWidget

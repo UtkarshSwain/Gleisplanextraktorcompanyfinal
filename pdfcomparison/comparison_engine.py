@@ -12,11 +12,8 @@ from dataclasses import dataclass
 from enum import Enum
 from scipy.optimize import linear_sum_assignment
 
-# Import debug flag from central config
-try:
-    from config import DEBUG_COMPARISON
-except ImportError:
-    DEBUG_COMPARISON = False
+# Module-level debug flag (can be configured from LayoutConfig)
+DEBUG_COMPARISON = False
 
 # Debug output file handle (module-level for persistence)
 _DEBUG_FILE = None
