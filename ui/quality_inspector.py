@@ -360,8 +360,8 @@ class QualityInspectorDialog(QtWidgets.QDialog):
         self.conf_filter.addItems([
             "Alle",
             "Niedrig (<60%)",
-            "Mittel (60-80%)",
-            "Hoch (≥80%)"
+            "Mittel (60-90%)",
+            "Hoch (≥90%)"
         ])
         self.conf_filter.setToolTip("Filter nach OCR-Erkennungsgenauigkeit")
         self.conf_filter.currentTextChanged.connect(self._apply_filters)
@@ -562,7 +562,7 @@ class QualityInspectorDialog(QtWidgets.QDialog):
 
             if conf < 0.6:
                 conf_item.setForeground(QtGui.QColor('#ff4444'))
-            elif conf < 0.8:
+            elif conf < 0.9:
                 conf_item.setForeground(QtGui.QColor('#ff8800'))
             else:
                 conf_item.setForeground(QtGui.QColor('#44ff44'))
@@ -664,9 +664,9 @@ class QualityInspectorDialog(QtWidgets.QDialog):
                     conf = conf_item.data(QtCore.Qt.UserRole)
                     if conf_filter == "Niedrig (<60%)" and conf >= 0.6:
                         show = False
-                    elif conf_filter == "Mittel (60-80%)" and (conf < 0.6 or conf >= 0.8):
+                    elif conf_filter == "Mittel (60-90%)" and (conf < 0.6 or conf >= 0.9):
                         show = False
-                    elif conf_filter == "Hoch (≥80%)" and conf < 0.8:
+                    elif conf_filter == "Hoch (≥90%)" and conf < 0.9:
                         show = False
 
             # Page filter

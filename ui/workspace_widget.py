@@ -1410,7 +1410,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self._refresh_page_graphics()
 
         if checked:
-            self._set_status(" Konfidenz-Farben aktiviert (>80% 60-80% <60%)")
+            self._set_status(" Konfidenz-Farben aktiviert (>90% 60-90% <60%)")
         else:
             self._set_status(" Konfidenz-Farben deaktiviert")
 
@@ -2077,7 +2077,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 # Priority 2: Confidence-based coloring (if enabled)
                 elif hasattr(self, 'show_confidence_colors') and self.show_confidence_colors:
                     pen_width = 4  # Bolder lines for confidence colors
-                    if conf >= 0.8:
+                    if conf >= 0.9:
                         pen_color = QtGui.QColor(0, 255, 0)  # Bright green
                     elif conf >= 0.6:
                         pen_color = QtGui.QColor(255, 255, 0)  # Bright yellow
@@ -6893,7 +6893,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             confidence = issue.confidence
             
             #  Color based on confidence
-            if confidence > 0.8:
+            if confidence > 0.9:
                 color = QtGui.QColor(255, 0, 0, 80)  # Red (high confidence)
                 pen_color = QtGui.QColor(255, 0, 0, 200)
             elif confidence > 0.6:
@@ -7174,7 +7174,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             # Priority 2: Confidence-based coloring (if enabled and not an error)
             elif self.show_confidence_colors:
                 pen_width = 4  # Bolder lines for confidence colors
-                if conf >= 0.8:
+                if conf >= 0.9:
                     pen_color = QtGui.QColor(0, 255, 0)  # Bright green (high confidence)
                 elif conf >= 0.6:
                     pen_color = QtGui.QColor(255, 255, 0)  # Bright yellow (medium confidence)
@@ -7331,7 +7331,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
         # Priority 2: Confidence-based coloring (if enabled)
         elif hasattr(self, 'show_confidence_colors') and self.show_confidence_colors:
             pen_width = 4  # Bolder lines for confidence colors
-            if conf >= 0.8:
+            if conf >= 0.9:
                 pen_color = QtGui.QColor(0, 255, 0)  # Bright green (high confidence)
                 color_name = "Green"
             elif conf >= 0.6:

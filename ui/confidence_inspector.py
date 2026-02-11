@@ -88,14 +88,14 @@ class ConfidenceInspectorDialog(QtWidgets.QDialog):
         avg_label.setStyleSheet("font-weight: bold; font-size: 12pt;")
         stats_layout.addWidget(avg_label, 1, 1)
 
-        # High confidence (≥80%)
-        stats_layout.addWidget(QtWidgets.QLabel("High (≥80%):"), 0, 2)
+        # High confidence (≥90%)
+        stats_layout.addWidget(QtWidgets.QLabel("High (≥90%):"), 0, 2)
         high_label = QtWidgets.QLabel(f"{stats['high']} ({stats['high_pct']:.1%})")
         high_label.setStyleSheet("color: #00aa00; font-weight: bold;")
         stats_layout.addWidget(high_label, 0, 3)
 
-        # Medium confidence (60-80%)
-        stats_layout.addWidget(QtWidgets.QLabel("Medium (60-80%):"), 1, 2)
+        # Medium confidence (60-90%)
+        stats_layout.addWidget(QtWidgets.QLabel("Medium (60-90%):"), 1, 2)
         med_label = QtWidgets.QLabel(f"{stats['medium']} ({stats['medium_pct']:.1%})")
         med_label.setStyleSheet("color: #cc8800; font-weight: bold;")
         stats_layout.addWidget(med_label, 1, 3)
@@ -137,8 +137,8 @@ class ConfidenceInspectorDialog(QtWidgets.QDialog):
             "All",
             "Low (<60%)",
             "Very Low (<40%)",
-            "Medium (60-80%)",
-            "High (≥80%)"
+            "Medium (60-90%)",
+            "High (≥90%)"
         ])
         self.conf_filter.currentTextChanged.connect(self._apply_filters)
         filter_layout.addWidget(self.conf_filter)
@@ -241,8 +241,8 @@ class ConfidenceInspectorDialog(QtWidgets.QDialog):
 
         average = df['conf'].mean()
 
-        high = len(df[df['conf'] >= 0.8])
-        medium = len(df[(df['conf'] >= 0.6) & (df['conf'] < 0.8)])
+        high = len(df[df['conf'] >= 0.9])
+        medium = len(df[(df['conf'] >= 0.6) & (df['conf'] < 0.9)])
         low = len(df[df['conf'] < 0.6])
         very_low = len(df[df['conf'] < 0.4])
 
@@ -305,7 +305,7 @@ class ConfidenceInspectorDialog(QtWidgets.QDialog):
                 conf_item.setBackground(QtGui.QColor(255, 180, 100))
                 conf_item.setForeground(QtGui.QColor(0, 0, 0))
                 conf_item.setFont(QtGui.QFont("Arial", 9, QtGui.QFont.Bold))
-            elif conf < 0.8:
+            elif conf < 0.9:
                 # Medium - yellow background
                 conf_item.setBackground(QtGui.QColor(255, 255, 150))
                 conf_item.setForeground(QtGui.QColor(0, 0, 0))
@@ -368,9 +368,9 @@ class ConfidenceInspectorDialog(QtWidgets.QDialog):
                         show = False
                     elif conf_filter == "Very Low (<40%)" and conf >= 0.4:
                         show = False
-                    elif conf_filter == "Medium (60-80%)" and (conf < 0.6 or conf >= 0.8):
+                    elif conf_filter == "Medium (60-90%)" and (conf < 0.6 or conf >= 0.9):
                         show = False
-                    elif conf_filter == "High (≥80%)" and conf < 0.8:
+                    elif conf_filter == "High (≥90%)" and conf < 0.9:
                         show = False
 
             # Page filter

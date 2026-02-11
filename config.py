@@ -1,4 +1,4 @@
-# config.py - CPU MAXIMUM ACCURACY EDITION
+# config.py 
 """
 Centralized configuration for railway detection system.
 OPTIMIZED FOR MAXIMUM ACCURACY ON CPU (Time Not Critical)
@@ -196,7 +196,7 @@ CLASS_THRESH = {
     # STRONG PERFORMERS (mAP50: 0.975-0.99) - Moderate-low thresholds
     "signal": 0.40,              # ↓ TTA will help with edge cases
     "isolierstoß": 0.09,         # ↓ Was 0.00! Now reasonable
-    "haltetafel": 0.55,          # Moderate (6 background FPs)
+    "haltetafel": 0.81,          # Moderate (6 background FPs)
     "haltepunkt": 0.32,          # ↓ Good performer
     "gks_festkodiert": 0.85,      # ↓ Was 0.5 (h100_color_v1 model: mAP50=0.985)
 

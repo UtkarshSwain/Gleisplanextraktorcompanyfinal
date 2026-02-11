@@ -105,7 +105,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
 
         #  High confidence fixes
         if stats['high_confidence_fixes'] > 0:
-            summary_layout.addWidget(QtWidgets.QLabel("  - Hohe Sicherheit (≥80%):"), 1, 2)
+            summary_layout.addWidget(QtWidgets.QLabel("  - Hohe Sicherheit (≥90%):"), 1, 2)
             high_conf_label = QtWidgets.QLabel(str(stats['high_confidence_fixes']))
             high_conf_label.setStyleSheet("color: #00cc00; font-weight: bold;")
             high_conf_label.setToolTip("Korrekturen mit hoher Zuverlässigkeit")
@@ -113,7 +113,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
 
         #  Medium confidence fixes
         if stats['medium_confidence_fixes'] > 0:
-            summary_layout.addWidget(QtWidgets.QLabel("  - Mittlere Sicherheit (60-80%):"), 2, 2)
+            summary_layout.addWidget(QtWidgets.QLabel("  - Mittlere Sicherheit (60-90%):"), 2, 2)
             med_conf_label = QtWidgets.QLabel(str(stats['medium_confidence_fixes']))
             med_conf_label.setStyleSheet("color: #ccaa00;")
             med_conf_label.setToolTip("Korrekturen sollten geprüft werden")
@@ -574,7 +574,7 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             confidence_item = QtWidgets.QTableWidgetItem(confidence_pct)
             
             # Color code by confidence level
-            if issue.confidence >= 0.8:
+            if issue.confidence >= 0.9:
                 confidence_item.setForeground(QtGui.QColor(0, 150, 0))  # Dark green
                 confidence_item.setFont(QtGui.QFont("Arial", 9, QtGui.QFont.Bold))
             elif issue.confidence >= 0.6:
@@ -689,13 +689,13 @@ class EnhancedValidationResultsDialog(QtWidgets.QDialog):
             return
         
         # Show detailed confirmation - use issue.confidence
-        high_conf = sum(1 for i in correctable if i.confidence >= 0.8)
-        med_conf = sum(1 for i in correctable if 0.6 <= i.confidence < 0.8)
+        high_conf = sum(1 for i in correctable if i.confidence >= 0.9)
+        med_conf = sum(1 for i in correctable if 0.6 <= i.confidence < 0.9)
         low_conf = sum(1 for i in correctable if i.confidence < 0.6)
-        
+
         msg = f"Möchten Sie alle {len(correctable)} Auto-Korrekturen anwenden?\n\n"
-        msg += f"• Hohe Konfidenz (≥80%): {high_conf}\n"
-        msg += f"• Mittlere Konfidenz (60-80%): {med_conf}\n"
+        msg += f"• Hohe Konfidenz (≥90%): {high_conf}\n"
+        msg += f"• Mittlere Konfidenz (60-90%): {med_conf}\n"
         msg += f"• Niedrige Konfidenz (<60%): {low_conf}\n\n"
         msg += "Die Änderungen werden sofort sichtbar.\n"
         msg += "Vergessen Sie nicht, danach zu speichern!"

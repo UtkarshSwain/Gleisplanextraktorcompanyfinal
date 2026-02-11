@@ -68,8 +68,8 @@ class ValidationResult:
     def get_summary(self) -> dict:
         """Get summary statistics"""
         auto_correctable_issues = [i for i in self.issues if i.auto_correctable]
-        high_conf = [i for i in auto_correctable_issues if i.confidence >= 0.8]
-        med_conf = [i for i in auto_correctable_issues if 0.6 <= i.confidence < 0.8]
+        high_conf = [i for i in auto_correctable_issues if i.confidence >= 0.9]
+        med_conf = [i for i in auto_correctable_issues if 0.6 <= i.confidence < 0.9]
         
         return {
             'total_issues': self.total_issues,
