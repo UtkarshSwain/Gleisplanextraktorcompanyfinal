@@ -1266,11 +1266,15 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             self.on_status(f"Arbeitsbereich '{pending['layout_name']}' mit {len(saved_df)} Erkennungen geladen!")
 
             # Emit with saved data, from_database=True
+            # CRITICAL: Make copies to prevent reference sharing between workspaces!
+            # Without this, loading a 2nd plan overwrites the 1st plan's BGR arrays
+            page_base_pix_copy = dict(self._page_base_pix) if getattr(self, '_page_base_pix', None) else {}
+            page_bgr_arrays_copy = {k: v.copy() if hasattr(v, 'copy') else v for k, v in self._page_bgr_arrays.items()} if getattr(self, '_page_bgr_arrays', None) else {}
             self.processing_done.emit(
                 saved_df,
-                self._page_base_pix,
+                page_base_pix_copy,
                 {},  # page_dfs will be rebuilt in workspace widget
-                self._page_bgr_arrays,
+                page_bgr_arrays_copy,
                 pending['track_skeleton'],
                 None,  # No exception
                 True,  # from_database=True
@@ -1280,7 +1284,11 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         else:
             # Normal analysis completed
             self.on_status("Analyse abgeschlossen.")
-            self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception, False, uncertain_detections or [], None)  # from_database=False, no learned_patterns for fresh analysis
+            # CRITICAL: Make copies to prevent reference sharing between workspaces!
+            # Without this, loading a 2nd plan overwrites the 1st plan's BGR arrays
+            page_base_pix_copy = dict(self._page_base_pix) if getattr(self, '_page_base_pix', None) else {}
+            page_bgr_arrays_copy = {k: v.copy() if hasattr(v, 'copy') else v for k, v in self._page_bgr_arrays.items()} if getattr(self, '_page_bgr_arrays', None) else {}
+            self.processing_done.emit(df_all, page_base_pix_copy, page_dfs, page_bgr_arrays_copy, track_skeleton, exception, False, uncertain_detections or [], None)  # from_database=False, no learned_patterns for fresh analysis
 
         # Clean up worker after processing is done to allow running another analysis
         self._cleanup_worker()
@@ -2015,11 +2023,15 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 return
 
             # Emit the processing_done signal to transition to AuditingWindow
+            # CRITICAL: Make copies to prevent reference sharing between workspaces!
+            page_base_pix_copy = dict(self._page_base_pix) if getattr(self, '_page_base_pix', None) else {}
+            page_bgr_arrays_copy = {k: v.copy() if hasattr(v, 'copy') else v for k, v in self._page_bgr_arrays.items()} if getattr(self, '_page_bgr_arrays', None) else {}
+            page_dfs_copy = self._page_dfs if getattr(self, '_page_dfs', None) else {}
             self.processing_done.emit(
                 df_all,
-                self._page_base_pix,
-                self._page_dfs if hasattr(self, '_page_dfs') else {},
-                self._page_bgr_arrays if hasattr(self, '_page_bgr_arrays') else {},
+                page_base_pix_copy,
+                page_dfs_copy,
+                page_bgr_arrays_copy,
                 track_skeleton,
                 None,  # No exception
                 True,  # from_database=True

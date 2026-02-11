@@ -19,9 +19,9 @@ import os
 
 # External tool paths (set to None to use system PATH, or specify full path)
 # Example for company laptop:
-TESSERACT_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\tesseract\tesseract.exe"
+TESSERACT_PATH = None
  
-POPPLER_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\poppler-25.12.0\Library\bin"
+POPPLER_PATH = None
 
 # ============================================================================
 # DEBUG FLAGS - Set to True to enable debug output for specific modules

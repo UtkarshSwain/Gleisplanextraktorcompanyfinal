@@ -1227,6 +1227,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.undo_stack.clear()
             self.redo_stack.clear()
 
+            #  CLEAR BGR ARRAY CACHE - critical when switching between plans!
+            # Without this, switching plans uses wrong image data (different sizes)
+            self.page_bgr_arrays = {}
+            self.current_page_bgr_array = None
+            print(f"  Cleared BGR array cache for new plan load")
+
             # Load data into workspace
             self.df_all = self._ensure_hidden_column(df_all.copy())
 
@@ -1243,12 +1249,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     self.df_all[col] = None
                 print(f"   Added missing OCR columns to loaded data: {missing_ocr_cols}")
 
-            # MEMORY OPTIMIZATION: Use references for read-only data
-            # - QPixmaps are read-only in workspace, no copy needed
-            # - BGR arrays are read-only (used for OCR cropping), no copy needed
-            # - DataFrames MUST be copied because workspace modifies them (adds columns, edits values)
-            self.page_base_pix = page_base_pix  # Reference (read-only)
-            self.page_bgr_arrays = page_bgr_arrays  # Reference (read-only)
+            # Data assignment:
+            # - QPixmaps: shallow copy from caller (Qt implicit sharing handles this)
+            # - BGR arrays: each workspace gets its own copy from setup_window.py to prevent corruption
+            # - DataFrames: MUST be copied because workspace modifies them (adds columns, edits values)
+            self.page_base_pix = page_base_pix
+            self.page_bgr_arrays = page_bgr_arrays  # Already copied in setup_window.py
             # Always copy DataFrames - workspace modifies them extensively
             self.page_dfs = {k: self._ensure_hidden_column(v.copy()) for k, v in page_dfs.items()}
 
@@ -3380,18 +3386,52 @@ class WorkspaceWidget(QtWidgets.QWidget):
             x1, y1, x2, y2 = row.get("cx1"), row.get("cy1"), row.get("cx2"), row.get("cy2")
         else:
             x1, y1, x2, y2 = row.get("ax1"), row.get("ay1"), row.get("ax2"), row.get("ay2")
-        
+
+        # Handle NaN/None values - convert to safe defaults
+        x1 = 0 if pd.isna(x1) else float(x1)
+        y1 = 0 if pd.isna(y1) else float(y1)
+        x2 = x1 + 10 if pd.isna(x2) else float(x2)
+        y2 = y1 + 10 if pd.isna(y2) else float(y2)
+
+        angle = row.get("angle")
+        angle = 0.0 if pd.isna(angle) else float(angle)
+        angle_raw = row.get("angle_raw", angle)
+        angle_raw = angle if pd.isna(angle_raw) else float(angle_raw)
+
+        # Handle poly field - can be numpy array, list, tuple, or None
+        poly_val = row.get("poly")
+        if poly_val is None or (isinstance(poly_val, float) and pd.isna(poly_val)):
+            poly = None
+        elif isinstance(poly_val, np.ndarray):
+            poly = poly_val
+        elif isinstance(poly_val, (list, tuple)):
+            poly = np.array(poly_val)
+        else:
+            poly = None
+
+        # Handle obb fields - can be NaN
+        obb_cx = row.get("obb_cx")
+        obb_cy = row.get("obb_cy")
+        obb_w = row.get("obb_w")
+        obb_h = row.get("obb_h")
+
+        # Convert NaN to calculated values or None
+        obb_cx = (x1 + x2) / 2 if pd.isna(obb_cx) else float(obb_cx)
+        obb_cy = (y1 + y2) / 2 if pd.isna(obb_cy) else float(obb_cy)
+        obb_w = (x2 - x1) if pd.isna(obb_w) else float(obb_w)
+        obb_h = (y2 - y1) if pd.isna(obb_h) else float(obb_h)
+
         return {
             "cls": row.get("cls"),
             "name": row.get("cls"),
             "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-            "angle": row.get("angle"),
-            "angle_raw": row.get("angle_raw", row.get("angle")),
-            "obb_cx": row.get("obb_cx"),
-            "obb_cy": row.get("obb_cy"),
-            "obb_w": row.get("obb_w"),
-            "obb_h": row.get("obb_h"),
-            "poly": np.array(row.get("poly")) if isinstance(row.get("poly"), (list, tuple)) else None,
+            "angle": angle,
+            "angle_raw": angle_raw,
+            "obb_cx": obb_cx,
+            "obb_cy": obb_cy,
+            "obb_w": obb_w,
+            "obb_h": obb_h,
+            "poly": poly,
         }
     
     def on_rerun_ocr(self, row_id: int, ocr_type: str):
@@ -3454,13 +3494,31 @@ class WorkspaceWidget(QtWidgets.QWidget):
             angle: Rotation angle (if rotated)
             poly_points: Actual polygon points [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] for rotated bboxes
         """
-        print("=" * 80)
-        print(" DEBUG: on_bbox_resized() FUNCTION WAS CALLED - YOU SHOULD SEE THIS!")
-        print("=" * 80)
+        print("=" * 80, flush=True)
+        print(" DEBUG: on_bbox_resized() FUNCTION WAS CALLED - YOU SHOULD SEE THIS!", flush=True)
+        print(f" Workspace: {self.layout_name}", flush=True)
+        print(f" row_id={row_id}, x={x}, y={y}, w={w}, h={h}, angle={angle}, is_rotated={is_rotated}", flush=True)
+        print("=" * 80, flush=True)
 
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
 
         try:
+            # Validate input parameters
+            if pd.isna(x) or pd.isna(y) or pd.isna(w) or pd.isna(h):
+                raise Exception(f"Invalid bbox coordinates: x={x}, y={y}, w={w}, h={h}")
+
+            # Ensure positive width/height (can be negative from Qt rect if user drags weirdly)
+            if w < 0:
+                x = x + w
+                w = abs(w)
+            if h < 0:
+                y = y + h
+                h = abs(h)
+
+            # Minimum size
+            w = max(5, w)
+            h = max(5, h)
+
             print(f" Bbox resized for row_id {row_id}: ({x:.1f}, {y:.1f}, {w:.1f}, {h:.1f})")
             if poly_points:
                 print(f"Polygon points: {poly_points}")
@@ -3515,6 +3573,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 self.df_all.loc[row_idx, 'ay2'] = y2
 
             # Update page_dfs
+            page_mask = None
+            page_idx = None
             if page in self.page_dfs:
                 page_mask = self.page_dfs[page]['row_id'] == row_id
                 if page_mask.any():
@@ -3531,7 +3591,15 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         self.page_dfs[page].loc[page_idx, 'ay2'] = y2
 
             # Get BGR array for current page (rebuild from pixmap if needed)
+            print(f"\n WORKSPACE STATE CHECK:", flush=True)
+            print(f"   Workspace: {self.layout_name}", flush=True)
+            print(f"   Page requested: {page}, current_page: {self.current_page}", flush=True)
+            print(f"   page_bgr_arrays keys: {list(self.page_bgr_arrays.keys())}", flush=True)
+            print(f"   page_base_pix keys: {list(self.page_base_pix.keys())}", flush=True)
+
             bgr_array = self.page_bgr_arrays.get(page)
+            print(f"   bgr_array from cache: {'None' if bgr_array is None else f'shape={bgr_array.shape}'}", flush=True)
+
             if bgr_array is None:
                 # Rebuild from pixmap (fallback for database-loaded workspaces)
                 pix = self.page_base_pix.get(page)
@@ -3539,7 +3607,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     bgr_array = pixmap_to_bgr_array(pix)
                     if bgr_array is not None:
                         self.page_bgr_arrays[page] = bgr_array  # Cache for future use
-                        print(f"Rebuilt BGR array from pixmap for page {page}")
+                        # Also update current_page_bgr_array if this is the current page
+                        if page == self.current_page:
+                            self.current_page_bgr_array = bgr_array
+                        print(f"Rebuilt BGR array from pixmap for page {page}: shape={bgr_array.shape}")
 
                 if bgr_array is None:
                     QtWidgets.QMessageBox.warning(
@@ -3554,11 +3625,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
             row = self.df_all.loc[row_idx]
             det = self._reconstruct_det_from_row(row)
 
-            # Update coordinates in det with new values
-            det["x1"] = x
-            det["y1"] = y
-            det["x2"] = x2
-            det["y2"] = y2
+            # Update coordinates in det with new values (convert to int for array slicing)
+            det["x1"] = int(x)
+            det["y1"] = int(y)
+            det["x2"] = int(x2)
+            det["y2"] = int(y2)
 
             # Update angle if provided
             if is_rotated and angle != 0.0:
@@ -3574,7 +3645,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                 #  CRITICAL: Save the new poly back to dataframe for undo/redo!
                 self.df_all.at[row_idx, 'poly'] = poly_array
-                if page in self.page_dfs and page_mask.any():
+                if page in self.page_dfs and page_mask is not None and page_mask.any():
                     self.page_dfs[page].at[page_idx, 'poly'] = poly_array
                 print(f"Saved new poly to dataframe for undo/redo")
 
@@ -3590,6 +3661,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
             normalized_angle = det.get('angle', 0.0)  # Normalized angle (cardinals → ~0°)
             raw_angle = det.get('angle_raw', normalized_angle)  # Raw angle from YOLO
+
+            # Extra safety: ensure angles are valid floats (handle any remaining NaN)
+            if pd.isna(normalized_angle):
+                normalized_angle = 0.0
+            if pd.isna(raw_angle):
+                raw_angle = 0.0
 
             # Use standard helper: checks if > ANGLE_TOL (~12°) from cardinal directions
             # Cardinal (horizontal/vertical): use paddleocr_recognize
@@ -3610,73 +3687,116 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
             new_text = ""
 
+            # DEBUG: Print what we're sending to OCR (with flush to ensure visibility)
+            print("=" * 60, flush=True)
+            print(" OCR STARTING - YOU MUST SEE THIS!", flush=True)
+            print("=" * 60, flush=True)
+            print(f" DEBUG OCR Input:", flush=True)
+            print(f"   det coordinates: x1={det['x1']}, y1={det['y1']}, x2={det['x2']}, y2={det['y2']}", flush=True)
+            print(f"   det OBB: cx={det.get('obb_cx')}, cy={det.get('obb_cy')}, w={det.get('obb_w')}, h={det.get('obb_h')}", flush=True)
+            print(f"   det poly: {det.get('poly')}", flush=True)
+            print(f"   det angle: {det.get('angle')}, angle_raw: {det.get('angle_raw')}", flush=True)
+            print(f"   bgr_array shape: {bgr_array.shape}", flush=True)
+            print(f"   ocr_mode: {ocr_mode}", flush=True)
+
+            # Validate coordinates before OCR
+            img_h, img_w = bgr_array.shape[:2]
+            print(f" BGR array dimensions: {img_w}x{img_h}", flush=True)
+            print(f" Original det coords: x1={det['x1']}, y1={det['y1']}, x2={det['x2']}, y2={det['y2']}", flush=True)
+
+            # CHECK: Are coordinates way outside image? (indicates wrong BGR array)
+            if det["x1"] > img_w or det["y1"] > img_h:
+                print(f" WARNING: Coordinates are OUTSIDE image bounds! BGR array may be from wrong plan!", flush=True)
+                print(f"   Det x1={det['x1']} > img_w={img_w} or det y1={det['y1']} > img_h={img_h}", flush=True)
+
+            det["x1"] = max(0, min(det["x1"], img_w - 1))
+            det["y1"] = max(0, min(det["y1"], img_h - 1))
+            det["x2"] = max(det["x1"] + 1, min(det["x2"], img_w))
+            det["y2"] = max(det["y1"] + 1, min(det["y2"], img_h))
+            print(f" Clamped det coords: x1={det['x1']}, y1={det['y1']}, x2={det['x2']}, y2={det['y2']}", flush=True)
+
+            # Check for valid bbox size
+            bbox_w = det["x2"] - det["x1"]
+            bbox_h = det["y2"] - det["y1"]
+            if bbox_w < 5 or bbox_h < 5:
+                print(f" WARNING: Bbox too small ({bbox_w}x{bbox_h}), skipping OCR")
+                new_text = ""
             # Use the same logic as on_rerun_ocr for consistency
-            if cls == "coordinate":
+            elif cls == "coordinate":
                 if ocr_mode == 'horizontal':
-                    new_text = ocr_coordinate_horizontal(det, bgr_array, "paddleocr")
-                    print(f" Coordinate horizontal OCR: '{new_text}'")
+                    try:
+                        new_text = ocr_coordinate_horizontal(det, bgr_array, "paddleocr")
+                        print(f" Coordinate horizontal OCR: '{new_text}'")
+                    except Exception as e:
+                        print(f" ERROR in horizontal OCR: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        new_text = ""
                 else:
-                    new_text = ocr_coordinate_angular(det, bgr_array, "paddleocr")
-                    print(f" Coordinate angular OCR: '{new_text}'")
+                    try:
+                        print(f" CALLING ocr_coordinate_angular NOW...", flush=True)
+                        new_text = ocr_coordinate_angular(det, bgr_array, "paddleocr")
+                        print(f" Coordinate angular OCR RESULT: '{new_text}'", flush=True)
+                    except Exception as e:
+                        print(f" ERROR in angular OCR: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        new_text = ""
             elif cls == "signal":
-                new_text = ocr_signal_name(det, bgr_array, "paddleocr")
-                print(f" Signal OCR: '{new_text}'")
+                try:
+                    new_text = ocr_signal_name(det, bgr_array, "paddleocr")
+                    print(f" Signal OCR: '{new_text}'")
+                except Exception as e:
+                    print(f" ERROR in signal OCR: {e}")
+                    new_text = ""
             elif cls in {"gks_gesteuert", "gks_festkodiert"}:
-                if ocr_mode == 'horizontal':
-                    new_text = ocr_numeric_cardinal_box(det, bgr_array)
-                    print(f" GKS cardinal OCR: '{new_text}'")
-                else:
-                    new_text = ocr_numeric_tilted_box(det, bgr_array)
-                    print(f" GKS tilted OCR: '{new_text}'")
+                try:
+                    if ocr_mode == 'horizontal':
+                        new_text = ocr_numeric_cardinal_box(det, bgr_array)
+                        print(f" GKS cardinal OCR: '{new_text}'")
+                    else:
+                        new_text = ocr_numeric_tilted_box(det, bgr_array)
+                        print(f" GKS tilted OCR: '{new_text}'")
+                except Exception as e:
+                    print(f" ERROR in GKS OCR: {e}")
+                    new_text = ""
             elif cls == "weichen_block":
-                #  Use specialized multi-line OCR for weichen_block
-                new_text = ocr_weichen_block(det, bgr_array)
-                print(f" Weichen block OCR (multi-line): '{new_text}'")
+                try:
+                    new_text = ocr_weichen_block(det, bgr_array)
+                    print(f" Weichen block OCR (multi-line): '{new_text}'")
+                except Exception as e:
+                    print(f" ERROR in weichen_block OCR: {e}")
+                    new_text = ""
             #  NEW: Handle template-matched symbols
             elif row.get('is_new_symbol', False):
                 print(f" Template symbol '{cls}' bbox resized - re-extracting text")
 
-                # Get symbol definition to know text_position
                 try:
                     from core.symbol_detector import NewSymbolDetector
-                    detector = NewSymbolDetector()
-                    symbol_name = row.get('name', '')
+                    from core.ocr_engine import ocr_custom_symbol_text
 
-                    if symbol_name in detector.symbols:
+                    detector = NewSymbolDetector()
+                    # Handle NaN in name field
+                    symbol_name = row.get('name', '')
+                    if pd.isna(symbol_name) or symbol_name is None:
+                        symbol_name = cls  # Fallback to class name
+
+                    if symbol_name and symbol_name in detector.symbols:
                         symbol_def = detector.symbols[symbol_name]
 
                         if symbol_def.has_text:
-                            # Compute NEW text region based on RESIZED symbol bbox
-                            from core.pipeline_integration import compute_text_region
-
-                            text_bbox = compute_text_region(
-                                det,  # Uses updated x1, y1, x2, y2
+                            # Use the same OCR function as pipelineworker.py and auditing_window.py
+                            result = ocr_custom_symbol_text(
+                                det,
+                                bgr_array,
                                 symbol_def.text_position,
-                                symbol_def.text_region_offset
+                                "paddleocr",
+                                text_region_offset=symbol_def.text_region_offset
                             )
-
-                            # Extract text from computed region
-                            x1_text, y1_text, x2_text, y2_text = text_bbox
-                            text_crop = bgr_array[y1_text:y2_text, x1_text:x2_text]
-
-                            # Determine if text is horizontal or angular
-                            # Template symbols usually have horizontal text
-                            text_angle = det.get('angle', 0.0)
-                            if _is_angular(text_angle):
-                                # Use angular OCR for tilted text
-                                from core.ocr_engine import ocr_generic_name
-                                new_text = ocr_generic_name({'x1': x1_text, 'y1': y1_text,
-                                                             'x2': x2_text, 'y2': y2_text,
-                                                             'angle': text_angle},
-                                                           bgr_array, "paddleocr")
-                            else:
-                                # Use horizontal OCR (most common for template symbols)
-                                from core.ocr_engine import paddleocr_recognize
-                                new_text, _ = paddleocr_recognize(text_crop)
-
+                            new_text = result[0] if result else ""
                             print(f" Template text OCR: '{new_text}'")
                         else:
-                            new_text = ""  # Symbol doesn't need text
+                            new_text = ""
                             print(f" Template symbol has no text requirement")
                     else:
                         print(f"Symbol definition '{symbol_name}' not found")
@@ -3701,7 +3821,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             if cls == 'coordinate':
                 print(f"This is a COORDINATE - updating coord_text and checking for linked anchors")
                 self.df_all.loc[row_idx, 'coord_text'] = new_text
-                if page in self.page_dfs and page_mask.any():
+                if page in self.page_dfs and page_mask is not None and page_mask.any():
                     self.page_dfs[page].loc[page_idx, 'coord_text'] = new_text
 
                 # Update all linked anchors with the new coordinate text
@@ -3840,17 +3960,17 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                     #  Set anchor_text to ONLY the block ID (not full OCR text)
                     self.df_all.loc[row_idx, 'anchor_text'] = weichen_block_id
-                    if page in self.page_dfs and page_mask.any():
+                    if page in self.page_dfs and page_mask is not None and page_mask.any():
                         self.page_dfs[page].loc[page_idx, 'anchor_text'] = weichen_block_id
 
                     # Update coord_text in dataframes
                     self.df_all.loc[row_idx, 'coord_text'] = coord_text_combined
-                    if page in self.page_dfs and page_mask.any():
+                    if page in self.page_dfs and page_mask is not None and page_mask.any():
                         self.page_dfs[page].loc[page_idx, 'coord_text'] = coord_text_combined
 
                     # Update weichen_coordinates field (use .at for list values)
                     self.df_all.at[row_idx, 'weichen_coordinates'] = weichen_coords
-                    if page in self.page_dfs and page_mask.any():
+                    if page in self.page_dfs and page_mask is not None and page_mask.any():
                         self.page_dfs[page].at[page_idx, 'weichen_coordinates'] = weichen_coords
                 #  NEW: Template symbols use 'text' field, not 'anchor_text'
                 elif row.get('is_new_symbol', False):
@@ -3858,13 +3978,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     # Template symbols store text in 'text' field
                     text_field = 'text' if 'text' in self.df_all.columns else 'anchor_text'
                     self.df_all.loc[row_idx, text_field] = new_text
-                    if page in self.page_dfs and page_mask.any():
+                    if page in self.page_dfs and page_mask is not None and page_mask.any():
                         self.page_dfs[page].loc[page_idx, text_field] = new_text
                     print(f" Updated {text_field} to '{new_text}'")
                 else:
                     # Other non-coordinate classes: update anchor_text normally
                     self.df_all.loc[row_idx, 'anchor_text'] = new_text
-                    if page in self.page_dfs and page_mask.any():
+                    if page in self.page_dfs and page_mask is not None and page_mask.any():
                         self.page_dfs[page].loc[page_idx, 'anchor_text'] = new_text
 
             # SIGNAL MERGE + FAHRTRICHTUNG: Trigger when signal name changes via bbox resize OCR
@@ -4012,7 +4132,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     bgr_array = pixmap_to_bgr_array(pix)
                     if bgr_array is not None:
                         self.page_bgr_arrays[page] = bgr_array  # Cache for future use
-                        print(f"Rebuilt BGR array from pixmap for page {page}")
+                        # Also update current_page_bgr_array if this is the current page
+                        if page == self.current_page:
+                            self.current_page_bgr_array = bgr_array
+                        print(f"Rebuilt BGR array from pixmap for page {page}: shape={bgr_array.shape}")
 
                 if bgr_array is None:
                     QtWidgets.QMessageBox.warning(
@@ -4030,12 +4153,14 @@ class WorkspaceWidget(QtWidgets.QWidget):
             crop_x1, crop_y1 = int(x), int(y)
             crop_x2, crop_y2 = int(x2), int(y2)
 
-            # Validate crop bounds
+            # Validate crop bounds - ensure minimum 10px crop that stays within image
             img_h, img_w = bgr_array.shape[:2]
-            crop_x1 = max(0, min(crop_x1, img_w))
-            crop_y1 = max(0, min(crop_y1, img_h))
-            crop_x2 = max(crop_x1 + 10, min(crop_x2, img_w))
-            crop_y2 = max(crop_y1 + 10, min(crop_y2, img_h))
+            # First clamp x1/y1 to leave room for minimum 10px crop
+            crop_x1 = max(0, min(crop_x1, img_w - 10))
+            crop_y1 = max(0, min(crop_y1, img_h - 10))
+            # Then clamp x2/y2 to ensure at least 10px and not exceeding image bounds
+            crop_x2 = min(max(crop_x1 + 10, crop_x2), img_w)
+            crop_y2 = min(max(crop_y1 + 10, crop_y2), img_h)
 
             new_crop_bgr = bgr_array[crop_y1:crop_y2, crop_x1:crop_x2]
             new_crop_rgb = cv2.cvtColor(new_crop_bgr, cv2.COLOR_BGR2RGB)
@@ -7511,7 +7636,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                     # Update anchor_text
                     self.df_all.loc[row_idx, 'anchor_text'] = new_text
-                    if page in self.page_dfs and page_mask.any():
+                    if page in self.page_dfs and page_mask is not None and page_mask.any():
                         self.page_dfs[page].loc[page_idx, 'anchor_text'] = new_text
 
                     # Update tree widget
