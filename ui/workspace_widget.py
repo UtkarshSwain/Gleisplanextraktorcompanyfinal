@@ -2248,13 +2248,50 @@ class WorkspaceWidget(QtWidgets.QWidget):
         print(f"Total in current_row_items: {len(self.current_row_items)}\n")
 
     def highlight_row_graphics(self, row_id: int, highlight: bool = True, hover: bool = False):
-        """Highlight graphics for row"""
+        """Highlight graphics for row - preserves confidence colors when enabled"""
         items = self.current_row_items.get(row_id)
         if not items:
             return
         normal, hi, hov, _, _ = self._get_theme_colors()
-        color = hov if hover else (hi if highlight else normal)
-        pen = QtGui.QPen(color, 3 if (highlight or hover) else 2)
+
+        # Determine color based on state
+        if hover:
+            color = hov
+            pen_width = 3
+        elif highlight:
+            color = hi
+            pen_width = 3
+        else:
+            # Not highlighted/hovered - check if we should use confidence colors
+            if hasattr(self, 'show_confidence_colors') and self.show_confidence_colors:
+                # Get confidence for this row
+                df_page = self.page_dfs.get(self.current_page)
+                if df_page is not None:
+                    row_data = df_page[df_page['row_id'] == row_id]
+                    if not row_data.empty:
+                        conf = row_data.iloc[0].get('conf', 0.0)
+                        is_custom = row_data.iloc[0].get('is_custom_symbol', False) == True
+
+                        if is_custom:
+                            color = QtGui.QColor(255, 0, 255)  # Magenta for custom
+                        elif conf >= 0.9:
+                            color = QtGui.QColor(0, 255, 0)  # Green
+                        elif conf >= 0.6:
+                            color = QtGui.QColor(255, 255, 0)  # Yellow
+                        else:
+                            color = QtGui.QColor(255, 50, 0)  # Red-orange
+                        pen_width = 4
+                    else:
+                        color = normal
+                        pen_width = 2
+                else:
+                    color = normal
+                    pen_width = 2
+            else:
+                color = normal
+                pen_width = 2
+
+        pen = QtGui.QPen(color, pen_width)
         for it in list(items):
             try:
                 if isinstance(it, (QtWidgets.QGraphicsRectItem, QtWidgets.QGraphicsPolygonItem)):
@@ -5867,12 +5904,14 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 return
 
             try:
-                # Open the Quality Inspector dialog
-                dialog = QualityInspectorDialog(self, self)
+                # Open the Quality Inspector dialog (NON-MODAL so user can edit workspace)
+                self._quality_inspector_dialog = QualityInspectorDialog(self, self)
 
-                # When dialog is closed, uncheck the button
-                result = dialog.exec_()
-                self.btn_quality_inspector.setChecked(False)
+                # When dialog is closed, uncheck the button and disable confidence colors
+                self._quality_inspector_dialog.finished.connect(self._on_quality_inspector_closed)
+
+                # Show non-modal (not exec_())
+                self._quality_inspector_dialog.show()
 
             except Exception as e:
                 import traceback
@@ -5884,10 +5923,25 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 )
                 self.btn_quality_inspector.setChecked(False)
         else:
+            # Close the dialog if it's open
+            if hasattr(self, '_quality_inspector_dialog') and self._quality_inspector_dialog is not None:
+                self._quality_inspector_dialog.close()
+                self._quality_inspector_dialog = None
             # Disable confidence colors
             self.show_confidence_colors = False
             self._refresh_page_graphics()
             self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
+
+    def _on_quality_inspector_closed(self):
+        """Called when the Quality Inspector dialog is closed."""
+        # Clean up reference FIRST to prevent re-entrancy when setChecked triggers on_toggle_quality_inspector
+        self._quality_inspector_dialog = None
+        # Disable confidence colors
+        self.show_confidence_colors = False
+        self._refresh_page_graphics()
+        self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
+        # Uncheck the button (do this last since it triggers the toggle handler)
+        self.btn_quality_inspector.setChecked(False)
 
     def _open_threshold_dialog(self):
         """Open the Threshold Dialog to adjust confidence thresholds per class."""

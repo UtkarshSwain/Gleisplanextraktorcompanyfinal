@@ -227,11 +227,12 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
         main_splitter.setChildrenCollapsible(False)
         main_splitter.addWidget(content_splitter)
 
-        # Bottom panel container
+        # Bottom panel container - compact layout
         bottom_widget = QtWidgets.QWidget()
+        bottom_widget.setMaximumHeight(280)  # Limit bottom panel height
         bottom_layout = QtWidgets.QVBoxLayout(bottom_widget)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_layout.setSpacing(4)
+        bottom_layout.setSpacing(2)  # Reduced spacing
 
         # ============================================================
         # STATISTICS & SUMMARY PANEL
@@ -239,7 +240,7 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
         stats_frame = QtWidgets.QFrame()
         stats_frame.setFrameStyle(QtWidgets.QFrame.StyledPanel)
         stats_layout = QtWidgets.QHBoxLayout(stats_frame)
-        stats_layout.setContentsMargins(10, 6, 10, 6)
+        stats_layout.setContentsMargins(8, 4, 8, 4)  # Compact margins
 
         # Left: Class statistics
         stats_left = QtWidgets.QVBoxLayout()
@@ -283,8 +284,8 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
         target_frame = QtWidgets.QFrame()
         target_frame.setFrameStyle(QtWidgets.QFrame.StyledPanel | QtWidgets.QFrame.Raised)
         target_main_layout = QtWidgets.QVBoxLayout(target_frame)
-        target_main_layout.setContentsMargins(10, 10, 10, 10)
-        target_main_layout.setSpacing(8)
+        target_main_layout.setContentsMargins(8, 6, 8, 6)  # Compact margins
+        target_main_layout.setSpacing(4)  # Reduced spacing
 
         # Top row: Target selection
         target_row1 = QtWidgets.QHBoxLayout()
@@ -368,8 +369,8 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
         options_frame = QtWidgets.QFrame()
         options_frame.setFrameStyle(QtWidgets.QFrame.StyledPanel)
         options_main = QtWidgets.QVBoxLayout(options_frame)
-        options_main.setContentsMargins(10, 6, 10, 6)
-        options_main.setSpacing(6)
+        options_main.setContentsMargins(8, 4, 8, 4)  # Compact margins
+        options_main.setSpacing(4)  # Reduced spacing
 
         # Row 1: Basic options
         options_row1 = QtWidgets.QHBoxLayout()
@@ -511,7 +512,10 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
 
         # Add bottom panel to main splitter
         main_splitter.addWidget(bottom_widget)
-        main_splitter.setSizes([400, 150])
+        # Ratio: 2/3 top (table/tree), 1/3 bottom (options)
+        main_splitter.setStretchFactor(0, 2)  # Top gets 2x stretch
+        main_splitter.setStretchFactor(1, 1)  # Bottom gets 1x stretch
+        main_splitter.setSizes([500, 250])
 
         main_layout.addWidget(main_splitter)
 
@@ -1204,14 +1208,14 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
                 # Show preview with actual cell contents if available
                 if scan_result and (scan_result['formula_count'] > 0 or scan_result['data_count'] > 0):
                     preview_text = self._get_target_preview_text(
-                        scan_result, col, row, col_count, min(total_rows, 5)
+                        scan_result, col, row, col_count, min(total_rows, 3)
                     )
                     self.excel_preview.setText(preview_text)
                 else:
                     # Show simple preview for empty target area
                     preview_lines = []
-                    show_cols = min(col_count, 4)
-                    show_rows = min(total_rows, 5)
+                    show_cols = min(col_count, 3)
+                    show_rows = min(total_rows, 3)
 
                     col_letters = [get_column_letter(start_col_idx + i) for i in range(show_cols)]
                     if col_count > show_cols:
@@ -1315,8 +1319,8 @@ class SimpleExcelExportDialog(QtWidgets.QDialog):
 
         lines = []
         start_col_idx = column_index_from_string(start_col)
-        show_cols = min(num_cols, 4)
-        show_rows = min(num_rows, 5)
+        show_cols = min(num_cols, 3)
+        show_rows = min(num_rows, 3)
 
         # Header row with column letters
         col_letters = [get_column_letter(start_col_idx + i) for i in range(show_cols)]
