@@ -4,7 +4,7 @@
 #
 # Entwickelt von: Utkarsh Swain 
 # Siemens Mobility GmbH
-# © 2025
+# © 2026
 # ============================================================================
 # PIL CONFIGURATION - MUST BE BEFORE OTHER IMPORTS
 # ============================================================================
@@ -60,21 +60,11 @@ class MainWindow(QtWidgets.QMainWindow):
                         for workspace in self.auditing_window.workspaces.values():
                             workspace._update_graphics_theme()
                             
-                            # --- THIS IS THE FIX ---
-                            # Force the tree and its header to re-read the new
-                            # application-wide stylesheet.
-                            
-                            # Un-apply the old style
                             workspace.tree.style().unpolish(workspace.tree)
                             workspace.tree.header().style().unpolish(workspace.tree.header())
-                            
-                            # Apply the new style
                             workspace.tree.style().polish(workspace.tree)
                             workspace.tree.header().style().polish(workspace.tree.header())
-                            
-                            # Ask the header to repaint
-                            workspace.tree.header().update() 
-                            # --- END FIX ---
+                            workspace.tree.header().update()
 
     def _get_theme_colors(self):
         if self._current_theme == "dark":
@@ -175,16 +165,11 @@ def main():
     # Fusion style scales better than native OS styles
     app.setStyle('Fusion')
 
-    # --- ADD THIS HERE ---
-    # Set the password in your environment before running
-    # In Windows: set DB_PASSWORD="your_strong_password_here"
     try:
-        init_db() # <-- Initialize database tables on startup
+        init_db()
     except Exception as e:
         print(f"CRITICAL: Failed to initialize database: {e}")
-        # Optionally show an error message box here
-        return # Exit if DB connection fails
-    # --- END OF CHANGE ---
+        return
     
     w = MainWindow()
     # w.show() is handled by your _show_setup_window()

@@ -1,3 +1,14 @@
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
+"""
+Draggable tab bar for multi-window support.
+"""
 from PyQt5 import QtCore, QtGui, QtWidgets
 from typing import TYPE_CHECKING
 

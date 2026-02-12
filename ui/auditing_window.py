@@ -1,8 +1,10 @@
 # ============================================================================
-# RailDoc Studio - Bearbeitungsmodul
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
 # Entwickelt von: Utkarsh Swain
 # Siemens Mobility GmbH
-# © 2025
+# © 2026
 # ============================================================================
 """
 AuditingWindow - Hauptfenster fuer Bearbeitung und Korrektur
@@ -177,7 +179,6 @@ class AuditingWindow(QtWidgets.QMainWindow):
             
             workspace = self.workspaces.get(index)
             if workspace:
-                # --- UPDATE THIS LINE ---
                 self.statusBar().showMessage(f"Bereit: {os.path.basename(workspace.layout_name)}")
     
     def _create_menus(self):
@@ -436,9 +437,8 @@ class AuditingWindow(QtWidgets.QMainWindow):
         self.status_bar.addPermanentWidget(self.selection_label)
         self.status_bar.addPermanentWidget(self.row_count_label)
 
-        # Update on selection change
         self.tab_widget.currentChanged.connect(self.update_status_bar)
-    # ADD THIS NEW METHOD HERE (after _create_status_bar)
+
     def _set_status(self, message: str):
         """Safely set status bar message"""
         if self.status_label is not None:

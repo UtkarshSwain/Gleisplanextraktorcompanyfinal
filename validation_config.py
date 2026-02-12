@@ -1,4 +1,11 @@
-# validation_config.py
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
 """
 Shared Validation Configuration
 Single source of truth for all validation thresholds and class requirements.

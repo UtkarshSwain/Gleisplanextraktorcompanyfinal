@@ -1,4 +1,14 @@
-# table_editor.py - Complete Excel-like table editing features
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
+"""
+Complete Excel-like table editing features.
+"""
 from PyQt5 import QtCore, QtGui, QtWidgets
 from typing import List, Optional, Tuple, Dict, Any
 import pandas as pd

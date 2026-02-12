@@ -1,3 +1,14 @@
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
+"""
+Excel export functionality with template support.
+"""
 import os
 import json
 import re
@@ -2351,23 +2362,20 @@ class AdvancedExcelExportDialog(QtWidgets.QDialog):
     def _build_ui(self):
         main_layout = QtWidgets.QVBoxLayout(self)
 
-        # --- HILFE-BUTTON HINZUFÜGEN (KORRIGIERTE PLATZIERUNG) ---
-        # Erstellen Sie einen Container für die Überschrift und den Hilfe-Button
         header_container = QtWidgets.QWidget()
         header_layout = QtWidgets.QHBoxLayout(header_container)
-        header_layout.setContentsMargins(0, 0, 0, 0) # Entfernt Standard-Ränder des Layouts
+        header_layout.setContentsMargins(0, 0, 0, 0)
 
         help_button = QtWidgets.QPushButton("?")
         help_button.setFixedSize(24, 24)
         help_button.setToolTip("Hilfe zu diesem Dialog")
         help_button.clicked.connect(self._show_help)
-        
+
         header_layout.addWidget(QtWidgets.QLabel("<h2>Excel Export Konfiguration</h2>"))
-        header_layout.addStretch() # Sorgt dafür, dass der Button nach rechts geschoben wird
+        header_layout.addStretch()
         header_layout.addWidget(help_button)
-        
-        main_layout.addWidget(header_container) # Fügen Sie den Container zum Hauptlayout hinzu
-        # --- ENDE HILFE-BUTTON ---
+
+        main_layout.addWidget(header_container)
 
         # ============================================================
         # SECTION 1: Template Management

@@ -1,17 +1,28 @@
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
+"""
+Dialog windows for PDF comparison functionality.
+"""
 from PyQt5 import QtCore, QtGui, QtWidgets
 from ui.workspace_widget import WorkspaceWidget
 from ui.graphics_view import InteractiveGraphicsView
 from ui.auditing_window import AuditingWindow
 from ui.tree_widget import AuditingTreeWidget
-import pandas as pd 
+import pandas as pd
 import math
 from typing import List, Dict, Tuple, Optional, Any
 import os
-# At the very top of dialogs.py, add this import:
 from pdfcomparison.comparison_engine import LayoutComparisonEngine, ElementChange, ChangeType
+
+
 class GraphicsWindow(QtWidgets.QMainWindow):
-    # --- THIS IS THE FIX ---
-    def __init__(self, main_window: 'WorkspaceWidget', graphics_view: 'InteractiveGraphicsView'): # <-- Type hint updated
+    def __init__(self, main_window: 'WorkspaceWidget', graphics_view: 'InteractiveGraphicsView'):
         super().__init__()
         self.setWindowTitle("Grafikansicht")
         self.resize(1000, 800)
@@ -19,11 +30,7 @@ class GraphicsWindow(QtWidgets.QMainWindow):
         lay = QtWidgets.QVBoxLayout(central); lay.setContentsMargins(0,0,0,0)
         lay.addWidget(graphics_view)
         graphics_view.setParent(central)
-        
-        # This line was hard-coded to a method on AuditingWindow. 
-        # Now it correctly points to the method on WorkspaceWidget.
-        self._on_close = main_window._on_graphics_window_closed 
-    # --- END OF FIX ---
+        self._on_close = main_window._on_graphics_window_closed
 
     def closeEvent(self, e: QtGui.QCloseEvent):
         try: self._on_close()
@@ -57,30 +64,20 @@ class HelpDialog(QtWidgets.QDialog):
         button_box.rejected.connect(self.reject)
         main_layout.addWidget(button_box)
 
-        # This ensures the dialog looks consistent with the OS
-        pass
 
 class TreeWindow(QtWidgets.QMainWindow):
     """Replaces TableWindow"""
-    def __init__(self, main_window: 'WorkspaceWidget', tree_view: 'AuditingTreeWidget'): # <-- Type hint updated
+    def __init__(self, main_window: 'WorkspaceWidget', tree_view: 'AuditingTreeWidget'):
         super().__init__()
         self.setWindowTitle("Detections Tree")
         self.resize(900, 700)
         central = QtWidgets.QWidget(); self.setCentralWidget(central)
         lay = QtWidgets.QVBoxLayout(central); lay.setContentsMargins(0,0,0,0)
         lay.addWidget(tree_view); tree_view.setParent(central)
-        
-        # Store a reference to the tree view
         self.tree_view = tree_view 
 
-        # Link selection signal
         tree_view.itemSelectionChanged.connect(main_window.on_tree_selection_changed)
-        
-        # --- THIS IS THE FIX ---
-        # The error "AttributeError: ... _on_table_window_closed" happens here.
-        # Change it to the new method name you added to WorkspaceWidget.
-        self._on_close = main_window._on_tree_window_closed 
-        # --- END OF FIX ---
+        self._on_close = main_window._on_tree_window_closed
     
     def closeEvent(self, e: QtGui.QCloseEvent):
         try: self._on_close()
@@ -113,25 +110,18 @@ class WorkspaceWindow(QtWidgets.QMainWindow):
         main_layout.setContentsMargins(5, 5, 5, 5)  #  Small margins
         main_layout.setSpacing(5)
         
-        # Add redock button at top
         redock_btn = QtWidgets.QPushButton("⬅ Zurück ins Hauptfenster")
         redock_btn.setToolTip("Workspace zurück in Tab-Ansicht verschieben")
-        redock_btn.setMaximumHeight(30)  #  Limit button height
+        redock_btn.setMaximumHeight(30)
         redock_btn.clicked.connect(self.redock_workspace)
         main_layout.addWidget(redock_btn)
-        
-        #  FIX: Properly reparent workspace widget
+
         workspace_widget.setParent(central)
         main_layout.addWidget(workspace_widget)
-        
-        #  FIX: Ensure workspace is visible
         workspace_widget.setVisible(True)
         workspace_widget.show()
-        
-        # Store callback
+
         self._on_close = parent_auditing._on_workspace_window_closed
-        
-        print(f"[WORKSPACE_WINDOW] Created window for: {short_name}")
     
     def redock_workspace(self):
         """Redock workspace back into main window"""
@@ -175,19 +165,16 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         info_label.setObjectName("compareInfoLabel")
         layout.addWidget(info_label)
 
-        # --- HILFE-BUTTON HINZUFÜGEN ---
         help_button = QtWidgets.QPushButton("?")
         help_button.setFixedSize(24, 24)
         help_button.setToolTip("Hilfe zu diesem Dialog")
         help_button.clicked.connect(self._show_help)
-        
-        # Layout für Info-Label und Hilfe-Button
+
         info_layout = QtWidgets.QHBoxLayout()
         info_layout.addWidget(info_label)
         info_layout.addStretch()
         info_layout.addWidget(help_button)
         layout.addLayout(info_layout)
-        # --- ENDE HILFE-BUTTON ---
         
         # Gleisplan selectors (side by side)
         selector_layout = QtWidgets.QHBoxLayout()
@@ -479,55 +466,7 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         if ws1 == ws2:
             QtWidgets.QMessageBox.warning(self, "Fehler", "Bitte unterschiedliche Gleispläne wählen")
             return
-        
-        #  ADD DEBUG CODE HERE - BEFORE comparison
-        print("\n" + "="*70)
-        print("DEBUGGING UUID PRESENCE")
-        print("="*70)
-        
-        # Check DataFrame columns
-        print(f"\n WS1 ({ws1.layout_name}) columns:")
-        print(f"{list(ws1.df_all.columns)}")
-        
-        print(f"\n WS2 ({ws2.layout_name}) columns:")
-        print(f"{list(ws2.df_all.columns)}")
-        
-        # Check if detection_id column exists
-        has_uuid_ws1 = 'detection_id' in ws1.df_all.columns
-        has_uuid_ws2 = 'detection_id' in ws2.df_all.columns
-        
-        print(f"\n UUID column exists:")
-        print(f"WS1: {has_uuid_ws1}")
-        print(f"WS2: {has_uuid_ws2}")
-        
-        if has_uuid_ws1:
-            # Check if UUIDs are actually populated
-            uuid_count_ws1 = ws1.df_all['detection_id'].notna().sum()
-            total_ws1 = len(ws1.df_all)
-            print(f"\nWS1 UUID stats:")
-            print(f"Total rows: {total_ws1}")
-            print(f"Rows with UUID: {uuid_count_ws1}")
-            print(f"Rows without UUID: {total_ws1 - uuid_count_ws1}")
-            
-            # Show first few UUIDs
-            sample_uuids = ws1.df_all['detection_id'].dropna().head(3).tolist()
-            print(f"Sample UUIDs: {sample_uuids}")
-        
-        if has_uuid_ws2:
-            uuid_count_ws2 = ws2.df_all['detection_id'].notna().sum()
-            total_ws2 = len(ws2.df_all)
-            print(f"\nWS2 UUID stats:")
-            print(f"Total rows: {total_ws2}")
-            print(f"Rows with UUID: {uuid_count_ws2}")
-            print(f"Rows without UUID: {total_ws2 - uuid_count_ws2}")
-            
-            sample_uuids = ws2.df_all['detection_id'].dropna().head(3).tolist()
-            print(f"Sample UUIDs: {sample_uuids}")
-        
-        print("="*70 + "\n")
-        
-        #  NOW run comparison
-        # Debug mode is controlled by DEBUG_COMPARISON in config.py
+
         try:
             engine = LayoutComparisonEngine()
             result = engine.compare(ws1.df_all, ws2.df_all)

@@ -1,4 +1,14 @@
-# --- Theme Stylesheets ---
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
+"""
+Theme Stylesheets for dark and light modes.
+"""
 DARK_QSS = """
 QMainWindow, QWidget { background-color: #2b2b2b; color: #cccccc; }
 QPushButton { background-color: #4a4a4a; color: #ffffff; border: 1px solid #555555; border-radius: 4px; padding: 5px 10px; }

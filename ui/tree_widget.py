@@ -1,3 +1,14 @@
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
+"""
+Tree widget for displaying and editing detections.
+"""
 from PyQt5 import QtCore, QtGui, QtWidgets
 from core.pipelineworker import NO_OCR_CLASSES
 from typing import List, Dict, Tuple, Optional, Any, TYPE_CHECKING

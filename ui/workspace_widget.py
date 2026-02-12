@@ -1,3 +1,11 @@
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
 """
 WorkspaceWidget - Haupt-Bearbeitungsbereich fuer einzelne Gleisplaene
 
@@ -1536,14 +1544,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
         if self.scene is None:
             return
         
-        # --- ADD THIS BLOCK ---
-        # Repopulate the tree to update item-level styles
-        # (like the dark category backgrounds)
         if self.current_page in self.page_dfs:
-            self.tree.clearSelection() # Clear selection before rebuilding
+            self.tree.clearSelection()
             self.item_details_notes.clear()
             self._populate_tree(self.current_page)
-        # --- END ADD ---
         _, _, _, _, bg = self._get_theme_colors()
         self.scene.setBackgroundBrush(QtGui.QBrush(bg))
         if self.current_page in self.page_base_pix:
@@ -4374,11 +4378,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     if mode == 'horizontal': self.btn_manual_ocr.setChecked(False)
                     else: self.btn_manual_ocr_angular.setChecked(False)
                     
-                    # --- ADD THIS ---
                     self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
-                    # --- END ADD ---
                     return
-                
+
                 item = self.tree.currentItem()
                 col = self.tree.currentColumn()
                 
@@ -4387,21 +4389,17 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     if mode == 'horizontal': self.btn_manual_ocr.setChecked(False)
                     else: self.btn_manual_ocr_angular.setChecked(False)
                     
-                    # --- ADD THIS ---
                     self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
-                    # --- END ADD ---
                     return
-                
+
                 if col not in [0, 1]:
                     QtWidgets.QMessageBox.warning(self, "Fehler", "Bitte Spalte 'Text/Nummer' oder 'Koordinatentext' auswählen")
                     if mode == 'horizontal': self.btn_manual_ocr.setChecked(False)
                     else: self.btn_manual_ocr_angular.setChecked(False)
                     
-                    # --- ADD THIS ---
                     self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
-                    # --- END ADD ---
                     return
-                
+
                 self.draw_ocr_target_item = item
                 self.draw_ocr_target_column = col
                 self.draw_ocr_mode = mode
@@ -4410,7 +4408,6 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 is_rotated = (mode == 'angular')
                 self.view.toggle_drawing_mode(True, rotated=is_rotated)
 
-                # --- ADD THIS (logic for different messages) ---
                 if mode == 'angular':
                     self._set_status(
                         " Manuelles OCR (Angular): 1. Zelle auswählen. 2. Klicken Sie Start- & Endpunkt der Text-Basislinie. 3. Klicken Sie ein drittes Mal, um die Höhe festzulegen."
@@ -4419,13 +4416,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     self._set_status(
                         " Manuelles OCR (Horizontal): 1. Zelle in Tabelle auswählen. 2. Ziehen Sie ein horizontales Rechteck auf dem Bild."
                     )
-                # --- END ADD ---
 
             else:
-                # --- ADD THIS (for toggling off) ---
                 self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
-                # --- END ADD ---
-
                 self.is_drawing_mode = False
                 self.view.toggle_drawing_mode(False)
                 self.draw_ocr_target_item = None
@@ -4657,12 +4650,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.is_manual_linking_mode = checked
             
             if checked:
-                # --- ADD THIS ---
                 self._set_status(
                     "Verknüpfungsmodus: 1. Klicken Sie auf ein Ankerelement (z.B. Signal). 2. Klicken Sie auf die zugehörige Koordinate."
                 )
-                # --- END ADD ---
-
                 if self.btn_manual_ocr.isChecked():
                     self.btn_manual_ocr.setChecked(False)
                 if self.btn_manual_ocr_angular.isChecked():
@@ -4674,10 +4664,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     self.scene.removeItem(self.link_drag_line)
                 self.link_drag_line = None
             else:
-                # --- ADD THIS ---
                 self._set_status(f"Bereit: {os.path.basename(self.layout_name)}")
-                # --- END ADD ---
-                
                 self.view.setCursor(QtCore.Qt.ArrowCursor)
                 self.link_source_row_id = None
                 if self.link_drag_line and self.link_drag_line.scene():

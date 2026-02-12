@@ -1,8 +1,10 @@
 # ============================================================================
-# RailDoc Studio - Setup & Analyse Modul
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
 # Entwickelt von: Utkarsh Swain
 # Siemens Mobility GmbH
-# © 2025
+# © 2026
 # ============================================================================
 """
 SetupAndRunWindow - Startfenster fuer Analyse-Konfiguration
@@ -16,8 +18,6 @@ Hauptklassen:
 Funktionen:
     - PDF/Bild-Auswahl (Drag-and-Drop unterstuetzt)
     - YOLO-Modell-Auswahl
-    - OCR-Engine-Auswahl (PaddleOCR/EasyOCR)
-    - Vorschau der ersten Seite
     - Fortschrittsanzeige waehrend Verarbeitung
     - Laden gespeicherter Workspaces
 

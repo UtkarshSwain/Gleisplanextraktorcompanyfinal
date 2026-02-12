@@ -1,4 +1,11 @@
-# ui/layout_wizard_dialog.py
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
 """
 Interactive Layout Configuration Wizard UI
 

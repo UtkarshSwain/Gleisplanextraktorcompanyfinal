@@ -1,5 +1,13 @@
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
 """
-track_detection.py - Main track (Gleis) centerline detection for Gleisplan files
+Main track (Gleis) centerline detection for Gleisplan files
 Supports both PDF files and image arrays (PNG, JPEG, TIFF, etc.)
 Integrated with existing YOLO OCR extraction pipeline
 """

@@ -1,4 +1,11 @@
-# validation_dialog_helper.py
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
 """
 Helper to enhance your existing validation_dialog2.py with jump-to-detection
 

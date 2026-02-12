@@ -1,4 +1,11 @@
-# ui/new_symbol_dialog.py
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
 """
 Dialog for defining new symbols without retraining.
 

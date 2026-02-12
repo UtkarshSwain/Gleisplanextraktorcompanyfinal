@@ -1,3 +1,11 @@
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
 """
 Enhanced Data Validation Module with Auto-Correction Support
 Detects errors, inconsistencies, and provides automatic fixes

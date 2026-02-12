@@ -1,4 +1,11 @@
-# uservalidation/missing_detection_analyzer.py
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
 """
 Missing Detection Analyzer - Find areas where YOLO likely missed objects
 

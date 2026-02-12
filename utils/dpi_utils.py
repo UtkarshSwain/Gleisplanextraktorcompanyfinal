@@ -1,3 +1,11 @@
+# ============================================================================
+# RailDoc Studio - Intelligente Eisenbahndokument-Analyse
+# Gleisplan-Modul v1.0
+#
+# Entwickelt von: Utkarsh Swain
+# Siemens Mobility GmbH
+# © 2026
+# ============================================================================
 """
 DPI-Aware Sizing Utilities for RailDoc Studio
 Provides functions for adaptive sizing across different screen DPI settings.
