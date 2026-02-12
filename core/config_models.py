@@ -27,6 +27,11 @@ class DetectionConfig:
     legend_strip_width_percent: int = 12
     legend_strip_max_pixels: int = 4200
 
+    # Title block margins (for track detection)
+    title_block_margin_height: int = 100  # when legend strip is excluded
+    title_block_margin_height_default: int = 25  # when legend strip is NOT excluded
+    title_block_margin_width_default: int = 8  # when legend strip is NOT excluded
+
     # Test-Time Augmentation
     use_tta: bool = True
     tta_scales: List[float] = field(default_factory=lambda: [1.0])
@@ -161,9 +166,20 @@ class SpatialConfig:
     signal_gks_dx_tolerance_right: int = 120
     signal_gks_angle_tolerance: float = 20.0
 
+    # Signal-GKS linking - Relaxed mode (fallback)
+    signal_gks_relaxed_dx_tolerance: int = 200
+    signal_gks_relaxed_dy_max: int = 600
+    signal_gks_relaxed_angle_tolerance: float = 25.0
+
+    # Signal-GKS linking - Nearest mode (last resort)
+    signal_gks_nearest_max_distance: int = 800
+    signal_gks_nearest_angle_tolerance: float = 30.0
+
     # Track perpendicular detection
     track_perpendicular_max_distance: int = 1500
     track_window_size: int = 25
+    track_search_radius: int = 500
+    track_sample_distance: int = 200
 
     # Haltepunkt-Signal-Coordinate clustering
     haltepunkt_cluster_max_distance: int = 250
@@ -172,6 +188,10 @@ class SpatialConfig:
     haltepunkt_coord_dy_min: int = 20
     haltepunkt_coord_dy_max: int = 150
     haltepunkt_dx_tolerance: int = 100
+    haltepunkt_angle_tolerance: float = 20.0  # Max angle difference for angular haltepunkt
+
+    # Isolierstoß fallback linking
+    isolierstoss_fallback_radius: int = 300
 
     # Adaptive pattern learning
     adaptive_search_dx_multiplier: float = 3.0

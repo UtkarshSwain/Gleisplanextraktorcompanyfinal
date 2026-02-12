@@ -230,6 +230,7 @@ class PipelineWorker(QtCore.QThread):
                     "search_left": cls_def.linking_rule.search_left,
                     "tilted_ok": cls_def.linking_rule.tilted_ok,
                     "block": cls_def.linking_rule.block,
+                    "fallback_dy_steps": cls_def.linking_rule.fallback_dy_steps,
                 }
 
         # Configure OCR module
@@ -628,14 +629,23 @@ class PipelineWorker(QtCore.QThread):
                                     print(msg)
 
                             # Detect tracks BEFORE Fahrtrichtung detection
+                            # Get title block margin params from config
+                            det_cfg = self.config.detection if self.config else None
+                            if EXCLUDE_LEGEND_STRIP:
+                                margin_width = LEGEND_STRIP_WIDTH_PERCENT
+                                margin_height = det_cfg.title_block_margin_height if det_cfg else 100
+                            else:
+                                margin_width = det_cfg.title_block_margin_width_default if det_cfg else 8
+                                margin_height = det_cfg.title_block_margin_height_default if det_cfg else 25
+
                             # For images, pass the BGR array directly; for PDFs, use pdf_path
                             if self._is_image_file:
                                 track_skeleton, _, _ = detect_main_tracks(
                                     image_array=bgr_color,
                                     tile_size=TILE_SIZE,
                                     overlap=int(TILE_SIZE * OVERLAP_PCT / 100),
-                                    title_block_margin_width=LEGEND_STRIP_WIDTH_PERCENT if EXCLUDE_LEGEND_STRIP else 8,
-                                    title_block_margin_height=100 if EXCLUDE_LEGEND_STRIP else 25,
+                                    title_block_margin_width=margin_width,
+                                    title_block_margin_height=margin_height,
                                     progress_callback=track_progress
                                 )
                             else:
@@ -645,8 +655,8 @@ class PipelineWorker(QtCore.QThread):
                                     dpi=DPI,
                                     tile_size=TILE_SIZE,
                                     overlap=int(TILE_SIZE * OVERLAP_PCT / 100),
-                                    title_block_margin_width=LEGEND_STRIP_WIDTH_PERCENT if EXCLUDE_LEGEND_STRIP else 8,
-                                    title_block_margin_height=100 if EXCLUDE_LEGEND_STRIP else 25,
+                                    title_block_margin_width=margin_width,
+                                    title_block_margin_height=margin_height,
                                     progress_callback=track_progress
                                 )
                             
@@ -705,13 +715,20 @@ class PipelineWorker(QtCore.QThread):
                                 break
                         signal_det["text"] = signal_text or ""
                         
-                        # GKS-based detection only
+                        # GKS-based detection only - use config spatial params
+                        sp_gks = self.config.spatial if self.config else None
                         fahrtrichtung = detect_fahrtrichtung(
-                            signal_det, 
-                            gks_dets, 
+                            signal_det,
+                            gks_dets,
                             track_skeleton=None,  #  Don't use track yet
                             track_bounds=None,    #  NEW: Pass track_bounds (None for now)
-                            max_distance=250
+                            max_distance=sp_gks.signal_gks_max_distance if sp_gks else 250,
+                            dy_min=sp_gks.signal_gks_dy_min if sp_gks else 30,
+                            dy_max=sp_gks.signal_gks_dy_max if sp_gks else 200,
+                            dx_tolerance_left=sp_gks.signal_gks_dx_tolerance_left if sp_gks else 120,
+                            dx_tolerance_right=sp_gks.signal_gks_dx_tolerance_right if sp_gks else 120,
+                            angle_tolerance=sp_gks.signal_gks_angle_tolerance if sp_gks else 20,
+                            config=self.config
                         )
                         
                         if fahrtrichtung:
@@ -765,13 +782,21 @@ class PipelineWorker(QtCore.QThread):
                     #  NEW: Track which signal detections are haltepunkt-referenced
                     haltepunkt_referenced_signals = set()
 
-                    # Detect groups for each haltepunkt
+                    # Detect groups for each haltepunkt - get all spatial params from config
+                    sp_cfg = self.config.spatial if self.config else None
                     for haltepunkt_det in haltepunkt_dets:
                         group = detect_haltepunkt_signal_group(
-                            haltepunkt_det, 
+                            haltepunkt_det,
                             signal_dets,
                             coord_dets_with_text,
-                            max_distance=250
+                            max_distance=sp_cfg.haltepunkt_cluster_max_distance if sp_cfg else 250,
+                            dy_signal_min=sp_cfg.haltepunkt_signal_dy_min if sp_cfg else 30,
+                            dy_signal_max=sp_cfg.haltepunkt_signal_dy_max if sp_cfg else 200,
+                            dy_coord_min=sp_cfg.haltepunkt_coord_dy_min if sp_cfg else 20,
+                            dy_coord_max=sp_cfg.haltepunkt_coord_dy_max if sp_cfg else 150,
+                            dx_tolerance=sp_cfg.haltepunkt_dx_tolerance if sp_cfg else 100,
+                            angle_tolerance=sp_cfg.haltepunkt_angle_tolerance if sp_cfg else 20.0,
+                            config=self.config
                         )
                         
                         if group:
@@ -1094,7 +1119,14 @@ class PipelineWorker(QtCore.QThread):
                             # If no direct coordinate found, try linking via GKS
                             if linked is None:
                                 gks_dets_for_haltetafel = [det for det, _, _, _, _, _, _ in anchor_results if det["name"] == "gks_festkodiert"]
-                                linked = link_haltetafel_to_gks(a, gks_dets_for_haltetafel, coords, gks_coord_map)
+                                # Get spatial params from config
+                                sp_cfg = self.config.spatial if self.config else None
+                                linked = link_haltetafel_to_gks(
+                                    a, gks_dets_for_haltetafel, coords, gks_coord_map,
+                                    max_distance=sp_cfg.haltetafel_gks_max_distance if sp_cfg else 250,
+                                    dy_tolerance=sp_cfg.haltetafel_gks_dy_tolerance if sp_cfg else 100,
+                                    dx_tolerance=sp_cfg.haltetafel_gks_dx_tolerance if sp_cfg else 300
+                                )
                                 
                                 if linked:
                                     meta = coord_meta.get(id(linked), {})
@@ -1263,7 +1295,8 @@ class PipelineWorker(QtCore.QThread):
                                     print(f"\n    Isolierstoß: Normal linking failed, trying fallback...")
 
                                 # Fallback: search in all directions for nearest unlinked coordinate
-                                linked = link_isolierstoss_fallback(a, coords, used_coord_ids, max_radius=300)
+                                fallback_radius = self.config.spatial.isolierstoss_fallback_radius if self.config else 300
+                                linked = link_isolierstoss_fallback(a, coords, used_coord_ids, max_radius=fallback_radius)
 
                             # Process coordinate
                             coord_txt, coord_val, gi = None, None, None
@@ -1556,8 +1589,9 @@ class PipelineWorker(QtCore.QThread):
                                     gks_dets=[],
                                     track_skeleton=track_skeleton,
                                     track_bounds=track_bounds,  #  NEW: Pass track bounds
-                                    track_sample_distance=300,
-                                    track_search_radius=500
+                                    track_sample_distance=self.config.spatial.track_sample_distance if self.config else 300,
+                                    track_search_radius=self.config.spatial.track_search_radius if self.config else 500,
+                                    config=self.config
                                 )
                                 
                                 if fahr:
@@ -1627,8 +1661,9 @@ class PipelineWorker(QtCore.QThread):
                                 gks_dets=[],
                                 track_skeleton=track_skeleton,
                                 track_bounds=track_bounds,
-                                track_sample_distance=300,
-                                track_search_radius=500
+                                track_sample_distance=self.config.spatial.track_sample_distance if self.config else 300,
+                                track_search_radius=self.config.spatial.track_search_radius if self.config else 500,
+                                config=self.config
                             )
                         # ========================================
                         # Apply result
@@ -1659,16 +1694,26 @@ class PipelineWorker(QtCore.QThread):
                                 'angle_raw': row.get('angle_raw', row.get('angle', 0.0))
                             }
 
+                            # Get relaxed/nearest params from config
+                            sp = self.config.spatial if self.config else None
+                            relaxed_dx = sp.signal_gks_relaxed_dx_tolerance if sp else 200
+                            relaxed_dy_max = sp.signal_gks_relaxed_dy_max if sp else 600
+                            relaxed_angle = sp.signal_gks_relaxed_angle_tolerance if sp else 25
+                            nearest_max_dist = sp.signal_gks_nearest_max_distance if sp else 800
+                            nearest_angle = sp.signal_gks_nearest_angle_tolerance if sp else 30
+                            gks_dy_min = sp.signal_gks_dy_min if sp else 30
+
                             if DEBUG_TRACK:
-                                print(f"Trying TIER 3 (GKS relaxed, dy≤600px)...")
+                                print(f"Trying TIER 3 (GKS relaxed, dy≤{relaxed_dy_max}px)...")
                             tier3_result, tier3_gks = detect_fahrtrichtung_gks_relaxed(
                                 signal_det_tier34,
                                 page_gks_dets,
                                 used_gks_ids=None,  # Not tracking used GKS for now
-                                dx_tolerance=200,
-                                dy_min=30,
-                                dy_max=600,
-                                angle_tolerance=25
+                                dx_tolerance=relaxed_dx,
+                                dy_min=gks_dy_min,
+                                dy_max=relaxed_dy_max,
+                                angle_tolerance=relaxed_angle,
+                                config=self.config
                             )
 
                             if tier3_result:
@@ -1679,17 +1724,18 @@ class PipelineWorker(QtCore.QThread):
                                     print(f"SUCCESS: Fahrtrichtung '{tier3_result}' (gks_relaxed)")
                             else:
                                 # ========================================
-                                # TIER 4: Euclidean Nearest GKS (dist ≤ 800px)
+                                # TIER 4: Euclidean Nearest GKS (dist ≤ configured)
                                 # ========================================
                                 if DEBUG_TRACK:
-                                    print(f"Trying TIER 4 (Euclidean nearest, dist≤800px)...")
+                                    print(f"Trying TIER 4 (Euclidean nearest, dist≤{nearest_max_dist}px)...")
                                 tier4_result, tier4_gks = detect_fahrtrichtung_gks_nearest(
                                     signal_det_tier34,
                                     page_gks_dets,
                                     used_gks_ids=None,
-                                    max_distance=800,
-                                    dy_min=30,
-                                    angle_tolerance=30
+                                    max_distance=nearest_max_dist,
+                                    dy_min=gks_dy_min,
+                                    angle_tolerance=nearest_angle,
+                                    config=self.config
                                 )
 
                                 if tier4_result:

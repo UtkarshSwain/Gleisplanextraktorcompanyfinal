@@ -61,7 +61,7 @@ NAME_RULES_EXTRA = {
 }
 
 def find_nearest_track_perpendicular(signal_point, track_skeleton, signal_angle_raw,
-                                     track_bounds=None, max_distance=1500,
+                                     track_bounds=None, max_distance=None,
                                      is_angular=False, config: 'LayoutConfig' = None):
     """
     Cast rays perpendicular to signal orientation until hitting track.
@@ -94,6 +94,12 @@ def find_nearest_track_perpendicular(signal_point, track_skeleton, signal_angle_
     """
     # Get debug flag from config or use module default
     debug_track = config.debug_track if config is not None else DEBUG_TRACK
+
+    # Get spatial config values
+    sp = config.spatial if config else None
+    if max_distance is None:
+        max_distance = sp.track_perpendicular_max_distance if sp else 1500
+    track_window_size = sp.track_window_size if sp else 25
 
     x, y = signal_point
     h, w = track_skeleton.shape
@@ -158,27 +164,27 @@ def find_nearest_track_perpendicular(signal_point, track_skeleton, signal_angle_
             check_y = int(y + dist * dy_above)
             
             if 0 <= check_y < h and 0 <= check_x < w:
-                # Check window for track thickness (±25px)
-                x_min = max(0, check_x - 25)
-                x_max = min(w, check_x + 25)
-                y_min = max(0, check_y - 25)
-                y_max = min(h, check_y + 25)
-                
+                # Check window for track thickness (±window_size px)
+                x_min = max(0, check_x - track_window_size)
+                x_max = min(w, check_x + track_window_size)
+                y_min = max(0, check_y - track_window_size)
+                y_max = min(h, check_y + track_window_size)
+
                 # Check if track exists in window
                 if np.any(track_skeleton[y_min:y_max, x_min:x_max] > 0):
                     distance_above = dist  #  STOP - track found!
-        
+
         #  Check "below" direction (perpendicular to signal)
         if distance_below is None and dist <= max_distance_below:
             check_x = int(x + dist * dx_below)
             check_y = int(y + dist * dy_below)
-            
+
             if 0 <= check_y < h and 0 <= check_x < w:
-                # Check window for track thickness (±25px)
-                x_min = max(0, check_x - 25)
-                x_max = min(w, check_x + 25)
-                y_min = max(0, check_y - 25)
-                y_max = min(h, check_y + 25)
+                # Check window for track thickness (±window_size px)
+                x_min = max(0, check_x - track_window_size)
+                x_max = min(w, check_x + track_window_size)
+                y_min = max(0, check_y - track_window_size)
+                y_max = min(h, check_y + track_window_size)
                 
                 # Check if track exists in window
                 if np.any(track_skeleton[y_min:y_max, x_min:x_max] > 0):
@@ -736,12 +742,17 @@ def link_anchor_to_coord(anchor, coords, config: 'LayoutConfig' = None, learned_
             avg_dy = sum(p[1] for p in patterns) / len(patterns)
             std_dx = (sum((p[0] - avg_dx)**2 for p in patterns) / len(patterns))**0.5 if len(patterns) > 1 else 100
             std_dy = (sum((p[1] - avg_dy)**2 for p in patterns) / len(patterns))**0.5 if len(patterns) > 1 else 50
-            
+
             if debug_angle:
                 print(f"Pattern: dx={avg_dx:.1f}±{std_dx:.1f}, dy={avg_dy:.1f}±{std_dy:.1f}")
-            
-            search_dx = max(3 * std_dx, 150)
-            search_dy = max(3 * std_dy, 80)
+
+            # Get adaptive search params from config
+            adapt_dx_mult = sp.adaptive_search_dx_multiplier if config else 3.0
+            adapt_dx_min = sp.adaptive_search_dx_minimum if config else 150
+            adapt_dy_mult = sp.adaptive_search_dy_multiplier if config else 3.0
+            adapt_dy_min = sp.adaptive_search_dy_minimum if config else 80
+            search_dx = max(adapt_dx_mult * std_dx, adapt_dx_min)
+            search_dy = max(adapt_dy_mult * std_dy, adapt_dy_min)
             
             adaptive_candidates = []
             for c in coords:
@@ -1546,7 +1557,7 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
     # ========================================
     if spatial_threshold is None:
         signal_rows = [r for r in all_rows if r.get('cls') == 'signal' and r.get('anchor_text')]
-        spatial_threshold = estimate_spatial_threshold(signal_rows)
+        spatial_threshold = estimate_spatial_threshold(signal_rows, config=config)
     else:
         if debug_linking:
             print(f" Using manual threshold: {spatial_threshold}px")
@@ -2077,49 +2088,57 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
 
     return result
 
-def estimate_spatial_threshold(signal_rows: List[dict]) -> int:
+def estimate_spatial_threshold(signal_rows: List[dict], config: 'LayoutConfig' = None) -> int:
     """
     Auto-detect spatial threshold based on signal Y-position distribution.
     Detects multi-section plans by finding large gaps in Y-positions.
-    
+
     Returns:
-        Threshold in pixels (1000-2500)
+        Threshold in pixels (configurable min/max, default 1000-2500)
     """
+    # Get config values or use defaults
+    sp = config.spatial if config else None
+    single_section_threshold = sp.spatial_threshold_single_section if sp else 1000
+    gap_multiplier = sp.spatial_threshold_gap_multiplier if sp else 3.0
+    section_gap_min = sp.spatial_threshold_section_gap_min if sp else 1000
+    section_gap_max = sp.spatial_threshold_section_gap_max if sp else 2500
+    default_threshold = (section_gap_min + section_gap_max) // 2  # 1500 default
+
     if len(signal_rows) < 10:
         if debug_linking:
-            print(f"Few signals ({len(signal_rows)}) → using default threshold: 1500px")
-        return 1500
-    
+            print(f"Few signals ({len(signal_rows)}) → using default threshold: {default_threshold}px")
+        return default_threshold
+
     # Get all Y-positions (use center Y)
     y_positions = sorted([
-        r.get('cy', (r['ay1'] + r['ay2']) / 2) 
+        r.get('cy', (r['ay1'] + r['ay2']) / 2)
         for r in signal_rows
     ])
-    
+
     # Calculate gaps between consecutive signals
     gaps = [y_positions[i+1] - y_positions[i] for i in range(len(y_positions)-1)]
-    
+
     if not gaps:
-        return 1500
-    
+        return default_threshold
+
     # Find median gap (typical spacing within a section)
     median_gap = sorted(gaps)[len(gaps)//2]
-    
+
     # Find large gaps (potential section boundaries)
-    # Large gap = 3x median gap
-    large_gaps = [g for g in gaps if g > median_gap * 3]
-    
+    # Large gap = multiplier * median gap
+    large_gaps = [g for g in gaps if g > median_gap * gap_multiplier]
+
     if large_gaps:
         # Multi-section plan detected
         avg_section_gap = sum(large_gaps) / len(large_gaps)
-        
+
         # Threshold = 40% of average section gap
         # This ensures we merge within sections but not across sections
         threshold = int(avg_section_gap * 0.4)
-        
-        # Clamp to reasonable range
-        threshold = max(1000, min(2500, threshold))
-        
+
+        # Clamp to reasonable range from config
+        threshold = max(section_gap_min, min(section_gap_max, threshold))
+
         if debug_linking:
             print(f"Multi-section plan detected:")
             print(f"- {len(large_gaps)} section boundaries found")
@@ -2131,7 +2150,7 @@ def estimate_spatial_threshold(signal_rows: List[dict]) -> int:
     else:
         # Single-section plan
         # Use smaller threshold for tighter merging
-        threshold = 1000
+        threshold = single_section_threshold
         if debug_linking:
             print(f"Single-section plan detected:")
             print(f"- Median signal spacing: {median_gap:.0f}px")
@@ -2146,6 +2165,7 @@ def detect_haltepunkt_signal_group(haltepunkt_det, signal_dets, coord_dets,
                                      dy_coord_min=20,
                                      dy_coord_max=150,
                                      dx_tolerance=100,
+                                     angle_tolerance=20.0,
                                      config: 'LayoutConfig' = None):
     """
     Detect if a signal and coordinate are associated with a haltepunkt.
@@ -2161,6 +2181,7 @@ def detect_haltepunkt_signal_group(haltepunkt_det, signal_dets, coord_dets,
         dy_coord_min: 20px - Minimum vertical separation to coordinate
         dy_coord_max: 150px - Maximum vertical separation to coordinate
         dx_tolerance: 100px - How far left/right elements can be
+        angle_tolerance: 20.0° - Max angle difference for angular haltepunkt
         config: LayoutConfig with debug flags (optional)
 
     Returns:
@@ -2202,7 +2223,7 @@ def detect_haltepunkt_signal_group(haltepunkt_det, signal_dets, coord_dets,
             angle_diff = abs(haltepunkt_angle - signal_angle)
             if angle_diff > 180:
                 angle_diff = 360 - angle_diff
-            if angle_diff > 20:
+            if angle_diff > angle_tolerance:
                 continue
 
         # Check if signal is above or below

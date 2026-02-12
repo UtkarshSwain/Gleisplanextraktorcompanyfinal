@@ -70,7 +70,7 @@ CLASS_ID_PATTERNS = {
 
 NUMERIC_OK = {"gks_gesteuert", "gks_festkodiert", "weichen_block", "prellbock"}
 
-# Default cardinal params
+# Default cardinal params (horizontal/vertical text)
 CARDINAL_PARAMS = {
     "detection_padding": {
         "coordinate": 4, "signal": 4, "weichenende": 8, "haltetafel": 4,
@@ -81,6 +81,18 @@ CARDINAL_PARAMS = {
         "coordinate": (1.0, 1.0), "signal": (1.0, 1.0),
         "gks_gesteuert": (0.6, 0.6), "gks_festkodiert": (0.6, 0.6),
         "weichen_block": (1.1, 1.0),
+    }
+}
+
+# Default angular params (rotated text)
+ANGULAR_PARAMS = {
+    "detection_padding": {
+        "coordinate": 4, "signal": 8, "weichenende": 4, "haltetafel": 4,
+        "prellbock": 4, "gks_gesteuert": 6, "gks_festkodiert": 6,
+    },
+    "expansion_factor": {
+        "coordinate": (1.0, 1.0), "signal": (1.0, 1.05),
+        "gks_gesteuert": (0.75, 0.75), "gks_festkodiert": (0.75, 0.75),
     }
 }
 
@@ -113,7 +125,7 @@ def configure_from_config(config: 'LayoutConfig') -> None:
     """
     global DEBUG_ANGLE_ROUTING, DEBUG_OCR, DEBUG_CUSTOM_SYMBOLS, DEBUG_SIGNALS
     global SIG_LINE_THICK, SIG_USE_TIGHTEN, SIGNAL_TEXT_HEIGHT_HINT, SIG_SCORE_MIN
-    global TESSERACT_PATH, COORD_RE, CLASS_ID_PATTERNS, NUMERIC_OK, CARDINAL_PARAMS
+    global TESSERACT_PATH, COORD_RE, CLASS_ID_PATTERNS, NUMERIC_OK, CARDINAL_PARAMS, ANGULAR_PARAMS
 
     if config is None:
         return
@@ -132,11 +144,17 @@ def configure_from_config(config: 'LayoutConfig') -> None:
         SIGNAL_TEXT_HEIGHT_HINT = getattr(ocr, 'signal_text_height_hint', SIGNAL_TEXT_HEIGHT_HINT)
         SIG_SCORE_MIN = getattr(ocr, 'sig_score_min', SIG_SCORE_MIN)
 
-        # Cardinal params from config
-        if hasattr(ocr, 'cardinal_detection_padding'):
-            CARDINAL_PARAMS["detection_padding"] = ocr.cardinal_detection_padding
-        if hasattr(ocr, 'cardinal_expansion_factor'):
-            CARDINAL_PARAMS["expansion_factor"] = ocr.cardinal_expansion_factor
+        # Cardinal params from config (horizontal/vertical text)
+        if hasattr(ocr, 'cardinal_detection_padding') and ocr.cardinal_detection_padding:
+            CARDINAL_PARAMS["detection_padding"].update(ocr.cardinal_detection_padding)
+        if hasattr(ocr, 'cardinal_expansion_factor') and ocr.cardinal_expansion_factor:
+            CARDINAL_PARAMS["expansion_factor"].update(ocr.cardinal_expansion_factor)
+
+        # Angular params from config (rotated text)
+        if hasattr(ocr, 'angular_detection_padding') and ocr.angular_detection_padding:
+            ANGULAR_PARAMS["detection_padding"].update(ocr.angular_detection_padding)
+        if hasattr(ocr, 'angular_expansion_factor') and ocr.angular_expansion_factor:
+            ANGULAR_PARAMS["expansion_factor"].update(ocr.angular_expansion_factor)
 
     # Validation patterns
     if hasattr(config, 'validation'):
@@ -2126,14 +2144,18 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
     w = float(anchor.get("obb_w", anchor["x2"] - anchor["x1"]))
     h = float(anchor.get("obb_h", anchor["y2"] - anchor["y1"]))
     box_min_side = min(w, h)
-    
-    #  GENEROUS PADDING for angular boxes (to capture all digits)
+
+    # Get class-specific angular padding from config, with adaptive scaling
+    pad_dict = ANGULAR_PARAMS["detection_padding"]
+    base_pad = pad_dict.get(cls_name, 8)
+
+    # Apply adaptive scaling based on box size (generous for angular text)
     if box_min_side < 70:
-        pad = 18  # Very generous
+        pad = int(base_pad * 3.0)  # Very generous for small boxes
     elif box_min_side < 100:
-        pad = 16
+        pad = int(base_pad * 2.5)
     else:
-        pad = 14
+        pad = int(base_pad * 2.0)
     
     if DEBUG_ANGLE_ROUTING:
         print(f"\n GKS ANGULAR BOX: {w:.0f}×{h:.0f}px | angles: raw={ang_raw:.1f}° norm={ang_norm:.1f}°")

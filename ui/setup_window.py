@@ -1123,9 +1123,15 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         # Track detection is now always enabled for better user experience
         detect_tracks = True  # Always detect tracks automatically
 
-        # Load the selected profile configuration
+        # Load the selected profile configuration (required for YOLO detection)
         if not self._load_profile():
-            self.on_status("Warnung: Profil konnte nicht geladen werden, verwende Standardwerte")
+            self.on_status("Fehler: Profil konnte nicht geladen werden - Analyse abgebrochen")
+            QtWidgets.QMessageBox.critical(
+                self, "Profil-Fehler",
+                f"Das Profil '{self.profile_path}' konnte nicht geladen werden.\n\n"
+                "Die Analyse kann ohne gültiges Profil nicht gestartet werden."
+            )
+            return
 
         self.worker = PipelineWorker(
             self.pdf_path,

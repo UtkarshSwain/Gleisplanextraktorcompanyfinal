@@ -270,7 +270,7 @@ class RuleBasedValidator(IValidator):
     def validate(self, text: str, class_name: str, config: 'LayoutConfig' = None) -> bool:
         """Validate using regex patterns."""
         import re
-        pattern = self.get_pattern(class_name)
+        pattern = self.get_pattern(class_name, config)
         if pattern is None:
             return True  # No pattern means no validation required
         try:
@@ -278,14 +278,21 @@ class RuleBasedValidator(IValidator):
         except Exception:
             return False
 
-    def get_pattern(self, class_name: str) -> Optional[str]:
-        """Get pattern from default or config."""
-        patterns = {
+    def get_pattern(self, class_name: str, config: 'LayoutConfig' = None) -> Optional[str]:
+        """Get pattern from config or use defaults."""
+        # Try config patterns first
+        if config and config.validation and config.validation.class_id_patterns:
+            pattern = config.validation.class_id_patterns.get(class_name)
+            if pattern:
+                return pattern
+
+        # Fall back to defaults
+        default_patterns = {
             "signal": r"^[A-ZÄÖÜ]{1,4}\d{1,4}$",
             "gks_gesteuert": r"^\d{3,4}$",
             "gks_festkodiert": r"^\d{3,4}$",
         }
-        return patterns.get(class_name)
+        return default_patterns.get(class_name)
 
     @property
     def name(self) -> str:

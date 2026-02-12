@@ -207,6 +207,11 @@ detection:
   legend_strip_width_percent: 12
   legend_strip_max_pixels: 4200
 
+  # Title block margins (for track detection)
+  title_block_margin_height: 100  # when legend strip is excluded
+  title_block_margin_height_default: 25  # when legend strip is NOT excluded
+  title_block_margin_width_default: 8  # when legend strip is NOT excluded
+
   # Test-time augmentation
   use_tta: true
   tta_scales: [1.0]
@@ -332,7 +337,7 @@ spatial:
   haltetafel_gks_dy_tolerance: 100
   haltetafel_gks_dx_tolerance: 300
 
-  # Signal-GKS linking (Fahrtrichtung detection)
+  # Signal-GKS linking (Fahrtrichtung detection) - Standard mode
   signal_gks_max_distance: 250
   signal_gks_dy_min: 30
   signal_gks_dy_max: 200
@@ -340,9 +345,20 @@ spatial:
   signal_gks_dx_tolerance_right: 120
   signal_gks_angle_tolerance: 20.0
 
+  # Signal-GKS linking - Relaxed mode (fallback)
+  signal_gks_relaxed_dx_tolerance: 200
+  signal_gks_relaxed_dy_max: 600
+  signal_gks_relaxed_angle_tolerance: 25.0
+
+  # Signal-GKS linking - Nearest mode (last resort)
+  signal_gks_nearest_max_distance: 800
+  signal_gks_nearest_angle_tolerance: 30.0
+
   # Track perpendicular detection
   track_perpendicular_max_distance: 1500
   track_window_size: 25
+  track_search_radius: 500
+  track_sample_distance: 200
 
   # Haltepunkt-Signal-Coordinate clustering
   haltepunkt_cluster_max_distance: 250
@@ -351,6 +367,10 @@ spatial:
   haltepunkt_coord_dy_min: 20
   haltepunkt_coord_dy_max: 150
   haltepunkt_dx_tolerance: 100
+  haltepunkt_angle_tolerance: 20.0  # Max angle difference for angular haltepunkt
+
+  # Isolierstoß fallback linking
+  isolierstoss_fallback_radius: 300
 
   # Adaptive pattern learning
   adaptive_search_dx_multiplier: 3.0
