@@ -21,6 +21,17 @@ from typing import List, Dict, Optional
 import os
 
 # ============================================================================
+# VERSION INFO
+# ============================================================================
+__version__ = "1.0.0"
+__author__ = "Utkarsh Swain"
+__email__ = ""  # Add your email if desired
+__created__ = "2024"
+__updated__ = "2026"
+__company__ = "Siemens Mobility GmbH"
+__app_name__ = "RailDoc Studio - Gleisplan-Modul"
+
+# ============================================================================
 # SYSTEM SETTINGS
 # ============================================================================
 

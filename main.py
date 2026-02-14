@@ -23,11 +23,12 @@ from utils.helpers import _is_deleted
 from ui.themes import DARK_QSS, LIGHT_QSS
 import sys
 from database_sqlite import init_db
+from config import __version__, __author__, __company__, __created__, __updated__, __app_name__
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RailDoc Studio - Gleisplan-Modul")
+        self.setWindowTitle(f"{__app_name__} v{__version__}")
 
         # Adaptive window sizing for different DPI settings
         w, h = get_adaptive_window_size(300, 200, min_width=300, min_height=200)
@@ -43,9 +44,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_setup_window()
 
     def _create_menus(self):
-        mb = self.menuBar(); view = mb.addMenu("Ansicht")
+        mb = self.menuBar()
+
+        # View menu
+        view = mb.addMenu("Ansicht")
         view.addAction("Dunkles Thema", lambda: self._set_theme("dark"))
         view.addAction("Helles Thema", lambda: self._set_theme("light"))
+
+        # Help menu
+        help_menu = mb.addMenu("Hilfe")
+        help_menu.addAction("Über...", self._show_about_dialog)
+
+    def _show_about_dialog(self):
+        """Show the About dialog with version and author information."""
+        about_text = f"""
+        <h2>{__app_name__}</h2>
+        <p><b>Version:</b> {__version__}</p>
+        <p><b>Entwickelt von:</b> {__author__}</p>
+        <p><b>Unternehmen:</b> {__company__}</p>
+        <p><b>Erstellt:</b> {__created__}</p>
+        <p><b>Aktualisiert:</b> {__updated__}</p>
+        <hr>
+        <p><i>Intelligente Eisenbahndokument-Analyse</i></p>
+        <p>Automatische Erkennung und Extraktion von Symbolen
+        aus Gleisplänen mittels YOLOv8-OBB und PaddleOCR.</p>
+        """
+        QtWidgets.QMessageBox.about(self, f"Über {__app_name__}", about_text)
 
     def _set_theme(self, theme: str):
             self._current_theme = theme
