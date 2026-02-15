@@ -71,7 +71,7 @@ DEBUG_YOLO = False
 DEBUG_UI_BBOX = False
 
 # Enables debug output for comparison engine (Hungarian algorithm matching, score calculations, element pairing decisions).
-DEBUG_COMPARISON = True
+DEBUG_COMPARISON = False
 
 # Debug output helper - writes to debug.txt
 _DEBUG_FILE = None
