@@ -66,7 +66,19 @@ def parse_weichen_block(text: str) -> dict:
     
     # Remaining lines are coordinates
     coordinates = [line.strip() for line in lines[1:] if line.strip()]
-    
+
+    # Clean OCR errors: O/Q misread as 0 in decimal numbers
+    # Pattern matches: digits/Os + comma/period + digits/Os (e.g., "O,0452" or "0,OOOO")
+    import re
+    def _clean_weichen_coord(coord: str) -> str:
+        if not coord:
+            return coord
+        def fix_os(match):
+            return re.sub(r'[OoQq]', '0', match.group(0))
+        return re.sub(r'[0-9OoQq]+[,.][0-9OoQq]+', fix_os, coord)
+
+    coordinates = [_clean_weichen_coord(c) for c in coordinates]
+
     return {
         'id': block_id,
         'coordinates': coordinates
