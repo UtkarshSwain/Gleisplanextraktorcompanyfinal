@@ -665,7 +665,6 @@ def link_anchor_to_coord(anchor, coords, config: 'LayoutConfig' = None, learned_
     # Step-wise fallback for specific classes (weichengruppenende, weichenende)
     # Only searches in AVAILABLE coordinates (not occupied by other classes)
     if best is None:
-        fallback_steps = rule.get("fallback_dy_steps", [])
         for step_multiplier in fallback_steps:
             expanded_dy_max = dy_max_base * step_multiplier
 
