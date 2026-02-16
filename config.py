@@ -287,7 +287,7 @@ LINK_RULES = {
     "weichenende": dict(mode="either", dx_multiplier=3.0, prefer_horizontal=True,
                         fallback_dy_steps=[1.5, 2.0, 2.5]),
     "prellbock": dict(mode="right_or_below", dx_multiplier=2.0, prefer_horizontal=True),
-    "haltetafel": dict(mode="either", dx_multiplier=2.0),
+    "haltetafel": dict(mode="either", dx_multiplier=2.0, fallback_dy_steps=[2.0, 2.5]),
     "weichengruppenende": dict(mode="either", dx_multiplier=3.0, prefer_horizontal=True,
                               search_left=True, fallback_dy_steps=[1.5, 2.0, 2.5, 3.0])
 }
