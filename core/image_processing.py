@@ -29,6 +29,7 @@ import numpy as np
 import cv2
 from PIL import Image
 import math
+import re
 from PyQt5 import QtCore, QtGui, QtWidgets
 from utils.helpers import _dist_to_cardinal
 
@@ -64,11 +65,23 @@ def parse_weichen_block(text: str) -> dict:
     
     # Remaining lines are coordinates
     coordinates = [line.strip() for line in lines[1:] if line.strip()]
-    
+
+    # Clean OCR errors - O/Q misread as 0 in decimal numbers
+    def _clean_weichen_coord(coord: str) -> str:
+        if not coord:
+            return coord
+        def fix_os(match):
+            return re.sub(r'[OoQq]', '0', match.group(0))
+        return re.sub(r'[0-9OoQq]+[,.][0-9OoQq]+', fix_os, coord)
+
+    coordinates = [_clean_weichen_coord(c) for c in coordinates]
+
     return {
         'id': block_id,
         'coordinates': coordinates
     }
+
+
 def obb_xywhr_to_polygon(cx, cy, w, h, theta_rad):
     c = math.cos(theta_rad)
     s = math.sin(theta_rad)

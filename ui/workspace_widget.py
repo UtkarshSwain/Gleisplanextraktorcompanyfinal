@@ -1228,6 +1228,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.undo_stack.clear()
             self.redo_stack.clear()
 
+            # CLEAR BGR ARRAY CACHE - critical when switching between plans!
+            self.page_bgr_arrays = {}
+            self.current_page_bgr_array = None
+            print(f"  Cleared BGR array cache for new plan load")
+
             # Load data into workspace
             self.df_all = self._ensure_hidden_column(df_all.copy())
 
@@ -2248,8 +2253,44 @@ class WorkspaceWidget(QtWidgets.QWidget):
         if not items:
             return
         normal, hi, hov, _, _ = self._get_theme_colors()
-        color = hov if hover else (hi if highlight else normal)
-        pen = QtGui.QPen(color, 3 if (highlight or hover) else 2)
+
+        # Determine color based on state
+        if hover:
+            color = hov
+            pen_width = 3
+        elif highlight:
+            color = hi
+            pen_width = 3
+        else:
+            # Not highlighted - preserve confidence colors if enabled
+            if hasattr(self, 'show_confidence_colors') and self.show_confidence_colors:
+                df_page = self.page_dfs.get(self.current_page)
+                if df_page is not None:
+                    row_data = df_page[df_page['row_id'] == row_id]
+                    if not row_data.empty:
+                        conf = row_data.iloc[0].get('conf', 0.0)
+                        is_custom = row_data.iloc[0].get('is_custom_symbol', False) == True
+
+                        if is_custom:
+                            color = QtGui.QColor(255, 0, 255)  # Magenta
+                        elif conf >= 0.8:  # Match threshold in graphics rendering
+                            color = QtGui.QColor(0, 255, 0)  # Green
+                        elif conf >= 0.6:
+                            color = QtGui.QColor(255, 255, 0)  # Yellow
+                        else:
+                            color = QtGui.QColor(255, 50, 0)  # Red-orange
+                        pen_width = 4
+                    else:
+                        color = normal
+                        pen_width = 2
+                else:
+                    color = normal
+                    pen_width = 2
+            else:
+                color = normal
+                pen_width = 2
+
+        pen = QtGui.QPen(color, pen_width)
         for it in list(items):
             try:
                 if isinstance(it, (QtWidgets.QGraphicsRectItem, QtWidgets.QGraphicsPolygonItem)):
@@ -3376,23 +3417,56 @@ class WorkspaceWidget(QtWidgets.QWidget):
         return None
     
     def _reconstruct_det_from_row(self, row: pd.Series) -> dict:
-        """Rebuild detection dict from row"""
+        """Rebuild detection dict from row - handles NaN values safely"""
         if row.get("cls") == "coordinate":
             x1, y1, x2, y2 = row.get("cx1"), row.get("cy1"), row.get("cx2"), row.get("cy2")
         else:
             x1, y1, x2, y2 = row.get("ax1"), row.get("ay1"), row.get("ax2"), row.get("ay2")
-        
+
+        # Handle NaN/None values - convert to safe defaults
+        x1 = 0 if pd.isna(x1) else float(x1)
+        y1 = 0 if pd.isna(y1) else float(y1)
+        x2 = x1 + 10 if pd.isna(x2) else float(x2)
+        y2 = y1 + 10 if pd.isna(y2) else float(y2)
+
+        angle = row.get("angle")
+        angle = 0.0 if pd.isna(angle) else float(angle)
+        angle_raw = row.get("angle_raw", angle)
+        angle_raw = angle if pd.isna(angle_raw) else float(angle_raw)
+
+        # Handle poly field
+        poly_val = row.get("poly")
+        if poly_val is None or (isinstance(poly_val, float) and pd.isna(poly_val)):
+            poly = None
+        elif isinstance(poly_val, np.ndarray):
+            poly = poly_val
+        elif isinstance(poly_val, (list, tuple)):
+            poly = np.array(poly_val)
+        else:
+            poly = None
+
+        # Handle obb fields
+        obb_cx = row.get("obb_cx")
+        obb_cy = row.get("obb_cy")
+        obb_w = row.get("obb_w")
+        obb_h = row.get("obb_h")
+
+        obb_cx = (x1 + x2) / 2 if pd.isna(obb_cx) else float(obb_cx)
+        obb_cy = (y1 + y2) / 2 if pd.isna(obb_cy) else float(obb_cy)
+        obb_w = (x2 - x1) if pd.isna(obb_w) else float(obb_w)
+        obb_h = (y2 - y1) if pd.isna(obb_h) else float(obb_h)
+
         return {
             "cls": row.get("cls"),
             "name": row.get("cls"),
             "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-            "angle": row.get("angle"),
-            "angle_raw": row.get("angle_raw", row.get("angle")),
-            "obb_cx": row.get("obb_cx"),
-            "obb_cy": row.get("obb_cy"),
-            "obb_w": row.get("obb_w"),
-            "obb_h": row.get("obb_h"),
-            "poly": np.array(row.get("poly")) if isinstance(row.get("poly"), (list, tuple)) else None,
+            "angle": angle,
+            "angle_raw": angle_raw,
+            "obb_cx": obb_cx,
+            "obb_cy": obb_cy,
+            "obb_w": obb_w,
+            "obb_h": obb_h,
+            "poly": poly,
         }
     
     def on_rerun_ocr(self, row_id: int, ocr_type: str):
@@ -3922,10 +3996,14 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         print(f"Updated label to: '{label}'")
                         break
 
-                #  Also update the spec so label persists on page re-render
+                #  Also update the spec so label AND rect persist on page re-render
                 specs = self.all_page_row_specs.get(page, {})
                 if row_id in specs:
                     specs[row_id]['label'] = label
+                    # CRITICAL: Update the rect coordinates in spec to prevent duplicate boxes!
+                    if not specs[row_id].get('is_poly', False):
+                        specs[row_id]['rect'] = (int(x), int(y), int(w), int(h))
+                        print(f" Updated spec rect to ({x:.0f}, {y:.0f}, {w:.0f}, {h:.0f})")
                     print(f" Updated spec label for persistence")
 
             #  FIX: Deselect the graphics item to hide resize handles and return to normal appearance

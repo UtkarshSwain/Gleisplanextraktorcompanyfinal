@@ -1360,12 +1360,17 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
             self.on_status(f"Arbeitsbereich '{pending['layout_name']}' mit {len(saved_df)} Erkennungen geladen!")
 
+            # Copy arrays to prevent reference sharing between workspaces
+            page_base_pix_copy = dict(self._page_base_pix) if self._page_base_pix else {}
+            page_bgr_arrays_copy = {k: v.copy() if hasattr(v, 'copy') else v
+                                    for k, v in self._page_bgr_arrays.items()} if self._page_bgr_arrays else {}
+
             # Emit with saved data, from_database=True
             self.processing_done.emit(
                 saved_df,
-                self._page_base_pix,
+                page_base_pix_copy,
                 {},  # page_dfs will be rebuilt in workspace widget
-                self._page_bgr_arrays,
+                page_bgr_arrays_copy,
                 pending['track_skeleton'],
                 None,  # No exception
                 True,  # from_database=True
@@ -1375,7 +1380,13 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         else:
             # Normal analysis completed
             self.on_status("Analyse abgeschlossen.")
-            self.processing_done.emit(df_all, self._page_base_pix, page_dfs, self._page_bgr_arrays, track_skeleton, exception, False, uncertain_detections or [], None)  # from_database=False, no learned_patterns for fresh analysis
+
+            # Copy arrays to prevent reference sharing between workspaces
+            page_base_pix_copy = dict(self._page_base_pix) if self._page_base_pix else {}
+            page_bgr_arrays_copy = {k: v.copy() if hasattr(v, 'copy') else v
+                                    for k, v in self._page_bgr_arrays.items()} if self._page_bgr_arrays else {}
+
+            self.processing_done.emit(df_all, page_base_pix_copy, page_dfs, page_bgr_arrays_copy, track_skeleton, exception, False, uncertain_detections or [], None)  # from_database=False, no learned_patterns for fresh analysis
 
         # Clean up worker after processing is done to allow running another analysis
         self._cleanup_worker()
@@ -2109,12 +2120,17 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 }
                 return
 
+            # Copy arrays to prevent reference sharing between workspaces
+            page_base_pix_copy = dict(self._page_base_pix) if self._page_base_pix else {}
+            page_bgr_arrays_copy = {k: v.copy() if hasattr(v, 'copy') else v
+                                    for k, v in (self._page_bgr_arrays.items() if hasattr(self, '_page_bgr_arrays') and self._page_bgr_arrays else [])}
+
             # Emit the processing_done signal to transition to AuditingWindow
             self.processing_done.emit(
                 df_all,
-                self._page_base_pix,
+                page_base_pix_copy,
                 self._page_dfs if hasattr(self, '_page_dfs') else {},
-                self._page_bgr_arrays if hasattr(self, '_page_bgr_arrays') else {},
+                page_bgr_arrays_copy,
                 track_skeleton,
                 None,  # No exception
                 True,  # from_database=True

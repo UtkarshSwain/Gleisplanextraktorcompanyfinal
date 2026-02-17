@@ -162,12 +162,13 @@ classes:
 
   - name: "haltetafel"
     class_id: 10
-    confidence_threshold: 0.55
+    confidence_threshold: 0.81
     nms_threshold: 0.35
     requires_ocr: false
     linking_rule:
       mode: "either"
       dx_multiplier: 2.0
+      fallback_dy_steps: [2.0, 2.5]
 
   - name: "weichenende"
     class_id: 11
