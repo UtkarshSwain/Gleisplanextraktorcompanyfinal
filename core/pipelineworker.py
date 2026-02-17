@@ -86,7 +86,8 @@ CLASS_THRESH = {
 # Default class list
 CLASSES = list(CLASS_THRESH.keys())
 
-# Default linking rules
+# Default linking rules - fallback when config is not provided
+# These are overwritten by _configure_from_config() when a profile is loaded
 LINK_RULES = {
     "signal": {"mode": "below"},
     "gm_block": {"mode": "below"},
@@ -122,8 +123,10 @@ logger = logging.getLogger(__name__)
 # WORKER THREAD (with weighted progress + unified coordinate OCR)
 # ============================================================================
 
-NO_OCR_CLASSES = ["isolierstoß", "haltepunkt", "sverbinder", "weichenende", "weichengruppenende", "haltetafel"]
-FIXED_TEXT_CLASSES = {"gm_block": "GM","prellbock": "PB"}
+# These are now built from config in _configure_from_config()
+# Defaults for backward compatibility when no config provided
+NO_OCR_CLASSES = []  # Will be populated from config.classes where requires_ocr=False
+FIXED_TEXT_CLASSES = {}  # Will be populated from config.classes where fixed_text is set
 
 
 def convert_colors_to_black_for_yolo(bgr_image, sat_threshold=30):
@@ -232,6 +235,17 @@ class PipelineWorker(QtCore.QThread):
                     "block": cls_def.linking_rule.block,
                     "fallback_dy_steps": cls_def.linking_rule.fallback_dy_steps,
                 }
+
+        # Build FIXED_TEXT_CLASSES from config (classes with fixed_text defined)
+        # Must be built FIRST because NO_OCR_CLASSES excludes fixed_text classes
+        global NO_OCR_CLASSES, FIXED_TEXT_CLASSES
+        FIXED_TEXT_CLASSES = {c.name: c.fixed_text for c in config.classes
+                              if c.fixed_text is not None}
+
+        # Build NO_OCR_CLASSES from config (classes where requires_ocr=False AND no fixed_text)
+        # Classes with fixed_text are handled separately via FIXED_TEXT_CLASSES
+        NO_OCR_CLASSES = [c.name for c in config.classes
+                         if not c.requires_ocr and c.fixed_text is None]
 
         # Configure OCR module
         configure_ocr(config)

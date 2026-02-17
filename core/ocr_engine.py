@@ -96,7 +96,8 @@ ANGULAR_PARAMS = {
     }
 }
 
-# Default linking rules (used when config is not passed)
+# Default linking rules - fallback when config is not provided
+# These are overwritten by configure_from_config() when a profile is loaded
 LINK_RULES = {
     "signal": {"mode": "below"},
     "gm_block": {"mode": "below"},
@@ -112,6 +113,11 @@ LINK_RULES = {
     "weichengruppenende": {"mode": "either", "dx_multiplier": 3.0, "prefer_horizontal": True, "search_left": True},
 }
 
+# Decimal separator configuration (German uses comma, others may use dot)
+# Updated by configure_from_config() when a profile is loaded
+DECIMAL_SEP_INPUT = ","   # Character used in scanned documents
+DECIMAL_SEP_OUTPUT = "."  # Character to normalize to for float parsing
+
 
 def configure_from_config(config: 'LayoutConfig') -> None:
     """
@@ -126,6 +132,7 @@ def configure_from_config(config: 'LayoutConfig') -> None:
     global DEBUG_ANGLE_ROUTING, DEBUG_OCR, DEBUG_CUSTOM_SYMBOLS, DEBUG_SIGNALS
     global SIG_LINE_THICK, SIG_USE_TIGHTEN, SIGNAL_TEXT_HEIGHT_HINT, SIG_SCORE_MIN
     global TESSERACT_PATH, COORD_RE, CLASS_ID_PATTERNS, NUMERIC_OK, CARDINAL_PARAMS, ANGULAR_PARAMS
+    global LINK_RULES, DECIMAL_SEP_INPUT, DECIMAL_SEP_OUTPUT
 
     if config is None:
         return
@@ -165,11 +172,32 @@ def configure_from_config(config: 'LayoutConfig') -> None:
             CLASS_ID_PATTERNS.update(val.class_id_patterns)
         if val.numeric_ok_classes:
             NUMERIC_OK = set(val.numeric_ok_classes)
+        # Decimal separator configuration
+        if hasattr(val, 'decimal_separator_input'):
+            DECIMAL_SEP_INPUT = val.decimal_separator_input
+        if hasattr(val, 'decimal_separator_output'):
+            DECIMAL_SEP_OUTPUT = val.decimal_separator_output
 
     # Tesseract path
     if hasattr(config, 'poppler_path') and config.poppler_path:
         # Note: poppler_path might be used for tesseract on some systems
         pass
+
+    # Build LINK_RULES from config classes
+    if hasattr(config, 'classes') and config.classes:
+        LINK_RULES.clear()
+        for cls_def in config.classes:
+            if cls_def.linking_rule:
+                LINK_RULES[cls_def.name] = {
+                    "mode": cls_def.linking_rule.mode,
+                    "dx_multiplier": cls_def.linking_rule.dx_multiplier,
+                    "dy_multiplier": cls_def.linking_rule.dy_multiplier,
+                    "prefer_horizontal": cls_def.linking_rule.prefer_horizontal,
+                    "search_left": cls_def.linking_rule.search_left,
+                    "tilted_ok": cls_def.linking_rule.tilted_ok,
+                    "block": cls_def.linking_rule.block,
+                    "fallback_dy_steps": cls_def.linking_rule.fallback_dy_steps,
+                }
 
 
 # ============================================================================
@@ -791,7 +819,7 @@ def _clean_coordinate_overlap(text: str) -> str:
     bracket_complete_match = re.search(bracket_complete_pattern, text)
     
     if bracket_complete_match:
-        result = bracket_complete_match.group(0).replace(',', '.')
+        result = bracket_complete_match.group(0).replace(DECIMAL_SEP_INPUT, DECIMAL_SEP_OUTPUT)
         
         #  NOW clean trailing alphabet AFTER extraction
         result = re.sub(r'\s*[a-zA-Z]\s*$', '', result)
@@ -807,7 +835,7 @@ def _clean_coordinate_overlap(text: str) -> str:
     bracket_incomplete_match = re.search(bracket_incomplete_pattern, text)
     
     if bracket_incomplete_match:
-        result = bracket_incomplete_match.group(0).replace(',', '.')
+        result = bracket_incomplete_match.group(0).replace(DECIMAL_SEP_INPUT, DECIMAL_SEP_OUTPUT)
         
         # Add closing bracket if missing
         if ')' not in result:
@@ -827,7 +855,7 @@ def _clean_coordinate_overlap(text: str) -> str:
     simple_match = re.search(simple_pattern, text)
     
     if simple_match:
-        result = simple_match.group(0).replace(',', '.')
+        result = simple_match.group(0).replace(DECIMAL_SEP_INPUT, DECIMAL_SEP_OUTPUT)
         
         #  Clean trailing alphabet for simple coordinates too
         result = re.sub(r'\s*[a-zA-Z]\s*$', '', result)
@@ -928,8 +956,8 @@ def _fix_coordinate_brackets(text: str) -> str:
     
     original_text = text  #  Save for debug
     
-    # 1. Replace comma with dot (German decimal separator)
-    text = text.replace(',', '.')
+    # 1. Replace decimal separator (German uses comma, normalize to dot)
+    text = text.replace(DECIMAL_SEP_INPUT, DECIMAL_SEP_OUTPUT)
     
     # 2. Fix Gl. pattern - all variations: GI, G1, Gi, gi, g1, gI → Gl.
     text = re.sub(r'[Gg][Ii1l]\.?', 'Gl.', text)
@@ -1451,19 +1479,33 @@ def ocr_coordinate_unified(det: dict, bgr_color: np.ndarray, engine: str) -> str
 # SIGNAL OCR (with angle branching)
 # ============================================================================
 
+# Default signal pattern - overwritten by configure_from_config() when profile loaded
+# Includes German umlauts (Ä, Ö, Ü) by default, configurable via validation.class_id_patterns
 SIG_STRICT_RE = re.compile(r'^[A-ZÄÖÜ]{1,4}\s*\d{1,4}$')
 
 def _only_az09(s: str) -> str:
+    # Keep alphanumeric chars plus umlauts (for international support, extend as needed)
     t = ''.join(ch for ch in s.upper() if ch.isalnum() or ch in 'ÄÖÜ ')
     t = re.sub(r'\s+', ' ', t).strip()
     return t
 
 def _is_strict_signal_id(s: str) -> bool:
+    """Check if string matches signal ID pattern (uses configurable CLASS_ID_PATTERNS)."""
     ss = _only_az09(s)
+    # Use pattern from CLASS_ID_PATTERNS if available (updated by config)
+    signal_pattern = CLASS_ID_PATTERNS.get("signal")
+    if signal_pattern:
+        # Allow whitespace in the match by using a relaxed version
+        try:
+            relaxed_pattern = signal_pattern.replace(r'\d', r'\s*\d')
+            return bool(re.match(relaxed_pattern, ss))
+        except re.error:
+            pass
     return bool(SIG_STRICT_RE.match(ss))
 
 def _normalize_signal_digits(s: str) -> str:
     ss = _only_az09(s)
+    # Use a generic pattern that handles various signal formats
     m = re.match(r'^([A-ZÄÖÜ]{1,4})\s*([A-Z0-9]{1,4})$', ss)
     if not m:
         return ss

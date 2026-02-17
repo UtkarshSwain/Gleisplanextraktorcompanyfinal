@@ -562,14 +562,17 @@ class LayoutComparisonEngine:
         # ============================================================
 
         # OCR classes: Match by text + coordinate value
+        # These classes have meaningful anchor_text that identifies them
+        # Future: could use config.get_class_by_name(cls).requires_ocr
         if cls in {'signal', 'gks_festkodiert', 'gks_gesteuert'}:
             return self._match_ocr_element(row1, row2)
 
-        # Coordinate class: Match by coord_text
+        # Coordinate class: Match by coord_text (special class)
         elif cls == 'coordinate':
             return self._match_coordinate_element(row1, row2)
 
         # Non-OCR symbol classes: Match by SPATIAL POSITION + coord_value
+        # These are symbols identified by position rather than text
         else:
             return self._match_symbol_element(row1, row2)
 

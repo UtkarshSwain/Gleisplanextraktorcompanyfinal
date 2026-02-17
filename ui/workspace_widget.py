@@ -216,11 +216,12 @@ def calculate_row_risk_score(row: pd.Series, custom_symbol_config: dict = None) 
             risk += RISK_WEIGHTS['invalid_coordinate']
             factors.append(RISK_FACTOR_LABELS['invalid_coordinate'])
 
-    # Factor 5: GKS Contains Letters
-    if cls in ['gks_gesteuert', 'gks_festkodiert']:
-        gks_text = str(row.get('anchor_text', '')).strip()
-        if gks_text:
-            cleaned = gks_text.replace(' ', '').replace('-', '')
+    # Factor 5: Numeric-only class contains letters (e.g., GKS should be digits only)
+    # Uses NUMERIC_OK from config (updated by profile) instead of hardcoded list
+    if cls in NUMERIC_OK:
+        numeric_text = str(row.get('anchor_text', '')).strip()
+        if numeric_text:
+            cleaned = numeric_text.replace(' ', '').replace('-', '')
             if cleaned and not cleaned.isdigit():
                 risk += RISK_WEIGHTS['gks_letters']
                 factors.append(RISK_FACTOR_LABELS['gks_letters'])

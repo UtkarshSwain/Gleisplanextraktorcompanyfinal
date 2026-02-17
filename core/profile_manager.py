@@ -346,7 +346,9 @@ class ProfileManager:
             }),
             numeric_ok_classes=val_data.get('numeric_ok_classes', [
                 "gks_gesteuert", "gks_festkodiert", "weichen_block", "prellbock"
-            ])
+            ]),
+            decimal_separator_input=val_data.get('decimal_separator_input', ','),
+            decimal_separator_output=val_data.get('decimal_separator_output', '.')
         )
 
     @staticmethod

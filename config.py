@@ -254,7 +254,8 @@ YOLO_PREDICT_PARAMS = {
 }
 
 # ============================================================================
-# LINKING RULES
+# LINKING RULES - Fallback defaults (now primarily driven by YAML profiles)
+# These are kept for backward compatibility when no config is loaded
 # ============================================================================
 
 LINK_RULES = {

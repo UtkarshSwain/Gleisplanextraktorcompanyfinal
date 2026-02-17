@@ -264,6 +264,12 @@ class ValidationConfig:
         "gks_gesteuert", "gks_festkodiert", "weichen_block", "prellbock"
     ])
 
+    # Decimal separator for coordinates (German uses comma, others use dot)
+    # Input separator is what appears in the scanned document
+    # Output separator is what to normalize to (usually dot for float parsing)
+    decimal_separator_input: str = ","  # Character used in scanned documents
+    decimal_separator_output: str = "."  # Character to normalize to
+
     # Compiled regex patterns (populated by compile_regex_patterns)
     coordinate_re: Any = field(default=None, repr=False)
     compiled_class_patterns: Dict[str, Any] = field(default_factory=dict, repr=False)

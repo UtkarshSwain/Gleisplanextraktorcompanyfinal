@@ -51,7 +51,9 @@ try:
 except Exception:
     pass
 
-NAME_RULES_EXTRA = {
+# NAME_RULES_EXTRA is now config-driven via LayoutConfig.get_name_search_rule()
+# Default fallback for backward compatibility when no config provided
+NAME_RULES_EXTRA_DEFAULTS = {
     "gm_block": dict(inside=True, right=True, below=True),
     "weichen_block": dict(inside=True, right=True, below=True),
     "prellbock": dict(inside=True, right=True, below=True),
@@ -59,6 +61,30 @@ NAME_RULES_EXTRA = {
     "gks_festkodiert": dict(inside=True, left=True, right=True, below=True),
     "signal": dict(left=True, right=True, below=True, above=True),
 }
+
+
+def get_name_search_hints(class_name: str, config: 'LayoutConfig' = None) -> dict:
+    """
+    Get name search direction hints from config or defaults.
+
+    Args:
+        class_name: Symbol class name
+        config: LayoutConfig with name_search_rule per class (optional)
+
+    Returns:
+        dict with keys: inside, left, right, below, above (all bool)
+    """
+    if config is not None:
+        rule = config.get_name_search_rule(class_name)
+        return {
+            'inside': rule.inside,
+            'left': rule.left,
+            'right': rule.right,
+            'below': rule.below,
+            'above': rule.above
+        }
+    # Fallback to hardcoded defaults for backward compatibility
+    return NAME_RULES_EXTRA_DEFAULTS.get(class_name, {})
 
 def find_nearest_track_perpendicular(signal_point, track_skeleton, signal_angle_raw,
                                      track_bounds=None, max_distance=None,
@@ -297,7 +323,18 @@ def name_windows_for(anchor: dict, img_shape: Tuple[int, int, int], mode: str, c
         sverbinder_w_ratio, sverbinder_h_ratio = 0.9, 0.3
         signal_extended = 5.0
 
-    if anchor["name"] == "signal":
+    # Use signal multipliers for classes that require coordinate linking (config-driven)
+    # This replaces the hardcoded "signal" check
+    use_signal_multipliers = False
+    if config is not None:
+        cls_def = config.get_class_by_name(anchor["name"])
+        if cls_def and cls_def.requires_coordinate:
+            use_signal_multipliers = True
+    else:
+        # Fallback: use signal multipliers for "signal" class only (backward compat)
+        use_signal_multipliers = (anchor["name"] == "signal")
+
+    if use_signal_multipliers:
         dy = int(signal_dy_mult * ah)
         dx = int(signal_dx_mult * aw)
     else:
@@ -305,7 +342,7 @@ def name_windows_for(anchor: dict, img_shape: Tuple[int, int, int], mode: str, c
         dx = int(default_dx_mult * aw)
 
     win = []
-    hints = NAME_RULES_EXTRA.get(anchor["name"], {})
+    hints = get_name_search_hints(anchor["name"], config)
 
     if hints.get("inside", False):
         ix1 = x1 + int(inside_pad * aw)
@@ -355,7 +392,8 @@ def name_windows_for(anchor: dict, img_shape: Tuple[int, int, int], mode: str, c
         if sx2 > sx1 and sy2 > sy1:
             win.append((sx1, sy1, sx2, sy2))
 
-    if anchor["name"] == "signal":
+    # Extended search windows for classes requiring coordinate (replaces hardcoded "signal" check)
+    if use_signal_multipliers:
         rx1 = x2
         ry1 = max(0, y1 - int(ah))
         rx2 = min(W, x2 + int(signal_extended * aw))
@@ -1802,12 +1840,15 @@ def merge_duplicate_signals(all_rows: List[dict], track_skeleton=None, gks_dets=
 
                     if haltepunkt_coord:
                         try:
-                            halt_val = float(haltepunkt_coord.replace(',', '.'))
+                            # Use configurable decimal separator
+                            in_sep = config.validation.decimal_separator_input if config and hasattr(config.validation, 'decimal_separator_input') else ","
+                            out_sep = config.validation.decimal_separator_output if config and hasattr(config.validation, 'decimal_separator_output') else "."
+                            halt_val = float(haltepunkt_coord.replace(in_sep, out_sep))
                             best_coord = None
                             best_diff = 0
 
                             for c_inst in coord_only_instances:
-                                coord_val = float((c_inst.get('coord_text') or '0').replace(',', '.'))
+                                coord_val = float((c_inst.get('coord_text') or '0').replace(in_sep, out_sep))
                                 diff = abs(coord_val - halt_val)
                                 if debug_linking:
                                     print(f"Candidate: row_id={c_inst['row_id']}, coord={c_inst.get('coord_text')}, diff={diff:.4f}")
@@ -2433,7 +2474,14 @@ def parse_coord(text: str, config: 'LayoutConfig' = None):
             print(f"[parse_coord] NO MATCH: '{s}' (COORD_RE pattern failed)")
         return None, None
 
-    val = m.group(1).replace(",", ".")
+    # Use configurable decimal separator (German uses comma, others may use dot)
+    if config is not None and hasattr(config.validation, 'decimal_separator_input'):
+        input_sep = config.validation.decimal_separator_input
+        output_sep = config.validation.decimal_separator_output
+    else:
+        input_sep = ","  # Default: German format
+        output_sep = "."
+    val = m.group(1).replace(input_sep, output_sep)
     try:
         f = float(val)
     except:
