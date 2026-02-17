@@ -1,5 +1,5 @@
 # =============================================================================
-# Siemens Track Plans - Standard Profile
+# Wien Track Plans - Standard Profile
 # =============================================================================
 # This profile contains all parameters optimized for standard railway
 # layout plans scanned at 500 DPI.
@@ -11,9 +11,9 @@
 # Siemens Mobility GmbH
 # =============================================================================
 
-profile_name: "siemens_track_plans"
+profile_name: "wien_track_plans"
 profile_version: "1.0"
-description: "Siemens Gleispläne (A0, 500 DPI)"
+description: "Wien Gleispläne (A0, 500 DPI)"
 
 # Model configuration (optional - can be overridden at runtime)
 model_path: null

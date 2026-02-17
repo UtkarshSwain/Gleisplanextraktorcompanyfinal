@@ -457,7 +457,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
         self.combo_profile = QtWidgets.QComboBox()
         self.combo_profile.addItems([
-            "Siemens Gleispläne"
+            "Wien Gleispläne"
             # Future layout types will be added here
         ])
         self.combo_profile.setMinimumHeight(scale_value(36))
@@ -495,7 +495,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.combo_profile.currentIndexChanged.connect(self.on_profile_changed)
         profile_layout.addWidget(self.combo_profile)
 
-        self.lbl_profile = QtWidgets.QLabel("Siemens Gleispläne")
+        self.lbl_profile = QtWidgets.QLabel("Wien Gleispläne")
         self.lbl_profile.setStyleSheet(f"font-size: 8pt; font-weight: normal; color: #a0a4b8; padding: {scale_value(6)}px 0px;")
         self.lbl_profile.setAlignment(QtCore.Qt.AlignCenter)
         self.lbl_profile.setMinimumHeight(scale_value(24))
@@ -887,7 +887,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         """Handle profile/layout type selection change."""
         # Each layout type has its own profile with tuned parameters
         profile_map = {
-            0: ("profiles/siemens_track_plans.yaml", "Siemens Gleispläne"),
+            0: ("profiles/siemens_track_plans.yaml", "Wien Gleispläne"),
             # Future layout types:
             # 1: ("profiles/other_layout.yaml", "Other Layout Type"),
         }
