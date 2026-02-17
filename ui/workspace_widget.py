@@ -4082,10 +4082,14 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         print(f"Updated label to: '{label}'")
                         break
 
-                #  Also update the spec so label persists on page re-render
+                #  Also update the spec so label AND rect persist on page re-render
                 specs = self.all_page_row_specs.get(page, {})
                 if row_id in specs:
                     specs[row_id]['label'] = label
+                    # CRITICAL: Update the rect coordinates in spec to prevent duplicate boxes!
+                    if not specs[row_id].get('is_poly', False):
+                        specs[row_id]['rect'] = (int(x), int(y), int(w), int(h))
+                        print(f" Updated spec rect to ({x:.0f}, {y:.0f}, {w:.0f}, {h:.0f})")
                     print(f" Updated spec label for persistence")
 
             #  FIX: Deselect the graphics item to hide resize handles and return to normal appearance

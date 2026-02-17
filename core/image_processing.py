@@ -37,9 +37,12 @@ import numpy as np
 import cv2
 from PIL import Image
 import math
+import re
 from config import ZOOM_SIZE
 from PyQt5 import QtCore, QtGui, QtWidgets
 from utils.helpers import _dist_to_cardinal
+
+
 def parse_weichen_block(text: str) -> dict:
     """
     Parse weichen block text into ID and coordinates.
@@ -69,7 +72,6 @@ def parse_weichen_block(text: str) -> dict:
 
     # Clean OCR errors: O/Q misread as 0 in decimal numbers
     # Pattern matches: digits/Os + comma/period + digits/Os (e.g., "O,0452" or "0,OOOO")
-    import re
     def _clean_weichen_coord(coord: str) -> str:
         if not coord:
             return coord
@@ -83,6 +85,8 @@ def parse_weichen_block(text: str) -> dict:
         'id': block_id,
         'coordinates': coordinates
     }
+
+
 def obb_xywhr_to_polygon(cx, cy, w, h, theta_rad):
     c = math.cos(theta_rad)
     s = math.sin(theta_rad)
