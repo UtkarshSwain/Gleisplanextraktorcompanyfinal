@@ -121,6 +121,17 @@ TTA_FLIPS = [0, 1]            # No flip + horizontal flip
 TTA_MIN_VOTES = 1             # Minimum votes to keep detection (1 or 2)
 
 # ============================================================================
+# ALIASES & REMAPPING (must be before set_classes_from_model)
+# ============================================================================
+
+# Map incorrect model class names to correct German spellings
+ALIASES = {
+    "prellblock": "prellbock",           # Fix: extra 'l' removed
+    "endeweichen": "weichenende",         # Fix: word order corrected
+    "weichengruppeende": "weichengruppenende",  # Fix: missing 'n' added
+}
+
+# ============================================================================
 # CLASS DEFINITIONS
 # ============================================================================
 
@@ -144,24 +155,22 @@ def set_classes_from_model(model):
     global CLASSES, IDX
     names = getattr(model, "names", None)
     if isinstance(names, dict):
-        CLASSES = [names[i] for i in sorted(names.keys())]
+        raw_classes = [names[i] for i in sorted(names.keys())]
     elif isinstance(names, (list, tuple)):
-        CLASSES = list(names)
+        raw_classes = list(names)
     else:
         names2 = getattr(getattr(model, "model", None), "names", None)
         if isinstance(names2, dict):
-            CLASSES = [names2[i] for i in sorted(names2.keys())]
+            raw_classes = [names2[i] for i in sorted(names2.keys())]
         elif isinstance(names2, (list, tuple)):
-            CLASSES = list(names2)
+            raw_classes = list(names2)
         else:
             raise RuntimeError("Could not read class names from model weights.")
+
+    # Apply aliases to fix incorrect model class names
+    CLASSES = [ALIASES.get(n, n) for n in raw_classes]
     IDX = {n: i for i, n in enumerate(CLASSES)}
 
-# ============================================================================
-# ALIASES & REMAPPING
-# ============================================================================
-
-ALIASES = {}
 
 def _alias_name(n: str) -> str:
     """Apply class name aliases."""

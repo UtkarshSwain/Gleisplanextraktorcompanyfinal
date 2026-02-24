@@ -180,7 +180,7 @@ class OCRConfig:
         "signal": 4,
         "weichenende": 8,
         "gks_gesteuert": 8,
-        "weichengruppeende": 4,
+        "weichengruppenende": 4,
         "weichen_block": 2
     })
 
@@ -303,7 +303,7 @@ class ClassDefinition:
     id_pattern: Optional[str] = None  # Regex for validation
     linking_rule: LinkingRule = field(default_factory=LinkingRule)
     name_search_rule: NameSearchRule = field(default_factory=NameSearchRule)
-    alias: Optional[str] = None  # Alternative name (e.g., "endeweichen" -> "weichenende")
+    alias: Optional[str] = None  # Alternative name for backwards compatibility
 
 
 @dataclass
@@ -321,7 +321,7 @@ class ValidationConfig:
 
     # Classes that allow pure numeric IDs
     numeric_ok_classes: List[str] = field(default_factory=lambda: [
-        "gks_gesteuert", "gks_festkodiert", "weichen_block", "prellblock"
+        "gks_gesteuert", "gks_festkodiert", "weichen_block", "prellbock"
     ])
 
 
@@ -864,7 +864,7 @@ classes:
     nms_threshold: 0.25
     requires_ocr: true
 
-  - name: "prellblock"
+  - name: "prellbock"
     class_id: 9
     confidence_threshold: 0.22
     nms_threshold: 0.40
@@ -885,9 +885,8 @@ classes:
       mode: "either"
       dx_multiplier: 2.0
 
-  - name: "endeweichen"
+  - name: "weichenende"
     class_id: 11
-    alias: "weichenende"
     confidence_threshold: 0.25
     nms_threshold: 0.40
     requires_ocr: false
@@ -896,7 +895,7 @@ classes:
       dx_multiplier: 3.0
       prefer_horizontal: true
 
-  - name: "weichengruppeende"
+  - name: "weichengruppenende"
     class_id: 12
     confidence_threshold: 0.25
     nms_threshold: 0.40
@@ -963,7 +962,7 @@ ocr:
     signal: 4
     weichenende: 8
     gks_gesteuert: 8
-    weichengruppeende: 4
+    weichengruppenende: 4
     weichen_block: 2
 
   cardinal_expansion_factor:
@@ -1064,7 +1063,7 @@ validation:
     - "gks_gesteuert"
     - "gks_festkodiert"
     - "weichen_block"
-    - "prellblock"
+    - "prellbock"
 ```
 
 **Create two additional profile variants:**
