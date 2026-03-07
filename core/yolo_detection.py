@@ -27,6 +27,7 @@ Abhaengigkeiten:
 from typing import List, Dict, Tuple, TYPE_CHECKING
 import numpy as np
 import cv2
+import os
 from ultralytics import YOLO
 import math
 
@@ -36,7 +37,9 @@ if TYPE_CHECKING:
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PIL import Image, ImageFile
 from core.image_processing import _normalize_xywhr,obb_xywhr_to_polygon,polygon_to_aabb_xyxy
-from utils.helpers import _is_near, _norm_angle, get_params_for_angle, _debug_angle, iou, nms, color_masks, box_color
+from utils.helpers import (_is_near, _norm_angle, get_params_for_angle, _debug_angle,
+                           iou, nms, color_masks, box_color,
+                           nms_prefer_larger, filter_contained_boxes, filter_by_halo)
 from core.linking import _check_oriented_direction, _check_axis_aligned_direction
 
 # Module-level defaults for backward compatibility (when config is not passed)
@@ -71,17 +74,31 @@ def tile_image(bgr: np.ndarray, config: 'LayoutConfig' = None, tile: int = None,
         tile: Tile size (fallback if config not provided)
         overlap_pct: Overlap percentage (fallback if config not provided)
     """
+    # Validate input image
+    if bgr is None or bgr.size == 0:
+        print(f"Warning: tile_image received empty image, returning empty list")
+        return []
+
     # Use config values if provided, otherwise use explicit params or defaults
     if config is not None:
         tile = config.detection.tile_size
         overlap_pct = config.detection.overlap_pct
+        use_ink_filter = config.detection.use_ink_filter
+        ink_threshold = config.detection.ink_threshold
     else:
         # Fallback to provided values or defaults
         tile = tile if tile is not None else 2048
         overlap_pct = overlap_pct if overlap_pct is not None else 40
+        use_ink_filter = False
+        ink_threshold = 0.012
 
     step = int(tile * (1 - overlap_pct / 100.0))
     H, W = bgr.shape[:2]
+
+    # Ensure image is large enough
+    if H < 10 or W < 10:
+        print(f"Warning: Image too small ({W}x{H}), returning empty list")
+        return []
     xs = list(range(0, max(1, W - tile + 1), step))
     ys = list(range(0, max(1, H - tile + 1), step))
     if (W - tile) % step != 0 and W > tile:
@@ -89,17 +106,210 @@ def tile_image(bgr: np.ndarray, config: 'LayoutConfig' = None, tile: int = None,
     if (H - tile) % step != 0 and H > tile:
         ys.append(H - tile)
 
+    # Precompute ink integral image if ink filtering is enabled
+    ink_integral = None
+    if use_ink_filter:
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        ink_integral = cv2.integral(binary.astype(np.float32))
+
+    tile_area = tile * tile
     tiles = []
     for y0 in ys:
         for x0 in xs:
             vx1, vy1, vx2, vy2 = x0, y0, x0 + tile, y0 + tile
+
+            # Ink filtering: skip tiles with low ink content
+            if use_ink_filter and ink_integral is not None:
+                y1_clamp = min(vy2, H)
+                x1_clamp = min(vx2, W)
+                ink_sum = (ink_integral[y1_clamp, x1_clamp] - ink_integral[vy1, x1_clamp] -
+                          ink_integral[y1_clamp, vx1] + ink_integral[vy1, vx1])
+                ink_ratio = (ink_sum / 255.0) / tile_area
+                if ink_ratio < ink_threshold:
+                    continue  # Skip low-ink tile
+
             crop = bgr[vy1:vy2, vx1:vx2]
             tiles.append(((vx1, vy1, vx2, vy2), crop))
     return tiles
 
+def _process_single_result(result, tile_info: dict, config: 'LayoutConfig',
+                           class_names: List[str], H: int, W: int) -> List[dict]:
+    """
+    Process a single YOLO result and extract detections.
+
+    Two modes controlled by config.detection.use_native_obb_polygons:
+    - True (Antwerp): Use YOLO's native xyxyxyxy polygons directly
+    - False (Wien): Reconstruct polygons from xywhr with angle normalization
+
+    Args:
+        result: YOLO prediction result
+        tile_info: Dict with tile coordinates (vx1, vy1, vx2, vy2, hx1, hy1)
+        config: LayoutConfig
+        class_names: List of class names
+        H, W: Page dimensions
+
+    Returns:
+        List of detection dicts for this tile
+    """
+    obb = getattr(result, "obb", None)
+    if obb is None or len(obb) == 0:
+        return []
+
+    # Tile region (for gate check) and halo origin (for coordinate transform)
+    vx1, vy1, vx2, vy2 = tile_info['vx1'], tile_info['vy1'], tile_info['vx2'], tile_info['vy2']
+    hx1, hy1 = tile_info['hx1'], tile_info['hy1']
+
+    # Check available attributes
+    has_xyxyxyxy = hasattr(obb, "xyxyxyxy")
+    has_xywhr = hasattr(obb, "xywhr")
+    has_cls = hasattr(obb, "cls")
+    has_conf = hasattr(obb, "conf")
+
+    # Check which polygon mode to use
+    use_native = config.detection.use_native_obb_polygons
+
+    # Gate region - detections must have centroid in tile (not halo)
+    gate_x1, gate_y1, gate_x2, gate_y2 = vx1, vy1, vx2, vy2
+    tile_dets: List[dict] = []
+
+    n = len(obb)
+    for i in range(n):
+        # === EXTRACT XYWHR ===
+        if has_xywhr:
+            cx, cy, w, h, theta = obb.xywhr[i].tolist()
+        else:
+            if not has_xyxyxyxy:
+                continue
+            poly8 = np.array(obb.xyxyxyxy[i].tolist(), dtype=np.float32).reshape(4, 2)
+            cx, cy = float(poly8[:, 0].mean()), float(poly8[:, 1].mean())
+            e01 = np.linalg.norm(poly8[1] - poly8[0])
+            e12 = np.linalg.norm(poly8[2] - poly8[1])
+            w, h = float(max(e01, e12)), float(min(e01, e12))
+            theta = 0.0
+
+        # Centroid in page coordinates
+        cx_p = float(cx + hx1)
+        cy_p = float(cy + hy1)
+
+        # Gate check - centroid must be in tile region (not halo)
+        if not (gate_x1 - 2 <= cx_p <= gate_x2 + 2 and gate_y1 - 2 <= cy_p <= gate_y2 + 2):
+            continue
+
+        # Class and confidence
+        cls_i = int(obb.cls[i]) if has_cls else -1
+        if cls_i < 0 or cls_i >= len(class_names):
+            continue
+        raw_name = class_names[cls_i]
+        name = config.canon_name(raw_name)
+        conf = float(obb.conf[i]) if has_conf else 0.0
+
+        # Determine detection status based on confidence thresholds
+        class_thresh = config.get_confidence_threshold(name)
+        min_uncertain = config.get_min_uncertain_threshold(name)
+        effective_min = min(min_uncertain, class_thresh * 0.9)
+        uncertain_thresh = max(class_thresh * config.detection.uncertain_thresh_multiplier, effective_min)
+
+        if conf >= class_thresh:
+            detection_status = 'confirmed'
+        elif conf >= uncertain_thresh:
+            detection_status = 'uncertain'
+        else:
+            continue  # Too low confidence, discard
+
+        theta_raw = float(theta)
+        ang_deg_raw = math.degrees(theta_raw)
+
+        # Get class OCR requirement
+        class_def = config.get_class_by_name(name)
+        requires_ocr = class_def.requires_ocr if class_def else True
+
+        # === MODE-SPECIFIC POLYGON/AABB COMPUTATION ===
+        if use_native and has_xyxyxyxy:
+            # ANTWERP MODE: Use YOLO's native polygon directly
+            poly_local = np.array(obb.xyxyxyxy[i].tolist(), dtype=np.float32).reshape(4, 2)
+            poly = poly_local.copy()
+            poly[:, 0] += hx1
+            poly[:, 1] += hy1
+
+            # Use raw angle (no normalization)
+            angle_deg = ang_deg_raw
+            theta_n = theta_raw
+
+            # Compute AABB from native polygon
+            x1, y1, x2, y2 = polygon_to_aabb_xyxy(poly)
+
+            # For OCR classes, apply padding expansion to AABB
+            if requires_ocr:
+                pad_px, (exp_x, exp_y) = get_params_for_angle(angle_deg, name, config)
+                box_w = x2 - x1
+                box_h = y2 - y1
+                expand_w = int(box_w * (exp_x - 1.0) / 2 + pad_px)
+                expand_h = int(box_h * (exp_y - 1.0) / 2 + pad_px)
+                x1 -= expand_w
+                y1 -= expand_h
+                x2 += expand_w
+                y2 += expand_h
+            else:
+                pad_px, exp_x, exp_y = 0, 1.0, 1.0
+
+            w_eff, h_eff = w, h
+        else:
+            # WIEN MODE: Reconstruct polygon from normalized xywhr
+            _, _, w_n, h_n, theta_n = _normalize_xywhr(cx_p, cy_p, w, h, theta_raw)
+
+            if requires_ocr:
+                pad_px, (exp_x, exp_y) = get_params_for_angle(ang_deg_raw, name, config)
+            else:
+                pad_px, exp_x, exp_y = 0, 1.0, 1.0
+
+            w_eff = max(1.0, float(w_n) * float(exp_x) + 2.0 * pad_px)
+            h_eff = max(1.0, float(h_n) * float(exp_y) + 2.0 * pad_px)
+
+            poly = obb_xywhr_to_polygon(cx_p, cy_p, w_eff, h_eff, float(theta_n))
+            x1, y1, x2, y2 = polygon_to_aabb_xyxy(poly)
+            angle_deg = math.degrees(float(theta_n))
+
+        # Clamp to image bounds
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(W, x2)
+        y2 = min(H, y2)
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        # DEBUG: Show detection parameter selection
+        if config.debug_angle_routing:
+            a = _norm_angle(ang_deg_raw)
+            if _is_near(a, 0.0) or _is_near(a, 180.0):
+                category = "HORIZONTAL"
+            elif _is_near(a, 90.0) or _is_near(a, 270.0):
+                category = "VERTICAL"
+            else:
+                category = "ANGULAR"
+            temp_det = {"angle_raw": ang_deg_raw, "angle": angle_deg, "name": name}
+            mode_str = "NATIVE" if use_native else "RECONSTRUCTED"
+            _debug_angle("DETECTION", temp_det, category,
+                        f"mode={mode_str} pad={pad_px}px exp=({exp_x:.2f},{exp_y:.2f}) ocr={requires_ocr}")
+
+        tile_dets.append(dict(
+            cls=cls_i, raw_name=raw_name, name=name, conf=conf,
+            x1=int(x1), y1=int(y1), x2=int(x2), y2=int(y2),
+            w=int(x2 - x1), h=int(y2 - y1),
+            cx=(int(x1) + int(x2)) / 2.0, cy=(int(y1) + int(y2)) / 2.0,
+            obb_cx=cx_p, obb_cy=cy_p, obb_w=w_eff, obb_h=h_eff,
+            angle=angle_deg,
+            angle_raw=ang_deg_raw,
+            poly=poly,
+            detection_status=detection_status
+        ))
+
+    return tile_dets
+
+
 def run_yolo_on_page(model, page_bgr: np.ndarray, config: 'LayoutConfig') -> List[dict]:
     """
-    YOLO detection with angle-aware parameter selection.
+    YOLO detection with angle-aware parameter selection and batch inference support.
 
     Args:
         model: YOLO model instance
@@ -114,119 +324,108 @@ def run_yolo_on_page(model, page_bgr: np.ndarray, config: 'LayoutConfig') -> Lis
     tile_halo = config.detection.tile_halo
     pred_imgsz = config.detection.pred_imgsz
     class_names = config.get_class_names()
+    conf_thresh = config.detection.global_conf_threshold
+
+    # Get halo filtering params (only used if use_centroid_halo=True)
+    use_centroid_halo = config.detection.use_centroid_halo
+    halo_ratio = config.detection.halo_ratio
+    halo_conf_boost = config.detection.halo_conf_boost
+    tile_size = config.detection.tile_size
+
+    # Batch inference parameters with auto-detection support
+    # Use -1 for auto mode: workers = CPU cores, batch_size = workers × 3
+    cpu_count = os.cpu_count() or 4
+    yolo_workers = config.detection.yolo_workers
+    batch_size = config.detection.batch_size
+
+    if yolo_workers < 0:
+        yolo_workers = cpu_count  # Auto: use all CPU cores
+    if batch_size < 0:
+        batch_size = max(1, yolo_workers * 3)  # Auto: workers × 3
+
+    # Step 1: Prepare all tile crops and their info
+    use_halo_expansion = config.detection.use_halo_expansion
+    tile_data = []
 
     for (vx1, vy1, vx2, vy2), _crop_unused in tiles:
-        hx1 = max(0, vx1 - tile_halo)
-        hy1 = max(0, vy1 - tile_halo)
-        hx2 = min(W, vx2 + tile_halo)
-        hy2 = min(H, vy2 + tile_halo)
-        halo_crop = page_bgr[hy1:hy2, hx1:hx2]
+        if use_halo_expansion:
+            # Wien behavior: expand with halo context (320px on each side)
+            hx1 = max(0, vx1 - tile_halo)
+            hy1 = max(0, vy1 - tile_halo)
+            hx2 = min(W, vx2 + tile_halo)
+            hy2 = min(H, vy2 + tile_halo)
+            halo_crop = page_bgr[hy1:hy2, hx1:hx2]
+        else:
+            # Antwerp/Colab behavior: exact tile (no expansion)
+            hx1, hy1 = vx1, vy1
+            halo_crop = page_bgr[vy1:vy2, vx1:vx2]
 
-        r = model.predict(source=halo_crop, imgsz=pred_imgsz, conf=0.01, verbose=False)[0]
-        obb = getattr(r, "obb", None)
-        if obb is None or len(obb) == 0:
-            continue
+        tile_data.append({
+            'crop': halo_crop,
+            'vx1': vx1, 'vy1': vy1, 'vx2': vx2, 'vy2': vy2,
+            'hx1': hx1, 'hy1': hy1
+        })
 
-        has_xywhr = hasattr(obb, "xywhr")
-        has_cls = hasattr(obb, "cls")
-        has_conf = hasattr(obb, "conf")
+    # Step 2: Process tiles (batch or sequential)
+    if batch_size > 1 and len(tile_data) > 1:
+        # Batch inference with workers
+        num_batches = (len(tile_data) + batch_size - 1) // batch_size
 
-        gate_x1, gate_y1, gate_x2, gate_y2 = vx1, vy1, vx2, vy2
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(tile_data))
+            batch_tiles = tile_data[start_idx:end_idx]
 
-        n = len(obb)
-        for i in range(n):
-            if has_xywhr:
-                cx, cy, w, h, theta = obb.xywhr[i].tolist()
-            else:
-                if not hasattr(obb, "xyxyxyxy"):
-                    continue
-                poly8 = np.array(obb.xyxyxyxy[i].tolist(), dtype=np.float32).reshape(4, 2)
-                cx, cy = float(poly8[:, 0].mean()), float(poly8[:, 1].mean())
-                e01 = np.linalg.norm(poly8[1] - poly8[0])
-                e12 = np.linalg.norm(poly8[2] - poly8[1])
-                w, h = float(max(e01, e12)), float(min(e01, e12))
-                theta = 0.0
+            # Prepare batch input (list of numpy arrays)
+            batch_crops = [t['crop'] for t in batch_tiles]
 
-            cx_p = float(cx + hx1)
-            cy_p = float(cy + hy1)
+            # Run batch prediction with workers
+            results = model.predict(
+                source=batch_crops,
+                imgsz=pred_imgsz,
+                conf=conf_thresh,
+                verbose=False,
+                workers=yolo_workers,
+                stream=False
+            )
 
-            if not (gate_x1 - 2 <= cx_p <= gate_x2 + 2 and gate_y1 - 2 <= cy_p <= gate_y2 + 2):
-                continue
+            # Process each result
+            for result, tile_info in zip(results, batch_tiles):
+                tile_dets = _process_single_result(result, tile_info, config, class_names, H, W)
 
-            cls_i = int(obb.cls[i]) if has_cls else -1
-            if cls_i < 0 or cls_i >= len(class_names):
-                continue
-            raw_name = class_names[cls_i]
-            name = config.canon_name(raw_name)
-            conf = float(obb.conf[i]) if has_conf else 0.0
+                # Apply halo filtering if enabled
+                if use_centroid_halo and tile_dets:
+                    tile_dets = filter_by_halo(
+                        tile_dets, tile_info['vx1'], tile_info['vy1'],
+                        tile_size, halo_ratio, halo_conf_boost
+                    )
 
-            # Determine detection status based on confidence thresholds
-            class_thresh = config.get_confidence_threshold(name)
-            # Ensure uncertain_thresh is always below class_thresh
-            # Use per-class min_uncertain_thresh with fallback to default
-            min_uncertain = config.get_min_uncertain_threshold(name)
-            effective_min = min(min_uncertain, class_thresh * 0.9)
-            uncertain_thresh = max(class_thresh * config.detection.uncertain_thresh_multiplier, effective_min)
+                dets.extend(tile_dets)
+    else:
+        # Sequential inference (batch_size=1 or single tile)
+        for tile_info in tile_data:
+            result = model.predict(
+                source=tile_info['crop'],
+                imgsz=pred_imgsz,
+                conf=conf_thresh,
+                verbose=False
+            )[0]
 
-            if conf >= class_thresh:
-                detection_status = 'confirmed'
-            elif conf >= uncertain_thresh:
-                detection_status = 'uncertain'
-            else:
-                continue  # Too low confidence, discard
+            tile_dets = _process_single_result(result, tile_info, config, class_names, H, W)
 
-            theta_raw = float(theta)
-            _, _, w_n, h_n, theta_n = _normalize_xywhr(cx_p, cy_p, w, h, theta_raw)
+            # Apply halo filtering if enabled
+            if use_centroid_halo and tile_dets:
+                tile_dets = filter_by_halo(
+                    tile_dets, tile_info['vx1'], tile_info['vy1'],
+                    tile_size, halo_ratio, halo_conf_boost
+                )
 
-            # ANGLE-AWARE PARAMETER SELECTION
-            ang_deg_raw = math.degrees(theta_raw)
-            pad_px, (exp_x, exp_y) = get_params_for_angle(ang_deg_raw, name, config)
-
-            # DEBUG: Show detection parameter selection
-            if config.debug_angle_routing:
-                
-                a = _norm_angle(ang_deg_raw)
-                if _is_near(a, 0.0) or _is_near(a, 180.0):
-                    category = "HORIZONTAL"
-                elif _is_near(a, 90.0) or _is_near(a, 270.0):
-                    category = "VERTICAL"
-                else:
-                    category = "ANGULAR"
-                
-                # Create temporary dict for debug (detection not fully built yet)
-                temp_det = {
-                    "angle_raw": ang_deg_raw,
-                    "angle": math.degrees(float(theta_n)),  #  Use normalized angle!
-                    "name": name
-                }
-                _debug_angle("DETECTION", temp_det, category, 
-                            f"pad={pad_px}px exp=({exp_x:.2f},{exp_y:.2f})")
-
-            w_eff = max(1.0, float(w_n) * float(exp_x) + 2.0 * pad_px)
-            h_eff = max(1.0, float(h_n) * float(exp_y) + 2.0 * pad_px)
-
-            poly = obb_xywhr_to_polygon(cx_p, cy_p, w_eff, h_eff, float(theta_n))
-            x1, y1, x2, y2 = polygon_to_aabb_xyxy(poly)
-            x1 = max(0, x1)
-            y1 = max(0, y1)
-            x2 = min(W, x2)
-            y2 = min(H, y2)
-            if x2 <= x1 or y2 <= y1:
-                continue
-
-            dets.append(dict(
-                cls=cls_i, raw_name=raw_name, name=name, conf=conf,
-                x1=int(x1), y1=int(y1), x2=int(x2), y2=int(y2),
-                w=int(x2 - x1), h=int(y2 - y1), cx=(int(x1) + int(x2)) / 2.0, cy=(int(y1) + int(y2)) / 2.0,
-                obb_cx=cx_p, obb_cy=cy_p, obb_w=w_eff, obb_h=h_eff,
-                angle=math.degrees(float(theta_n)),
-                angle_raw=math.degrees(theta_raw),
-                poly=poly,
-                detection_status=detection_status  # 'confirmed' or 'uncertain'
-            ))
+            dets.extend(tile_dets)
 
     final: List[dict] = []
     unique_names = sorted(set(config.canon_name(n) for n in class_names))
+    use_prefer_larger = config.detection.prefer_larger_nms
+
     for name in unique_names:
         ss = [d for d in dets if d["name"] == name]
         if not ss:
@@ -236,9 +435,19 @@ def run_yolo_on_page(model, page_bgr: np.ndarray, config: 'LayoutConfig') -> Lis
 
         # Use class-specific NMS threshold from config
         nms_thr = config.get_nms_threshold(name)
-        keep = nms(boxes, scores, thr=nms_thr)
+
+        # Use prefer-larger NMS if enabled (Antwerp), otherwise regular NMS (Wien)
+        if use_prefer_larger:
+            areas = [d["w"] * d["h"] for d in ss]
+            keep = nms_prefer_larger(boxes, scores, areas, thr=nms_thr)
+        else:
+            keep = nms(boxes, scores, thr=nms_thr)
 
         final.extend([ss[i] for i in keep])
+
+    # Post-processing: filter contained boxes if enabled
+    if config.detection.filter_contained_boxes:
+        final = filter_contained_boxes(final, config.detection.contained_box_threshold)
 
     return final
 

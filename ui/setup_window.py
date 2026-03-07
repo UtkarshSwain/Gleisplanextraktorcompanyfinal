@@ -457,7 +457,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
         self.combo_profile = QtWidgets.QComboBox()
         self.combo_profile.addItems([
-            "Wien Gleispläne"
+            "Wien Gleispläne",
+            "Antwerp Railway Schematics (DRAFT)"
             # Future layout types will be added here
         ])
         self.combo_profile.setMinimumHeight(scale_value(36))
@@ -888,8 +889,9 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         # Each layout type has its own profile with tuned parameters
         profile_map = {
             0: ("profiles/siemens_track_plans.yaml", "Wien Gleispläne"),
+            1: ("profiles/antwerp_track_plans.yaml", "Antwerp Railway Schematics (DRAFT)"),
             # Future layout types:
-            # 1: ("profiles/other_layout.yaml", "Other Layout Type"),
+            # 2: ("profiles/other_layout.yaml", "Other Layout Type"),
         }
         self.profile_path, description = profile_map.get(index, profile_map[0])
         self.lbl_profile.setText(description)
@@ -1120,9 +1122,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self._page_bgr_arrays.clear()
 
         # Create and start worker
-        # Track detection is now always enabled for better user experience
-        detect_tracks = True  # Always detect tracks automatically
-
         # Load the selected profile configuration (required for YOLO detection)
         if not self._load_profile():
             self.on_status("Fehler: Profil konnte nicht geladen werden - Analyse abgebrochen")
@@ -1132,6 +1131,9 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 "Die Analyse kann ohne gültiges Profil nicht gestartet werden."
             )
             return
+
+        # Track detection can be disabled per-profile (e.g., Antwerp doesn't need it)
+        detect_tracks = self.layout_config.spatial.enable_track_detection if self.layout_config else True
 
         self.worker = PipelineWorker(
             self.pdf_path,

@@ -2442,6 +2442,39 @@ def link_isolierstoss_fallback(anchor, coords, used_coord_ids, max_radius=300):
     return best_coord
 
 
+def coord_to_sort_key(coord_value):
+    """
+    Convert coordinate value to numeric sort key.
+
+    Handles both:
+    - Antwerp string format: "0+033.5" or "0-100.5" → 0.0335 or 0.1005 (km + meters/1000)
+    - Wien float format: 123.4567 → 123.4567
+
+    Returns:
+        float: Numeric value for sorting, or None if invalid
+    """
+    if coord_value is None:
+        return None
+
+    # Antwerp format: "km+meters.decimals" or "km-meters.decimals"
+    if isinstance(coord_value, str) and ('+' in coord_value or '-' in coord_value):
+        try:
+            # Split on either + or - separator
+            parts = re.split(r'[+\-]', coord_value)
+            if len(parts) == 2:
+                km = float(parts[0])
+                meters = float(parts[1])
+                return km + (meters / 1000.0)  # Convert to km
+        except (ValueError, IndexError):
+            return None
+
+    # Wien format: already a float
+    try:
+        return float(coord_value)
+    except (ValueError, TypeError):
+        return None
+
+
 def parse_coord(text: str, config: 'LayoutConfig' = None):
     """Parse coordinate text into float value and optional GI/GL identifier.
 
@@ -2483,7 +2516,12 @@ def parse_coord(text: str, config: 'LayoutConfig' = None):
         output_sep = "."
     val = m.group(1).replace(input_sep, output_sep)
     try:
-        f = float(val)
+        # Handle Antwerp "km+meters" or "km-meters" format (e.g., "0+033.5", "0-100.5")
+        # Keep as string to preserve original format for display
+        if '+' in val or '-' in val:
+            f = val  # Return string as-is (e.g., "0+033.5" or "0-100.5")
+        else:
+            f = float(val)
     except:
         f = None
         if debug:

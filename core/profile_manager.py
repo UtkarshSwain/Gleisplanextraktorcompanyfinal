@@ -224,6 +224,11 @@ class ProfileManager:
             title_block_margin_height=det_data.get('title_block_margin_height', 100),
             title_block_margin_height_default=det_data.get('title_block_margin_height_default', 25),
             title_block_margin_width_default=det_data.get('title_block_margin_width_default', 8),
+            # 4-sided cropping
+            crop_top=det_data.get('crop_top', 0),
+            crop_bottom=det_data.get('crop_bottom', 0),
+            crop_left=det_data.get('crop_left', 0),
+            crop_right=det_data.get('crop_right', 0),
             use_tta=det_data.get('use_tta', True),
             tta_scales=det_data.get('tta_scales', [1.0]),
             tta_flips=det_data.get('tta_flips', [0, 1]),
@@ -233,7 +238,24 @@ class ProfileManager:
             min_uncertain_thresh=det_data.get('min_uncertain_thresh', {
                 "coordinate": 0.01,
                 "isolierstoß": 0.01,
-            })
+            }),
+            # Antwerp-specific detection features
+            global_conf_threshold=det_data.get('global_conf_threshold', 0.01),
+            use_ink_filter=det_data.get('use_ink_filter', False),
+            ink_threshold=det_data.get('ink_threshold', 0.012),
+            use_centroid_halo=det_data.get('use_centroid_halo', False),
+            halo_ratio=det_data.get('halo_ratio', 0.12),
+            halo_conf_boost=det_data.get('halo_conf_boost', 0.50),
+            filter_contained_boxes=det_data.get('filter_contained_boxes', False),
+            contained_box_threshold=det_data.get('contained_box_threshold', 0.80),
+            prefer_larger_nms=det_data.get('prefer_larger_nms', False),
+            # Batch inference parameters
+            batch_size=det_data.get('batch_size', 1),
+            yolo_workers=det_data.get('yolo_workers', 0),
+            # Polygon handling (Antwerp fix)
+            use_native_obb_polygons=det_data.get('use_native_obb_polygons', False),
+            # Halo expansion (default True = current behavior for Wien)
+            use_halo_expansion=det_data.get('use_halo_expansion', True),
         )
 
     @staticmethod
@@ -259,6 +281,12 @@ class ProfileManager:
             use_preprocessing=ocr_data.get('use_preprocessing', True),
             use_adaptive_threshold=ocr_data.get('use_adaptive_threshold', True),
             use_morph_operations=ocr_data.get('use_morph_operations', True),
+            use_simple_ocr=ocr_data.get('use_simple_ocr', False),
+            simple_ocr_padding=ocr_data.get('simple_ocr_padding', {
+                "coordinate": 3,
+                "text_id": 4,
+                "default": 4
+            }),
             confidence_thresholds=ocr_data.get('confidence_thresholds', {
                 "signal": 0.50,
                 "gks_gesteuert": 0.40,
@@ -280,6 +308,7 @@ class ProfileManager:
     def _parse_spatial(spatial_data: dict) -> SpatialConfig:
         """Parse spatial config from YAML"""
         return SpatialConfig(
+            enable_track_detection=spatial_data.get('enable_track_detection', True),
             signal_dy_multiplier=spatial_data.get('signal_dy_multiplier', 2.2),
             signal_dx_multiplier=spatial_data.get('signal_dx_multiplier', 2.4),
             default_dy_multiplier=spatial_data.get('default_dy_multiplier', 1.6),

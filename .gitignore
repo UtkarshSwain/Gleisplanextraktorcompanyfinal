@@ -64,6 +64,17 @@ gleisplanextraktor/
 # Debug files
 debug.txt
 output.txt
+debug_crops/
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Test PDF files
+*.pdf
+
+# Windows null file
+nul
 
 # Docker (if not using)
 docker-compose.yml

@@ -217,7 +217,7 @@ class PaddleOCREngine(IOCREngine):
     def recognize_coordinate(self, detection: Dict[str, Any], bgr_image: np.ndarray) -> str:
         """Recognize coordinate using PaddleOCR."""
         from core.ocr_engine import ocr_coordinate_unified
-        return ocr_coordinate_unified(detection, bgr_image, "paddleocr")
+        return ocr_coordinate_unified(detection, bgr_image, "paddleocr", debug_class="coordinate")
 
     @property
     def name(self) -> str:

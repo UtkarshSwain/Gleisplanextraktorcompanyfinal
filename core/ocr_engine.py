@@ -47,6 +47,7 @@ DEBUG_ANGLE_ROUTING = False
 DEBUG_OCR = False
 DEBUG_CUSTOM_SYMBOLS = False
 DEBUG_SIGNALS = False
+DEBUG_CROPS = False
 
 # Default OCR parameters (can be overridden by config)
 SIG_LINE_THICK = 5
@@ -69,6 +70,51 @@ CLASS_ID_PATTERNS = {
 }
 
 NUMERIC_OK = {"gks_gesteuert", "gks_festkodiert", "weichen_block", "prellbock"}
+
+# Debug crop counter (for unique filenames)
+_debug_crop_counter = 0
+_debug_crop_lock = threading.Lock()
+
+def _save_debug_crop(crop: np.ndarray, class_name: str, ocr_result: str = "", suffix: str = ""):
+    """
+    Save OCR crop to temporary debug folder.
+    Only saves if DEBUG_OCR is enabled.
+
+    Args:
+        crop: BGR image array
+        class_name: Class name (e.g., "text_id", "coordinate")
+        ocr_result: OCR text result (for filename)
+        suffix: Optional suffix for filename (e.g., "preprocessed", "cw", "ccw")
+    """
+    global _debug_crop_counter
+
+    if not DEBUG_CROPS:
+        return
+
+    try:
+        # Create debug directory
+        debug_dir = os.path.join("debug_crops", class_name)
+        os.makedirs(debug_dir, exist_ok=True)
+
+        # Thread-safe counter increment
+        with _debug_crop_lock:
+            _debug_crop_counter += 1
+            counter = _debug_crop_counter
+
+        # Sanitize OCR result for filename (replace problematic characters)
+        clean_result = re.sub(r'[<>:"/\\|?*]', '_', ocr_result)[:50] if ocr_result else "empty"
+
+        # Build filename
+        suffix_str = f"_{suffix}" if suffix else ""
+        filename = f"{counter:04d}_{class_name}_{clean_result}{suffix_str}.png"
+        filepath = os.path.join(debug_dir, filename)
+
+        # Save crop
+        cv2.imwrite(filepath, crop)
+
+    except Exception as e:
+        # Silently fail - debug feature shouldn't break OCR
+        pass
 
 # Default cardinal params (horizontal/vertical text)
 CARDINAL_PARAMS = {
@@ -129,7 +175,7 @@ def configure_from_config(config: 'LayoutConfig') -> None:
     Args:
         config: LayoutConfig loaded from YAML profile
     """
-    global DEBUG_ANGLE_ROUTING, DEBUG_OCR, DEBUG_CUSTOM_SYMBOLS, DEBUG_SIGNALS
+    global DEBUG_ANGLE_ROUTING, DEBUG_OCR, DEBUG_CUSTOM_SYMBOLS, DEBUG_SIGNALS, DEBUG_CROPS
     global SIG_LINE_THICK, SIG_USE_TIGHTEN, SIGNAL_TEXT_HEIGHT_HINT, SIG_SCORE_MIN
     global TESSERACT_PATH, COORD_RE, CLASS_ID_PATTERNS, NUMERIC_OK, CARDINAL_PARAMS, ANGULAR_PARAMS
     global LINK_RULES, DECIMAL_SEP_INPUT, DECIMAL_SEP_OUTPUT
@@ -142,6 +188,7 @@ def configure_from_config(config: 'LayoutConfig') -> None:
     DEBUG_OCR = config.debug_ocr
     DEBUG_CUSTOM_SYMBOLS = config.debug_custom_symbols
     DEBUG_SIGNALS = config.debug_signals
+    DEBUG_CROPS = config.debug_crops
 
     # OCR parameters
     if hasattr(config, 'ocr'):
@@ -497,12 +544,390 @@ def get_paddleocr_instance():
                     _PADDLE_OCR_INSTANCE = None
     
     return _PADDLE_OCR_INSTANCE
+
+# ============================================================================
+# SIMPLE OCR (For high-DPI scans like Antwerp 800 DPI)
+# ============================================================================
+# Skips heavy preprocessing - just crops and runs PaddleOCR directly.
+# This works better for high-quality scans where preprocessing can harm text.
+# ============================================================================
+
+def _preprocess_colored_text(img: np.ndarray) -> np.ndarray:
+    """
+    Convert colored text (orange/red/blue) to high-contrast grayscale.
+
+    Uses min(R,G,B) channel which makes colored text appear dark against white background.
+    This fixes OCR for orange/red coordinates that appear washed out in standard grayscale.
+    """
+    if len(img.shape) == 2:
+        return img  # Already grayscale
+
+    b, g, r = cv2.split(img)
+    # Min of RGB channels - colored pixels become dark, white stays white
+    gray = np.minimum(np.minimum(b, g), r)
+    # Convert back to BGR for PaddleOCR
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
+def _preprocess_text_id_artifacts(img: np.ndarray) -> np.ndarray:
+    """
+    Remove small line artifacts from text_id images before OCR.
+    Removes thin vertical/horizontal lines (< 3px) that OCR reads as "|" or "-".
+
+    Args:
+        img: BGR image array
+
+    Returns:
+        Cleaned BGR image
+    """
+    # Convert to grayscale
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img
+
+    # Threshold to binary
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Invert (text should be white on black for morphology)
+    inv = cv2.bitwise_not(binary)
+
+    # Remove thin vertical artifacts (< 3px wide)
+    # Use opening with horizontal kernel to remove vertical lines
+    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))  # Horizontal 5x1
+    no_vlines = cv2.morphologyEx(inv, cv2.MORPH_OPEN, kernel_h)
+
+    # Remove thin horizontal artifacts (< 3px tall)
+    # Use opening with vertical kernel to remove horizontal lines
+    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))  # Vertical 1x5
+    no_hlines = cv2.morphologyEx(no_vlines, cv2.MORPH_OPEN, kernel_v)
+
+    # Optional: Small closing to reconnect text that may have been broken
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    cleaned = cv2.morphologyEx(no_hlines, cv2.MORPH_CLOSE, kernel_close)
+
+    # Invert back
+    result = cv2.bitwise_not(cleaned)
+
+    # Convert back to BGR if needed
+    if len(img.shape) == 3:
+        result = cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
+
+    return result
+
+
+@paddle_ocr_locked
+def ocr_simple(det: dict, bgr_color: np.ndarray, pad: int = 4, preprocess_fn=None, debug_class: str = "") -> str:
+    """
+    Simple OCR: Crop and run PaddleOCR with automatic rotation for vertical text.
+    Also handles colored text (orange/red) via min-channel preprocessing.
+
+    Best for high-DPI (800+) scans where preprocessing can degrade text quality.
+
+    Args:
+        det: Detection dict with x1, y1, x2, y2 keys
+        bgr_color: BGR image array
+        pad: Padding around crop (default 4px)
+        preprocess_fn: Optional preprocessing function to apply to crop before OCR
+        debug_class: Optional class name for debug crop saving (e.g., "text_id", "coordinate")
+
+    Returns:
+        OCR text result (empty string if no text found)
+    """
+    paddle = get_paddleocr_instance()
+    if paddle is None:
+        return ""
+
+    # Simple crop with padding
+    H, W = bgr_color.shape[:2]
+    x1 = max(0, int(det["x1"]) - pad)
+    y1 = max(0, int(det["y1"]) - pad)
+    x2 = min(W, int(det["x2"]) + pad)
+    y2 = min(H, int(det["y2"]) + pad)
+
+    if x2 <= x1 or y2 <= y1:
+        return ""
+
+    crop = bgr_color[y1:y2, x1:x2]
+
+    if crop.size == 0:
+        return ""
+
+    # Save original crop for debugging
+    if debug_class:
+        _save_debug_crop(crop, debug_class, suffix="original")
+
+    # Apply preprocessing if provided (e.g., artifact removal for text_id)
+    if preprocess_fn is not None:
+        crop = preprocess_fn(crop)
+        # Save preprocessed crop for debugging
+        if debug_class:
+            _save_debug_crop(crop, debug_class, suffix="preprocessed")
+
+    crop_h, crop_w = crop.shape[:2]
+
+    # Check if text is vertical (height > 1.5 * width)
+    is_vertical = crop_h > crop_w * 1.5
+
+    def run_ocr(img):
+        """Run PaddleOCR and return concatenated text."""
+        try:
+            results = paddle.ocr(img, cls=False)
+            if not results or not results[0]:
+                return ""
+            texts = []
+            for line in results[0]:
+                if line is None:
+                    continue
+                bbox, (text, conf) = line
+                if text and conf > 0.3:
+                    texts.append(text.strip())
+            return " ".join(texts) if texts else ""
+        except Exception:
+            return ""
+
+    def run_ocr_with_color_variants(img):
+        """
+        Try OCR on both original color and preprocessed (min-channel) versions.
+        Returns the best result (longest text).
+        """
+        # Try original color
+        result_color = run_ocr(img)
+
+        # Try preprocessed (for colored text like orange/red)
+        img_processed = _preprocess_colored_text(img)
+        result_processed = run_ocr(img_processed)
+
+        # Pick longest result
+        if len(result_processed) > len(result_color):
+            if DEBUG_OCR:
+                print(f"[ocr_simple] color preprocessing helped: '{result_color}' -> '{result_processed}'")
+            return result_processed
+        return result_color
+
+    def score_antwerp_coordinate(text: str) -> float:
+        """
+        Score OCR result for Antwerp coordinate format.
+        Higher score = better match to expected format.
+        Prefers small km values (0-9) over large ones (100+).
+        """
+        import re
+        if not text:
+            return -1.0
+
+        score = 0.0
+        text = text.strip()
+
+        # Extract km value if present (for km-based scoring)
+        # Also accept "-" as OCR error for "+"
+        km_match = re.match(r'^(\d+)\s*[+\-]', text)
+        km_value = int(km_match.group(1)) if km_match else None
+
+        # Best: Full Antwerp format with decimal (e.g., "0+033.5", "0-033.5")
+        if re.search(r'^\d+\s*[+\-]\s*\d+\.\d+$', text):
+            score = 10.0 + len(text)
+        # Good: Antwerp format without decimal (e.g., "0+033", "0-033")
+        elif re.search(r'^\d+\s*[+\-]\s*\d+$', text):
+            score = 8.0 + len(text)
+        # OK: Just decimal number (e.g., "033.5")
+        elif re.search(r'^\d+\.\d+$', text):
+            score = 5.0 + len(text)
+        # Partial match: Contains + or - somewhere with digits
+        elif ('+' in text or '-' in text) and any(c.isdigit() for c in text):
+            score = 3.0 + sum(c.isdigit() for c in text)
+        # Fallback: Just digits
+        elif any(c.isdigit() for c in text):
+            score = 1.0 + sum(c.isdigit() for c in text) * 0.1
+
+        # Prefer small km values (typical: 0-9), penalize large ones (likely backwards)
+        # This fixes "811+0" vs "0+108" - both match pattern but "0+108" is correct
+        if km_value is not None:
+            if km_value <= 9:
+                score += 5.0  # Bonus: small km values are typical
+            elif km_value <= 99:
+                score += 2.0  # OK: medium km values
+            else:
+                score -= 3.0  # Penalty: large km (100+) likely means text is backwards
+
+        # Garbage characters reduce score
+        # Accept both + and - (minus is OCR error for plus)
+        garbage_chars = sum(1 for c in text if c not in '0123456789+-. ')
+        score -= garbage_chars * 0.5
+
+        return score
+
+    try:
+        if is_vertical:
+            # Try rotated versions for vertical text
+            # Rotate 90° clockwise (cv2.ROTATE_90_CLOCKWISE)
+            crop_rot_cw = cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)
+            result_cw = run_ocr_with_color_variants(crop_rot_cw)
+
+            # Rotate 90° counter-clockwise (cv2.ROTATE_90_COUNTERCLOCKWISE)
+            crop_rot_ccw = cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            result_ccw = run_ocr_with_color_variants(crop_rot_ccw)
+
+            # Also try original (in case detection is wrong)
+            result_orig = run_ocr_with_color_variants(crop)
+
+            # Score each result based on Antwerp coordinate pattern match
+            score_cw = score_antwerp_coordinate(result_cw)
+            score_ccw = score_antwerp_coordinate(result_ccw)
+            score_orig = score_antwerp_coordinate(result_orig)
+
+            results = [
+                (score_cw, result_cw, 'cw'),
+                (score_ccw, result_ccw, 'ccw'),
+                (score_orig, result_orig, 'orig')
+            ]
+            best = max(results, key=lambda x: x[0])
+
+            if DEBUG_OCR:
+                print(f"[ocr_simple] vertical: cw='{result_cw}'({score_cw:.1f}) ccw='{result_ccw}'({score_ccw:.1f}) orig='{result_orig}'({score_orig:.1f}) -> '{best[1]}' ({best[2]})")
+
+            # Save final crop with OCR result for debugging
+            if debug_class:
+                # Save the best rotated crop based on which rotation won
+                if best[2] == 'cw':
+                    _save_debug_crop(crop_rot_cw, debug_class, best[1], suffix="final_cw")
+                elif best[2] == 'ccw':
+                    _save_debug_crop(crop_rot_ccw, debug_class, best[1], suffix="final_ccw")
+                else:
+                    _save_debug_crop(crop, debug_class, best[1], suffix="final_orig")
+
+            return best[1]
+        else:
+            # Horizontal text - run OCR with color variants
+            result = run_ocr_with_color_variants(crop)
+
+            # Save final crop with OCR result for debugging
+            if debug_class:
+                _save_debug_crop(crop, debug_class, result, suffix="final")
+
+            return result
+
+    except Exception as e:
+        if DEBUG_OCR:
+            print(f"ocr_simple error: {e}")
+        return ""
+
+
+def _clean_antwerp_coordinate(text: str) -> str:
+    """
+    Clean Antwerp-format coordinates like "0+033.5", "12+456.7".
+
+    Antwerp format: km+meters.decimals (e.g., "0+033.5" = 0km + 33.5m)
+    """
+    import re
+
+    if not text:
+        return ""
+
+    text = text.strip()
+
+    # Pattern for Antwerp format: digits + plus/minus + digits.decimals
+    # Accept both "+" and "-" (OCR sometimes misreads plus as minus)
+    # Examples: "0+033.5", "12+456.7", "1+234.56", "0-100.5"
+    antwerp_pattern = r'(\d+)\s*([+\-])\s*(\d+(?:\.\d+)?)'
+    match = re.search(antwerp_pattern, text)
+
+    if match:
+        km = match.group(1)
+        separator = match.group(2)  # Preserve original separator (+ or -)
+        meters = match.group(3)
+        result = f"{km}{separator}{meters}"  # Keep original separator
+        if DEBUG_OCR:
+            print(f"[antwerp_clean] matched: '{text}' -> '{result}'")
+        return result
+
+    # Fallback: just a decimal number (no + separator)
+    # Examples: "033.5", "456.78"
+    decimal_pattern = r'(\d+\.\d+)'
+    decimal_match = re.search(decimal_pattern, text)
+
+    if decimal_match:
+        result = decimal_match.group(1)
+        if DEBUG_OCR:
+            print(f"[antwerp_clean] decimal only: '{text}' -> '{result}'")
+        return result
+
+    # Last fallback: just digits
+    digits_pattern = r'(\d+)'
+    digits_match = re.search(digits_pattern, text)
+
+    if digits_match:
+        result = digits_match.group(1)
+        if DEBUG_OCR:
+            print(f"[antwerp_clean] digits only: '{text}' -> '{result}'")
+        return result
+
+    if DEBUG_OCR:
+        print(f"[antwerp_clean] no pattern matched: '{text}'")
+
+    return text  # Return original if no pattern matches
+
+
+def ocr_simple_coordinate(det: dict, bgr_color: np.ndarray, config=None) -> str:
+    """
+    Simple coordinate OCR for high-DPI scans (Antwerp).
+    Crops, runs PaddleOCR, applies Antwerp-specific cleaning.
+
+    Args:
+        det: Detection dict with x1, y1, x2, y2 keys
+        bgr_color: BGR image array
+        config: Optional LayoutConfig for configurable padding
+    """
+    # Get padding from config or use default
+    pad = 3
+    if config is not None and hasattr(config, 'ocr'):
+        pad = config.ocr.simple_ocr_padding.get("coordinate",
+              config.ocr.simple_ocr_padding.get("default", 3))
+
+    raw = ocr_simple(det, bgr_color, pad=pad, debug_class="coordinate")
+
+    # Debug: show raw OCR result before cleaning
+    if DEBUG_OCR:
+        print(f"[simple_coord] raw='{raw}' box=({det.get('x1')},{det.get('y1')})-({det.get('x2')},{det.get('y2')})")
+
+    if not raw:
+        return ""
+
+    # Use Antwerp-specific cleaning (different format from Wien)
+    # Antwerp: "0+033.5" format, Wien: "0,1234 Gl.113" format
+    cleaned = _clean_antwerp_coordinate(raw)
+
+    if DEBUG_OCR and cleaned != raw:
+        print(f"[simple_coord] cleaned: '{raw}' -> '{cleaned}'")
+
+    return cleaned
+
+
+def ocr_simple_text(det: dict, bgr_color: np.ndarray, config=None, debug_class: str = "text_id") -> str:
+    """
+    Simple text OCR for high-DPI scans (text_id class).
+    Applies morphological preprocessing to remove small line artifacts.
+
+    Args:
+        det: Detection dict with x1, y1, x2, y2 keys
+        bgr_color: BGR image array
+        config: Optional LayoutConfig for configurable padding
+        debug_class: Class name for debug crop saving
+    """
+    # Get padding from config or use default
+    pad = 4
+    if config is not None and hasattr(config, 'ocr'):
+        pad = config.ocr.simple_ocr_padding.get("text_id",
+              config.ocr.simple_ocr_padding.get("default", 4))
+
+    return ocr_simple(det, bgr_color, pad=pad, preprocess_fn=_preprocess_text_id_artifacts, debug_class=debug_class)
+
+
 # ===================== =======================================================
 # COORDINATE OCR (UNIFIED: Routes based on angle)
 # ============================================================================
 
 @paddle_ocr_locked
-def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
+def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str, debug_class: str = "coordinate") -> str:
     """
     Angular coordinate OCR - handles both simple and bracketed coordinates.
     Uses 3-step cleaning: overlap removal → bracket fixing → scoring
@@ -511,12 +936,12 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
     # Get BOTH angles
     ang_normalized = float(det.get("angle", 0.0))
     ang_raw = float(det.get("angle_raw", ang_normalized))
-    
+
     # Get box dimensions
     w = float(det.get("obb_w", det["x2"] - det["x1"]))
     h = float(det.get("obb_h", det["y2"] - det["y1"]))
     box_min_side = min(w, h)
-    
+
     # Adaptive padding - slightly increased for edge cases
     if box_min_side < 66:
         pad = 5   # ↑ +1 for edge cases
@@ -524,12 +949,12 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
         pad = 9   # ↑ +1 for edge cases
     else:
         pad = 9   # ↑ +1 for edge cases
-    
+
     if DEBUG_ANGLE_ROUTING:
         print(f"\n COORD ANGULAR: {w:.0f}×{h:.0f}px | raw={ang_raw:.1f}° norm={ang_normalized:.1f}° | pad={pad}")
-    
+
     best_txt, best_sc = "", -1.0
-    
+
     # ========================================================================
     # STEP 1: Get crop (perspective warp)
     # ========================================================================
@@ -537,12 +962,17 @@ def ocr_coordinate_strong(det: dict, bgr_color: np.ndarray, engine: str) -> str:
         pil_crop = perspective_crop_from_det(det, bgr_color, pad=pad)
     except Exception as e:
         pil_crop = rotated_crop_from_det(det, bgr_color, pad=pad)
-    
+
     if pil_crop.width < 5 or pil_crop.height < 5:
         return ""
-    
+
     # Upscale
     pil_crop = _upscale_if_tiny(pil_crop, min_side=80, scale=3)
+
+    # Debug: Save original crop
+    if debug_class:
+        crop_bgr = cv2.cvtColor(np.array(pil_crop), cv2.COLOR_RGB2BGR)
+        _save_debug_crop(crop_bgr, debug_class, suffix="original_angular")
 
     if DEBUG_ANGLE_ROUTING:
         print(f"→ Crop size: {pil_crop.width}×{pil_crop.height}px")
@@ -1010,28 +1440,33 @@ def _looks_like_coordinate(text: str) -> bool:
     return True
 
 @paddle_ocr_locked
-def ocr_weichen_block(anchor: dict, bgr_color: np.ndarray) -> str:
+def ocr_weichen_block(anchor: dict, bgr_color: np.ndarray, debug_class: str = "weichen_block") -> str:
     """
     OCR for weichen blocks - starts output from first line beginning with "W".
     Simplified version without strict validation.
     """
     cls_name = anchor.get("name", "weichen_block")
-    
+
     # Get box dimensions
     w = float(anchor.get("obb_w", anchor["x2"] - anchor["x1"]))
     h = float(anchor.get("obb_h", anchor["y2"] - anchor["y1"]))
-    
+
     if DEBUG_ANGLE_ROUTING:
         print(f"\n WEICHEN BLOCK: {w:.0f}×{h:.0f}px")
-    
+
     # Minimal padding
-    pad = 0   
+    pad = 0
     x1 = max(0, int(anchor["x1"] - pad))
     y1 = max(0, int(anchor["y1"] - pad))
     x2 = min(bgr_color.shape[1], int(anchor["x2"] + pad))
     y2 = min(bgr_color.shape[0], int(anchor["y2"] + pad))
-    
+
     crop_bgr = bgr_color[y1:y2, x1:x2]
+
+    # Debug: Save original crop
+    if debug_class:
+        _save_debug_crop(crop_bgr, debug_class, suffix="original")
+
     pil_crop = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
     
     if pil_crop.width < 10 or pil_crop.height < 10:
@@ -1200,17 +1635,17 @@ def ocr_weichen_block(anchor: dict, bgr_color: np.ndarray) -> str:
 
 
 @paddle_ocr_locked
-def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> str:
+def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str, debug_class: str = "coordinate") -> str:
     """
     Cardinal coordinate OCR - handles both simple and bracketed coordinates.
     OPTIMIZED: Smart candidate generation with early exit for complete coordinates.
     """
     ang_normalized = float(det.get("angle", 0.0))
-    
+
     w = float(det.get("obb_w", det["x2"] - det["x1"]))
     h = float(det.get("obb_h", det["y2"] - det["y1"]))
     box_min_side = min(w, h)
-    
+
     # ASYMMETRIC PADDING: No left padding, minimal right padding (capture close brackets, reject distant noise)
     pad_left = 0
     pad_right = max(3, min(5, int(box_min_side * 0.05)))  # Reduced: 3-5px instead of 8-15px
@@ -1230,11 +1665,16 @@ def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> 
         pil_crop = Image.fromarray(cv2.cvtColor(bgr_color[y1:y2, x1:x2], cv2.COLOR_BGR2RGB))
     except Exception:
         pil_crop = crop_pil(bgr_color, det["x1"], det["y1"], det["x2"], det["y2"], pad=pad_right)
-    
+
     if pil_crop.width < 5 or pil_crop.height < 5:
         return ""
-    
+
     pil_crop = _upscale_if_tiny(pil_crop, min_side=90, scale=3)
+
+    # Debug: Save original crop
+    if debug_class:
+        crop_bgr = cv2.cvtColor(np.array(pil_crop), cv2.COLOR_RGB2BGR)
+        _save_debug_crop(crop_bgr, debug_class, suffix="original_horizontal")
     
     if pil_crop.width < 10 or pil_crop.height < 10:
         return ""
@@ -1447,33 +1887,38 @@ def ocr_coordinate_horizontal(det: dict, bgr_color: np.ndarray, engine: str) -> 
     
     return best_txt.strip()
 
-def ocr_coordinate_angular(det: dict, bgr_color: np.ndarray, engine: str) -> str:
+def ocr_coordinate_angular(det: dict, bgr_color: np.ndarray, engine: str, debug_class: str = "coordinate") -> str:
     """
     Angular coordinate OCR: Uses strong path with PaddleOCR primary.
     PaddleOCR's angle classification handles tilted text well.
     """
     # ocr_coordinate_strong now has PaddleOCR as primary
-    return ocr_coordinate_strong(det, bgr_color, "paddleocr")
+    return ocr_coordinate_strong(det, bgr_color, "paddleocr", debug_class=debug_class)
 
-def ocr_coordinate_unified(det: dict, bgr_color: np.ndarray, engine: str) -> str:
+def ocr_coordinate_unified(det: dict, bgr_color: np.ndarray, engine: str, config=None, debug_class: str = "coordinate") -> str:
     """
     UNIFIED COORDINATE OCR: Routes based on NORMALIZED angle (visual orientation).
-    
+
+    - If config.ocr.use_simple_ocr=True: Use simple PaddleOCR (for high-DPI like Antwerp)
     - Cardinal (near 0°, 90°, 180°, 270°): Use simple rotation with 4-direction sweep
     - Angular (tilted): Use perspective warp + rotation testing
     """
+    # Check for simple OCR mode (high-DPI scans like Antwerp)
+    if config is not None and hasattr(config, 'ocr') and config.ocr.use_simple_ocr:
+        return ocr_simple_coordinate(det, bgr_color, config)
+
     # USE NORMALIZED ANGLE for routing decision
     ang_normalized = float(det.get("angle", 0.0))
     ang_raw = float(det.get("angle_raw", ang_normalized))
-    
+
     if _is_cardinal(ang_normalized):  # Check normalized angle
         # Cardinal path (visually aligned to axes)
         _debug_angle("OCR_COORD", det, "CARDINAL", "→ horizontal OCR (4-dir sweep)")
-        return ocr_coordinate_horizontal(det, bgr_color, engine)
+        return ocr_coordinate_horizontal(det, bgr_color, engine, debug_class=debug_class)
     else:
         # Angular path (truly tilted, e.g., 30°, 45°, 60°)
         _debug_angle("OCR_COORD", det, "ANGULAR", "→ strong OCR (perspective+rotations)")
-        return ocr_coordinate_angular(det, bgr_color, engine)  #  Fixed: was ocr_coordinate_angular
+        return ocr_coordinate_angular(det, bgr_color, engine, debug_class=debug_class)
 
 # ============================================================================
 # SIGNAL OCR (with angle branching)
@@ -1612,7 +2057,7 @@ def _extract_textline_roi(pil_img, h_hint: Optional[int] = None):
     return pil_img.crop((x1, y1, X2 + pad, Y2 + pad))
 
 @paddle_ocr_locked
-def ocr_signal_name(anchor: dict, bgr_color: np.ndarray, engine: str, overlay: Optional[np.ndarray] = None) -> Optional[str]:
+def ocr_signal_name(anchor: dict, bgr_color: np.ndarray, engine: str, overlay: Optional[np.ndarray] = None, debug_class: str = "signal") -> Optional[str]:
     """
     Signal OCR with Tesseract PRIMARY, EasyOCR fallback.
     Uses angle-aware preprocessing (cardinal vs angular).
@@ -1659,6 +2104,11 @@ def ocr_signal_name(anchor: dict, bgr_color: np.ndarray, engine: str, overlay: O
         pil_nolines = _remove_long_lines_oriented(pil_crop, ang_raw, frac_len=0.25, thickness=SIG_LINE_THICK)
         pil_final = pil_nolines if not SIG_USE_TIGHTEN else _extract_textline_roi(_tighten_to_text(pil_nolines), h_hint=SIGNAL_TEXT_HEIGHT_HINT)
         rotation_order = [0, 90, 180, 270]
+
+    # Debug: Save original crop
+    if debug_class:
+        crop_bgr = cv2.cvtColor(np.array(pil_final), cv2.COLOR_RGB2BGR)
+        _save_debug_crop(crop_bgr, debug_class, suffix="original")
 
     # ========================================================================
     # STEP 2: Prepare preprocessing variants
@@ -1812,13 +2262,18 @@ def ocr_signal_name(anchor: dict, bgr_color: np.ndarray, engine: str, overlay: O
     # STEP 6: Return best result
     # ========================================================================
     if best_txt and best_sc >= SIG_SCORE_MIN and len(best_txt) >= 3:
+        # Debug: Save final result
+        if debug_class:
+            crop_bgr = cv2.cvtColor(np.array(pil_final), cv2.COLOR_RGB2BGR)
+            _save_debug_crop(crop_bgr, debug_class, best_txt, suffix="final")
+
         if DEBUG_ANGLE_ROUTING:
             print(f" → '{best_txt}' ")
         return best_txt  # DISABLED _post_fix_missing_zero_middle - causes AHR31→AHR301 bugs
-    
+
     if DEBUG_ANGLE_ROUTING:
         print(f" → FAILED ")
-    
+
     return None
 
 # ============================================================================
@@ -1986,7 +2441,11 @@ def ocr_best_angle(pil_img: Image.Image, engine: str, angles=(-20, -15, -10, -5,
     return best
 
 def ocr_generic_name(anchor: dict, bgr_color: np.ndarray, engine: str, allow_numeric: bool,
-                    cls_name: Optional[str]) -> Optional[str]:
+                    cls_name: Optional[str], debug_class: str = "") -> Optional[str]:
+    # Use cls_name as fallback for debug_class
+    if not debug_class:
+        debug_class = cls_name or "generic"
+
     # USE NORMALIZED ANGLE for routing
     ang_normalized = float(anchor.get("angle", 0.0))
     ang_raw = float(anchor.get("angle_raw", ang_normalized))
@@ -2005,6 +2464,11 @@ def ocr_generic_name(anchor: dict, bgr_color: np.ndarray, engine: str, allow_num
             pil_crop = rotated_crop_from_det(anchor, bgr_color, pad=8)
 
     pil_crop = _upscale_if_tiny(pil_crop, min_side=80, scale=3)
+
+    # Debug: Save original crop
+    if debug_class:
+        crop_bgr = cv2.cvtColor(np.array(pil_crop), cv2.COLOR_RGB2BGR)
+        _save_debug_crop(crop_bgr, debug_class, suffix="original")
 
     if _is_cardinal(ang_normalized):
         pil_final = pil_crop
@@ -2063,15 +2527,22 @@ def ocr_generic_name(anchor: dict, bgr_color: np.ndarray, engine: str, allow_num
                     if sc > best_score:
                         best_name, best_score = tok, sc
 
+    # Debug: Save final result
+    if debug_class and best_name:
+        crop_bgr = cv2.cvtColor(np.array(pil_final), cv2.COLOR_RGB2BGR)
+        _save_debug_crop(crop_bgr, debug_class, best_name, suffix="final")
+
     return best_name if (best_name and best_score > 0) else None
 
 @paddle_ocr_locked
-def ocr_numeric_cardinal_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]:
+def ocr_numeric_cardinal_box(anchor: dict, bgr_color: np.ndarray, debug_class: str = "gks") -> Optional[str]:
     """
     Robust numeric OCR for axis-aligned GKS plates.
     PaddleOCR with LIGHTER preprocessing - grayscale+CLAHE works best!
     """
     cls_name = anchor.get("name", "gks_festkodiert")
+    if not debug_class:
+        debug_class = cls_name
     
     # Get class-specific parameters
     pad_dict = CARDINAL_PARAMS["detection_padding"]
@@ -2095,9 +2566,14 @@ def ocr_numeric_cardinal_box(anchor: dict, bgr_color: np.ndarray) -> Optional[st
     min_side = min(base.width, base.height)
     scale = 8 if min_side < 60 else (6 if min_side < 80 else 4)
     base = base.resize((base.width * scale, base.height * scale), Image.LANCZOS)
-    
+
     if DEBUG_ANGLE_ROUTING:
         print(f"→ Upscaled to: {base.width}×{base.height}px (scale={scale}x)")
+
+    # Debug: Save original crop
+    if debug_class:
+        crop_bgr = cv2.cvtColor(np.array(base), cv2.COLOR_RGB2BGR)
+        _save_debug_crop(crop_bgr, debug_class, suffix="original")
 
     best, best_sc = None, -1.0
 
@@ -2168,12 +2644,17 @@ def ocr_numeric_cardinal_box(anchor: dict, bgr_color: np.ndarray) -> Optional[st
             print(f"RESULT: '{best}' (score:{best_sc:.2f})")
         else:
             print(f"FAILED")
-    
+
+    # Debug: Save final result
+    if debug_class and best:
+        crop_bgr = cv2.cvtColor(np.array(base), cv2.COLOR_RGB2BGR)
+        _save_debug_crop(crop_bgr, debug_class, best, suffix="final")
+
     return best
 
 
 @paddle_ocr_locked
-def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]:
+def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray, debug_class: str = "gks") -> Optional[str]:
     """
     Robust numeric OCR for tilted GKS plates.
     Tests ALL rotations, picks best 4-digit result.
@@ -2181,6 +2662,8 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
     ang_norm = float(anchor.get("angle", 0.0))
     ang_raw = float(anchor.get("angle_raw", ang_norm))
     cls_name = anchor.get("name", "gks_festkodiert")
+    if not debug_class:
+        debug_class = cls_name
     
     # Get box size
     w = float(anchor.get("obb_w", anchor["x2"] - anchor["x1"]))
@@ -2213,9 +2696,14 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
     min_side = min(base.width, base.height)
     scale = 7 if min_side < 60 else (5 if min_side < 90 else 4)
     base = base.resize((base.width * scale, base.height * scale), Image.LANCZOS)
-    
+
     if DEBUG_ANGLE_ROUTING:
         print(f"→ Upscaled to: {base.width}×{base.height}px (scale={scale}x)")
+
+    # Debug: Save original crop
+    if debug_class:
+        crop_bgr = cv2.cvtColor(np.array(base), cv2.COLOR_RGB2BGR)
+        _save_debug_crop(crop_bgr, debug_class, suffix="original")
 
     best_txt = None
     best_sc = -1.0
@@ -2313,11 +2801,21 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
                 marker = "" if i == 0 else "  "
                 print(f"{marker} '{res['text']}' score={res['score']:.2f} conf={res['conf']:.2f} rot={res['rot']}°")
             print(f"BEST 4-DIGIT: '{best_4d['text']}' (score:{best_4d['score']:.2f}, rot:{best_4d['rot']}°)")
-        
+
+        # Debug: Save final result
+        if debug_class:
+            crop_bgr = cv2.cvtColor(np.array(base), cv2.COLOR_RGB2BGR)
+            _save_debug_crop(crop_bgr, debug_class, best_4d['text'], suffix="final")
+
         return best_4d['text']
-    
+
     #  FALLBACK: Accept 3-digit if no 4-digit found and score is good
     if best_txt and len(best_txt) == 3 and best_sc > 1.5:
+        # Debug: Save final result
+        if debug_class:
+            crop_bgr = cv2.cvtColor(np.array(base), cv2.COLOR_RGB2BGR)
+            _save_debug_crop(crop_bgr, debug_class, best_txt, suffix="final")
+
         if DEBUG_ANGLE_ROUTING:
             print(f"ACCEPTING 3-DIGIT: '{best_txt}' (score:{best_sc:.2f}, conf:{best_conf:.2f}, rot:{best_rot}°)")
         return best_txt
@@ -2332,17 +2830,25 @@ def ocr_numeric_tilted_box(anchor: dict, bgr_color: np.ndarray) -> Optional[str]
 
 
 
-def ocr_anchor_name(anchor: dict, bgr_color: np.ndarray, engine: str) -> Optional[str]:
+def ocr_anchor_name(anchor: dict, bgr_color: np.ndarray, engine: str, config=None) -> Optional[str]:
     """
     OCR for anchor boxes with correct dual-angle routing.
+
+    If config.ocr.use_simple_ocr=True, uses simple OCR for supported classes.
     """
     cls = anchor["name"]
-    
+
+    # Simple OCR mode for high-DPI scans (Antwerp)
+    if config is not None and hasattr(config, 'ocr') and config.ocr.use_simple_ocr:
+        # Use simple OCR for text_id and other generic classes
+        if cls not in {"signal", "weichen_block", "gks_gesteuert", "gks_festkodiert"}:
+            return ocr_simple_text(anchor, bgr_color, config, debug_class=cls)
+
     if cls == "signal":
-        return ocr_signal_name(anchor, bgr_color, engine)
-    
+        return ocr_signal_name(anchor, bgr_color, engine, debug_class=cls)
+
     if cls == "weichen_block":
-        return ocr_weichen_block(anchor, bgr_color)
+        return ocr_weichen_block(anchor, bgr_color, debug_class=cls)
 
 
     # ========================================================================
@@ -2362,9 +2868,9 @@ def ocr_anchor_name(anchor: dict, bgr_color: np.ndarray, engine: str) -> Optiona
         if _is_cardinal(ang_norm):  #  Check normalized angle
             if DEBUG_ANGLE_ROUTING:
                 print(f"→ CARDINAL path (|norm|≤15°)")
-            
-            val = ocr_numeric_cardinal_box(anchor, bgr_color)  #  Call cardinal function
-            
+
+            val = ocr_numeric_cardinal_box(anchor, bgr_color, debug_class=cls)  #  Call cardinal function
+
             if val:
                 if DEBUG_ANGLE_ROUTING:
                     print(f"SUCCESS: '{val}'")
@@ -2375,8 +2881,8 @@ def ocr_anchor_name(anchor: dict, bgr_color: np.ndarray, engine: str) -> Optiona
         else:
             if DEBUG_ANGLE_ROUTING:
                 print(f"→ ANGULAR path (|norm|={abs(ang_norm):.1f}° > 15°)")
-            
-            val = ocr_numeric_tilted_box(anchor, bgr_color)  #  Call angular function
+
+            val = ocr_numeric_tilted_box(anchor, bgr_color, debug_class=cls)  #  Call angular function
             
             if val:
                 if DEBUG_ANGLE_ROUTING:
@@ -2405,7 +2911,7 @@ def ocr_anchor_name(anchor: dict, bgr_color: np.ndarray, engine: str) -> Optiona
     except Exception:
         pass
 
-    name = ocr_generic_name(anchor, bgr_color, engine, allow_numeric=allow_numeric, cls_name=cls)
+    name = ocr_generic_name(anchor, bgr_color, engine, allow_numeric=allow_numeric, cls_name=cls, debug_class=cls)
     if name:
         return name
 
@@ -2539,6 +3045,7 @@ def ocr_custom_symbol_text(
     text_region_offset: dict = None,
     search_distance: int = 300,  # Generous distance to avoid cutting off long text
     search_width: int = 80,
+    debug_class: str = "custom_symbol",
 ):
     """
     OCR text near a custom symbol based on configured text position.
@@ -2841,6 +3348,11 @@ def _ocr_custom_symbol_single_position(
     if DEBUG_CUSTOM_SYMBOLS:
         print(f"Crop size: {pil_crop.width}x{pil_crop.height}")
 
+    # Debug: Save original crop (using anchor's name if available)
+    anchor_name = anchor.get("name", "custom_symbol")
+    if anchor_name:  # This should always be true if called properly
+        _save_debug_crop(crop_bgr, anchor_name, suffix="original")
+
     # Preprocessing
     g0 = _pil_to_gray_np(pil_crop)
     g1 = _enhance_contrast(g0)
@@ -2940,6 +3452,11 @@ def _ocr_custom_symbol_single_position(
             print(f"RESULT: '{best_txt}' in region ({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
         else:
             print(f"NO TEXT FOUND")
+
+    # Debug: Save final result if text was found
+    anchor_name = anchor.get("name", "custom_symbol")
+    if best_txt and anchor_name:
+        _save_debug_crop(crop_bgr, anchor_name, best_txt, suffix="final")
 
     # Return text, bbox coordinates, position used, and confidence
     if best_txt:

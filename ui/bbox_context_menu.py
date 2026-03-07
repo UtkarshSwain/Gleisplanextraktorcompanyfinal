@@ -212,14 +212,14 @@ class BBoxContextMenu:
 
             if new_class == "coordinate":
                 is_coord = True
-                new_text = ocr_coordinate_horizontal(det, self.workspace.current_page_bgr_array, "paddleocr")
+                new_text = ocr_coordinate_horizontal(det, self.workspace.current_page_bgr_array, "paddleocr", debug_class="coordinate")
             elif new_class == "signal":
-                new_text = ocr_signal_name(det, self.workspace.current_page_bgr_array, "paddleocr")
+                new_text = ocr_signal_name(det, self.workspace.current_page_bgr_array, "paddleocr", debug_class="signal")
             elif new_class in {"gks_gesteuert", "gks_festkodiert"}:
-                new_text = ocr_numeric_cardinal_box(det, self.workspace.current_page_bgr_array)
+                new_text = ocr_numeric_cardinal_box(det, self.workspace.current_page_bgr_array, debug_class=new_class)
             else:
                 new_text = ocr_generic_name(det, self.workspace.current_page_bgr_array, "paddleocr",
-                                           allow_numeric=(new_class in NUMERIC_OK), cls_name=new_class)
+                                           allow_numeric=(new_class in NUMERIC_OK), cls_name=new_class, debug_class=new_class)
 
             print(f" OCR result for {new_class}: '{new_text}'")
 

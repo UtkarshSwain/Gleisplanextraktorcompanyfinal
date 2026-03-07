@@ -28,6 +28,7 @@ debug_custom_symbols: false
 debug_yolo: false
 debug_ui_bbox: false
 debug_comparison: false
+debug_crops: false  # Set to true to save OCR crops for inspection
 
 # System settings
 poppler_path: null

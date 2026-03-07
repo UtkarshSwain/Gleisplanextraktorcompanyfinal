@@ -140,6 +140,33 @@ def _deskew_small(pil_img: Image.Image, angles=(-20, -15, -10, -5, 0, 5, 10, 15,
             best, best_score = r, sc
     return best
 
+def ensure_landscape(bgr_img: np.ndarray, rotation_direction: str = "cw") -> Tuple[np.ndarray, bool]:
+    """
+    Check if image is in landscape orientation. If portrait, rotate to landscape.
+
+    Args:
+        bgr_img: BGR numpy array (H, W, 3)
+        rotation_direction: "cw" (clockwise 90°) or "ccw" (counterclockwise 90°)
+
+    Returns:
+        (rotated_bgr, was_rotated): Tuple of BGR array and boolean flag
+    """
+    h, w = bgr_img.shape[:2]
+
+    # Landscape check: width should be greater than height
+    if w > h:
+        return bgr_img, False  # Already landscape, no rotation needed
+
+    # Portrait detected, rotate to landscape
+    if rotation_direction == "cw":
+        # Rotate 90° clockwise: cv2.ROTATE_90_CLOCKWISE
+        rotated = cv2.rotate(bgr_img, cv2.ROTATE_90_CLOCKWISE)
+    else:
+        # Rotate 90° counterclockwise: cv2.ROTATE_90_COUNTERCLOCKWISE
+        rotated = cv2.rotate(bgr_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    return rotated, True
+
 # ============================================================================
 # CROPPING STRATEGIES (Code 1 + Code 2)
 # ============================================================================

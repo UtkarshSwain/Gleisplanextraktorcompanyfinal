@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 from typing import List, Tuple, Dict
 from dataclasses import dataclass
+from core.linking import coord_to_sort_key
 
 @dataclass
 class MissingDetectionRegion:
@@ -65,9 +66,11 @@ class MissingDetectionAnalyzer:
         for page in coords['page'].unique():
             page_coords = coords[coords['page'] == page].copy()
             
-            # Sort by coordinate value
+            # Sort by coordinate value (using sort key for Antwerp string format)
             if 'coord_value' in page_coords.columns:
-                page_coords = page_coords.sort_values('coord_value')
+                page_coords = page_coords.copy()
+                page_coords['_sort_key'] = page_coords['coord_value'].apply(coord_to_sort_key)
+                page_coords = page_coords.sort_values('_sort_key').drop(columns=['_sort_key'])
                 
                 for i in range(len(page_coords) - 1):
                     curr = page_coords.iloc[i]
@@ -75,16 +78,23 @@ class MissingDetectionAnalyzer:
                     
                     curr_val = curr.get('coord_value')
                     next_val = next_coord.get('coord_value')
-                    
+
                     if pd.isna(curr_val) or pd.isna(next_val):
                         continue
-                    
-                    gap = abs(next_val - curr_val)
-                    
+
+                    # Convert to numeric for gap calculation (handles Antwerp string format)
+                    curr_numeric = coord_to_sort_key(curr_val)
+                    next_numeric = coord_to_sort_key(next_val)
+
+                    if curr_numeric is None or next_numeric is None:
+                        continue
+
+                    gap = abs(next_numeric - curr_numeric)
+
                     # If gap is large (e.g., 10.5 → 13.8 = 3.3km gap)
                     if gap > 2.0:  # More than 2km gap
                         # Estimate where missing coordinate should be
-                        expected_val = (curr_val + next_val) / 2
+                        expected_val = (curr_numeric + next_numeric) / 2
                         
                         # Estimate position (interpolate between current and next)
                         curr_x = curr.get('xc', 0)

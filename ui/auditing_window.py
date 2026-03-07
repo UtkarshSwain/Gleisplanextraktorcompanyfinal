@@ -1373,6 +1373,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
                             text_region_offset=symbol_def.text_region_offset,
                             # search_distance defaults to 300px in the function
                             # search_width defaults to 80px in the function
+                            debug_class=anchor.get("name", "custom_symbol")
                         )
 
                         # DEBUG: Show OCR result

@@ -32,7 +32,7 @@ from typing import List, Dict, Tuple, Optional, Any
 import pandas as pd
 from ui.themes import LIGHT_QSS, DARK_QSS
 from utils.dpi_utils import scale_value, get_scaled_font
-from core.linking import parse_coord, detect_fahrtrichtung, detect_fahrtrichtung_gks_relaxed, detect_fahrtrichtung_gks_nearest
+from core.linking import parse_coord, detect_fahrtrichtung, detect_fahrtrichtung_gks_relaxed, detect_fahrtrichtung_gks_nearest, coord_to_sort_key
 import os
 import numpy as np
 from uservalidation.ultimate_validator import validate_everything
@@ -3493,17 +3493,17 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 if ocr_type == 'horizontal':
                     new_text = ocr_coordinate_horizontal(det, self.current_page_bgr_array, "paddleocr")
                 else:
-                    new_text = ocr_coordinate_angular(det, self.current_page_bgr_array, "paddleocr")
+                    new_text = ocr_coordinate_angular(det, self.current_page_bgr_array, "paddleocr", debug_class="coordinate")
             elif cls == "signal":
-                new_text = ocr_signal_name(det, self.current_page_bgr_array, "paddleocr")
+                new_text = ocr_signal_name(det, self.current_page_bgr_array, "paddleocr", debug_class="signal")
             elif cls in {"gks_gesteuert", "gks_festkodiert"}:
                 if ocr_type == 'horizontal':
-                    new_text = ocr_numeric_cardinal_box(det, self.current_page_bgr_array)
+                    new_text = ocr_numeric_cardinal_box(det, self.current_page_bgr_array, debug_class=cls)
                 else:
-                    new_text = ocr_numeric_tilted_box(det, self.current_page_bgr_array)
+                    new_text = ocr_numeric_tilted_box(det, self.current_page_bgr_array, debug_class=cls)
             else:
                 new_text = ocr_generic_name(det, self.current_page_bgr_array, "paddleocr",
-                                           allow_numeric=(cls in NUMERIC_OK), cls_name=cls)
+                                           allow_numeric=(cls in NUMERIC_OK), cls_name=cls, debug_class=cls)
             
             item = self.row_id_to_tree_item.get(row_id)
             if item:
@@ -3688,20 +3688,20 @@ class WorkspaceWidget(QtWidgets.QWidget):
             # Use the same logic as on_rerun_ocr for consistency
             if cls == "coordinate":
                 if ocr_mode == 'horizontal':
-                    new_text = ocr_coordinate_horizontal(det, bgr_array, "paddleocr")
+                    new_text = ocr_coordinate_horizontal(det, bgr_array, "paddleocr", debug_class="coordinate")
                     print(f" Coordinate horizontal OCR: '{new_text}'")
                 else:
-                    new_text = ocr_coordinate_angular(det, bgr_array, "paddleocr")
+                    new_text = ocr_coordinate_angular(det, bgr_array, "paddleocr", debug_class="coordinate")
                     print(f" Coordinate angular OCR: '{new_text}'")
             elif cls == "signal":
-                new_text = ocr_signal_name(det, bgr_array, "paddleocr")
+                new_text = ocr_signal_name(det, bgr_array, "paddleocr", debug_class="signal")
                 print(f" Signal OCR: '{new_text}'")
             elif cls in {"gks_gesteuert", "gks_festkodiert"}:
                 if ocr_mode == 'horizontal':
-                    new_text = ocr_numeric_cardinal_box(det, bgr_array)
+                    new_text = ocr_numeric_cardinal_box(det, bgr_array, debug_class=cls)
                     print(f" GKS cardinal OCR: '{new_text}'")
                 else:
-                    new_text = ocr_numeric_tilted_box(det, bgr_array)
+                    new_text = ocr_numeric_tilted_box(det, bgr_array, debug_class=cls)
                     print(f" GKS tilted OCR: '{new_text}'")
             elif cls == "weichen_block":
                 #  Use specialized multi-line OCR for weichen_block
@@ -3743,7 +3743,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
                                 new_text = ocr_generic_name({'x1': x1_text, 'y1': y1_text,
                                                              'x2': x2_text, 'y2': y2_text,
                                                              'angle': text_angle},
-                                                           bgr_array, "paddleocr")
+                                                           bgr_array, "paddleocr",
+                                                           allow_numeric=True, cls_name="template", debug_class="template")
                             else:
                                 # Use horizontal OCR (most common for template symbols)
                                 from core.ocr_engine import paddleocr_recognize
@@ -3765,7 +3766,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             else:
                 # NUMERIC_OK already imported at top from core.ocr_engine
                 new_text = ocr_generic_name(det, bgr_array, "paddleocr",
-                                           allow_numeric=(cls in NUMERIC_OK), cls_name=cls)
+                                           allow_numeric=(cls in NUMERIC_OK), cls_name=cls, debug_class=cls)
                 print(f" Generic OCR ({cls}): '{new_text}'")
 
             print(f"Final OCR result: '{new_text}'")
@@ -4929,7 +4930,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
         elif sort_by == "Nach Seite":
             df_base = df_base.sort_values('page')
         elif sort_by == "Nach Koordinatenwert":
-            df_base = df_base.sort_values('coord_value', na_position='last')
+            # Use sort key for Antwerp string format
+            df_base = df_base.copy()
+            df_base['_sort_key'] = df_base['coord_value'].apply(coord_to_sort_key)
+            df_base = df_base.sort_values('_sort_key', na_position='last').drop(columns=['_sort_key'])
         elif sort_by == "Nach Text/Nummer":
             df_base = df_base.sort_values('anchor_text', na_position='last')
         

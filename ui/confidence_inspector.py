@@ -325,11 +325,17 @@ class ConfidenceInspectorDialog(QtWidgets.QDialog):
             coord_text_item = QtWidgets.QTableWidgetItem(str(row.get('coord_text', '')))
             self.table.setItem(row_idx, 5, coord_text_item)
 
-            # Coord Value
+            # Coord Value - handle both float (Wien) and string (Antwerp) formats
             coord_val = row.get('coord_value')
-            coord_val_str = f"{coord_val:.4f}" if pd.notna(coord_val) else ""
-            coord_val_item = QtWidgets.QTableWidgetItem(coord_val_str)
             if pd.notna(coord_val):
+                if isinstance(coord_val, str):
+                    coord_val_str = coord_val  # Antwerp format: "0+033.5"
+                else:
+                    coord_val_str = f"{coord_val:.4f}"  # Wien format: float
+            else:
+                coord_val_str = ""
+            coord_val_item = QtWidgets.QTableWidgetItem(coord_val_str)
+            if pd.notna(coord_val) and not isinstance(coord_val, str):
                 coord_val_item.setData(QtCore.Qt.UserRole, float(coord_val))
             self.table.setItem(row_idx, 6, coord_val_item)
 

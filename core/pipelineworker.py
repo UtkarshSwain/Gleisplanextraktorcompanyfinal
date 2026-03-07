@@ -42,7 +42,7 @@ from core.ocr_engine import ocr_coordinate_unified, _clean_coordinate_overlap, _
 from core.linking import parse_coord
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from core.ocr_engine import ocr_anchor_name, ocr_best_angle, ocr_text, ocr_custom_symbol_text
-from core.image_processing import parse_weichen_block
+from core.image_processing import parse_weichen_block, ensure_landscape
 from core.linking import (
     detect_fahrtrichtung, detect_haltepunkt_signal_group, link_haltetafel_to_gks,
     link_anchor_to_coord, merge_duplicate_signals, link_isolierstoss_fallback,
@@ -385,7 +385,44 @@ class PipelineWorker(QtCore.QThread):
                     break
 
                 bgr_color = pil_to_bgr(pil)
-                
+
+                # Validate image was loaded correctly
+                if bgr_color is None or bgr_color.size == 0:
+                    print(f"Error: Page {pidx} returned empty image from pil_to_bgr")
+                    continue
+
+                print(f"Page {pidx}: Original image size {bgr_color.shape[1]}x{bgr_color.shape[0]}")
+
+                # Auto-rotate to landscape if enabled (Antwerp feature)
+                if self.config.detection.auto_landscape:
+                    bgr_color, was_rotated = ensure_landscape(
+                        bgr_color,
+                        rotation_direction=self.config.detection.landscape_rotation_direction
+                    )
+                    if was_rotated:
+                        print(f"Page {pidx}: Rotated to landscape -> {bgr_color.shape[1]}x{bgr_color.shape[0]}")
+
+                # Apply 4-sided cropping if configured
+                if (self.config.detection.crop_top or self.config.detection.crop_bottom or
+                    self.config.detection.crop_left or self.config.detection.crop_right):
+                    h, w = bgr_color.shape[:2]
+                    crop_t = self.config.detection.crop_top
+                    crop_b = self.config.detection.crop_bottom
+                    crop_l = self.config.detection.crop_left
+                    crop_r = self.config.detection.crop_right
+
+                    # Calculate remaining dimensions after crop
+                    remaining_h = h - crop_t - crop_b
+                    remaining_w = w - crop_l - crop_r
+
+                    # Only crop if we have at least 100px remaining in each dimension
+                    if remaining_h >= 100 and remaining_w >= 100:
+                        bgr_color = bgr_color[crop_t:h-crop_b, crop_l:w-crop_r]
+                        print(f"Cropped image: {w}x{h} -> {bgr_color.shape[1]}x{bgr_color.shape[0]}")
+                    else:
+                        print(f"Warning: Crop values too large for image ({w}x{h}), "
+                              f"remaining would be {remaining_w}x{remaining_h}, skipping crop")
+
                 df_page = pd.DataFrame()
 
                 if self.run_analysis:
@@ -471,26 +508,31 @@ class PipelineWorker(QtCore.QThread):
 
                     def _do_coord(c):
                         try:
-                            txt = ocr_coordinate_unified(c, bgr_color, self.ocr_engine)
+                            txt = ocr_coordinate_unified(c, bgr_color, self.ocr_engine, config=self.config, debug_class="coordinate")
                         except Exception:
                             txt = ""
                         
                         if DEBUG_ANGLE_ROUTING and txt:
                             print(f"\n   [OCR Coordinate] Raw OCR output: '{txt}'")
+
+                        # Skip Wien-specific cleaning for simple OCR mode (Antwerp)
+                        # Simple OCR already cleans with _clean_antwerp_coordinate
+                        if self.config.ocr.use_simple_ocr:
+                            txt_fixed = txt  # Already cleaned by ocr_simple_coordinate
+                        else:
+                            txt_cleaned = _clean_coordinate_overlap(txt)
+                            txt_fixed = _fix_coordinate_brackets(txt_cleaned)
+                            txt_fixed = re.sub(r'\s*[a-zA-Z]\s*$', '', txt_fixed)
+                            txt_fixed = re.sub(r'\s*[|/\\]\s*$', '', txt_fixed)
+
+                            # Debug output for Wien cleaning steps
+                            if DEBUG_ANGLE_ROUTING and txt:
+                                if txt_cleaned != txt:
+                                    print(f"[OCR Coordinate] After clean_overlap: '{txt}' → '{txt_cleaned}'")
+                                if txt_fixed != txt_cleaned:
+                                    print(f"[OCR Coordinate] After fix_brackets: '{txt_cleaned}' → '{txt_fixed}'")
                         
-                        txt_cleaned = _clean_coordinate_overlap(txt)
-                        txt_fixed = _fix_coordinate_brackets(txt_cleaned)
-                        
-                        txt_fixed = re.sub(r'\s*[a-zA-Z]\s*$', '', txt_fixed)
-                        txt_fixed = re.sub(r'\s*[|/\\]\s*$', '', txt_fixed)
-                        
-                        if DEBUG_ANGLE_ROUTING and txt:
-                            if txt_cleaned != txt:
-                                print(f"[OCR Coordinate] After clean_overlap: '{txt}' → '{txt_cleaned}'")
-                            if txt_fixed != txt_cleaned:
-                                print(f"[OCR Coordinate] After fix_brackets: '{txt_cleaned}' → '{txt_fixed}'")
-                        
-                        val, gi = parse_coord(txt_fixed)
+                        val, gi = parse_coord(txt_fixed, self.config)
                         
                         if DEBUG_ANGLE_ROUTING and txt:
                             print(f"[OCR Coordinate] Final parse result: value={val}, gi_gl={gi}")
@@ -582,7 +624,8 @@ class PipelineWorker(QtCore.QThread):
                                 # ocr_custom_symbol_text now returns (text, bbox, position, confidence)
                                 name_txt, ocr_bbox, ocr_position, ocr_conf = ocr_custom_symbol_text(
                                     a, bgr_color, text_pos, self.ocr_engine,
-                                    text_region_offset=text_region
+                                    text_region_offset=text_region,
+                                    debug_class=a.get("name", "custom_symbol")
                                 )
                                 # Debug: Show OCR bbox result
                                 if DEBUG_CUSTOM_SYMBOLS:
@@ -599,10 +642,10 @@ class PipelineWorker(QtCore.QThread):
                             if DEBUG_CUSTOM_SYMBOLS:
                                 print(f"\n WARNING: Custom symbol '{a['name']}' detected but NOT in custom_symbol_config!")
                                 print(f"Available configs: {list(custom_symbol_config.keys())}")
-                            ocr_result = ocr_anchor_name(a, bgr_color, self.ocr_engine)
+                            ocr_result = ocr_anchor_name(a, bgr_color, self.ocr_engine, config=self.config)
                             name_txt = ocr_result
                         else:
-                            ocr_result = ocr_anchor_name(a, bgr_color, self.ocr_engine)
+                            ocr_result = ocr_anchor_name(a, bgr_color, self.ocr_engine, config=self.config)
                             if a["name"] == "weichen_block":
                                 parsed = parse_weichen_block(ocr_result)
                                 name_txt = parsed['id']
@@ -1018,7 +1061,7 @@ class PipelineWorker(QtCore.QThread):
                             # ========================================
                             if group and group.get('coordinate'):
                                 coord_txt = group['coordinate']
-                                coord_val, gi = parse_coord(coord_txt)
+                                coord_val, gi = parse_coord(coord_txt, self.config)
                                 
                                 # Try to find the coordinate detection to get its bounding box
                                 for c in coords:
@@ -1469,6 +1512,9 @@ class PipelineWorker(QtCore.QThread):
                         
                     self.status.emit("Symbolzuordnung abgeschlossen")
                     emit_progress(pidx - 1, W['raster'] + W['prep'] + W['det'] + W['ocr_c'] + W['ocr_a'] + W['link'])
+
+                    # NOTE: Coordinates stay in cropped-image space since visualization
+                    # uses bgr_color (the cropped image). No offset adjustment needed.
 
                     df_page = pd.DataFrame([r for r in all_rows if r["page"] == pidx])
                 

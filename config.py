@@ -28,7 +28,8 @@ __app_name__ = "RailDoc Studio - Gleisplan-Modul"
 # External tool paths (set to None to use system PATH, or specify full path)
 # Example for company laptop:
 TESSERACT_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\tesseract\tesseract.exe"
- 
+#TESSERACT_PATH = None  # Not needed - using PaddleOCR
+
 POPPLER_PATH = r"C:\Users\z0054cxa\Documents\Masterarbeit\Gleisplanextraktorv3\venv\poppler-25.12.0\Library\bin"
 
 # ============================================================================
@@ -62,6 +63,9 @@ DEBUG_UI_BBOX = False
 
 # Enables debug output for comparison engine (Hungarian algorithm matching, score calculations, element pairing decisions).
 DEBUG_COMPARISON = True
+
+# Enables debug output for OCR crop saving to debug_crops/ folder for inspection
+DEBUG_CROPS = False
 
 # Debug output helper - writes to debug.txt
 _DEBUG_FILE = None

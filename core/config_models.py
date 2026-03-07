@@ -32,6 +32,12 @@ class DetectionConfig:
     title_block_margin_height_default: int = 25  # when legend strip is NOT excluded
     title_block_margin_width_default: int = 8  # when legend strip is NOT excluded
 
+    # 4-sided cropping (more flexible than legend strip only)
+    crop_top: int = 0
+    crop_bottom: int = 0
+    crop_left: int = 0
+    crop_right: int = 0
+
     # Test-Time Augmentation
     use_tta: bool = True
     tta_scales: List[float] = field(default_factory=lambda: [1.0])
@@ -45,6 +51,31 @@ class DetectionConfig:
         "coordinate": 0.01,
         "isolierstoß": 0.01,
     })
+
+    # Antwerp-specific detection features
+    global_conf_threshold: float = 0.01  # YOLO confidence cutoff (Antwerp uses 0.05)
+    use_ink_filter: bool = False  # Skip tiles with low ink content
+    ink_threshold: float = 0.012  # 1.2% minimum ink ratio
+    use_centroid_halo: bool = False  # Filter edge detections by centroid
+    halo_ratio: float = 0.12  # 12% from each tile edge
+    halo_conf_boost: float = 0.50  # Min conf to keep edge detections
+    filter_contained_boxes: bool = False  # Remove boxes contained in larger boxes
+    contained_box_threshold: float = 0.80  # Containment ratio threshold
+    prefer_larger_nms: bool = False  # NMS prefers larger boxes over smaller
+
+    # Batch inference parameters (disabled by default - needs testing)
+    batch_size: int = 1  # 1 = sequential mode (safe), >1 = batch mode
+    yolo_workers: int = 0  # DataLoader workers (0 = disabled)
+
+    # Polygon handling (Antwerp fix for missing/rotated boxes)
+    use_native_obb_polygons: bool = False  # True = use YOLO's native xyxyxyxy, False = reconstruct from xywhr
+
+    # Halo expansion for inference (default True = current behavior for Wien)
+    use_halo_expansion: bool = True  # True = expand tiles with halo, False = exact tiles like Colab
+
+    # Automatic landscape orientation (Antwerp feature)
+    auto_landscape: bool = False  # True = rotate portrait pages to landscape before cropping
+    landscape_rotation_direction: str = "cw"  # "cw" = clockwise (90° right), "ccw" = counterclockwise (90° left)
 
 
 @dataclass
@@ -77,6 +108,18 @@ class OCRConfig:
     use_preprocessing: bool = True
     use_adaptive_threshold: bool = True
     use_morph_operations: bool = True
+
+    # Simple OCR mode (for high-DPI scans like Antwerp 800 DPI)
+    # When True: skips heavy preprocessing, just crops and runs PaddleOCR directly
+    use_simple_ocr: bool = False
+
+    # Simple OCR padding per class (pixels around crop box)
+    # Used when use_simple_ocr=True
+    simple_ocr_padding: Dict[str, int] = field(default_factory=lambda: {
+        "coordinate": 3,
+        "text_id": 4,
+        "default": 4
+    })
 
     # Per-class OCR confidence thresholds
     confidence_thresholds: Dict[str, float] = field(default_factory=lambda: {
@@ -130,6 +173,9 @@ class OCRConfig:
 @dataclass
 class SpatialConfig:
     """Spatial relationship parameters for linking"""
+    # Track detection control
+    enable_track_detection: bool = True  # Default: enabled for Wien
+
     # Name window search multipliers (used in name_windows_for)
     signal_dy_multiplier: float = 2.2
     signal_dx_multiplier: float = 2.4
@@ -334,6 +380,7 @@ class LayoutConfig:
     debug_yolo: bool = False
     debug_ui_bbox: bool = False
     debug_comparison: bool = False
+    debug_crops: bool = False  # Save OCR crops to debug_crops/ folder
 
     # System settings
     poppler_path: Optional[str] = None

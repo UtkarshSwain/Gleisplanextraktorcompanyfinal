@@ -181,6 +181,139 @@ def box_color(mask_red, mask_yel, x1, y1, x2, y2, thr=0.20):
     if y >= thr:
         return "yellow"
     return "none"
+
+
+# ============================================================================
+# ANTWERP DETECTION HELPERS
+# ============================================================================
+
+def nms_prefer_larger(boxes: List[Tuple[int, int, int, int]], scores: List[float],
+                      areas: List[float], thr: float = 0.5) -> List[int]:
+    """
+    NMS that prefers larger boxes - sort by area first, then confidence.
+
+    Args:
+        boxes: List of (x1, y1, x2, y2) bounding boxes
+        scores: List of confidence scores
+        areas: List of box areas
+        thr: IoU threshold for suppression
+
+    Returns:
+        List of indices to keep
+    """
+    if len(boxes) == 0:
+        return []
+
+    boxes_arr = np.array(boxes)
+    scores_arr = np.array(scores)
+    areas_arr = np.array(areas)
+
+    # Sort by area (descending), then by score (descending)
+    order = np.lexsort((scores_arr, areas_arr))[::-1]
+    keep = []
+
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        remove = [0]
+
+        for j in range(1, order.size):
+            idx_j = order[j]
+            if iou(boxes[i], boxes[idx_j]) >= thr:
+                # Prefer larger box - check if candidate is >15% larger
+                if areas_arr[idx_j] > areas_arr[i] * 1.15:
+                    keep[-1] = idx_j  # Replace with larger
+                remove.append(j)
+
+        order = np.delete(order, remove)
+
+    return keep
+
+
+def filter_contained_boxes(detections: List[Dict], threshold: float = 0.80) -> List[Dict]:
+    """
+    Remove boxes that are >=threshold contained within larger boxes.
+
+    Args:
+        detections: List of detection dicts with x1,y1,x2,y2 keys
+        threshold: Containment ratio threshold (0.80 = 80% contained)
+
+    Returns:
+        Filtered list of detections
+    """
+    if not detections:
+        return detections
+
+    def get_area(d: Dict) -> float:
+        return (d['x2'] - d['x1']) * (d['y2'] - d['y1'])
+
+    # Sort by area (largest first)
+    sorted_dets = sorted(detections, key=get_area, reverse=True)
+    keep = []
+
+    for det in sorted_dets:
+        is_contained = False
+        det_area = get_area(det)
+
+        for kept in keep:
+            # Calculate intersection
+            ix1 = max(det['x1'], kept['x1'])
+            iy1 = max(det['y1'], kept['y1'])
+            ix2 = min(det['x2'], kept['x2'])
+            iy2 = min(det['y2'], kept['y2'])
+
+            if ix1 < ix2 and iy1 < iy2:
+                inter_area = (ix2 - ix1) * (iy2 - iy1)
+                containment = inter_area / det_area if det_area > 0 else 0
+
+                if containment >= threshold:
+                    is_contained = True
+                    break
+
+        if not is_contained:
+            keep.append(det)
+
+    return keep
+
+
+def filter_by_halo(detections: List[Dict], tile_x: int, tile_y: int,
+                   tile_size: int, halo_ratio: float, conf_boost: float) -> List[Dict]:
+    """
+    Filter edge detections using centroid-based halo logic.
+
+    Removes detections at tile edges UNLESS they have high confidence.
+
+    Args:
+        detections: List of detection dicts with x1,y1,x2,y2,conf keys
+        tile_x: Tile origin X coordinate
+        tile_y: Tile origin Y coordinate
+        tile_size: Size of tile in pixels
+        halo_ratio: Fraction of tile that is halo zone (e.g., 0.12 = 12%)
+        conf_boost: Minimum confidence to keep edge detections
+
+    Returns:
+        Filtered list of detections
+    """
+    halo_px = int(tile_size * halo_ratio)
+    core_x1 = tile_x + halo_px
+    core_y1 = tile_y + halo_px
+    core_x2 = tile_x + tile_size - halo_px
+    core_y2 = tile_y + tile_size - halo_px
+
+    keep = []
+    for det in detections:
+        # Get centroid
+        cx = (det['x1'] + det['x2']) / 2
+        cy = (det['y1'] + det['y2']) / 2
+
+        # In core zone - always keep
+        if core_x1 <= cx <= core_x2 and core_y1 <= cy <= core_y2:
+            keep.append(det)
+        # In halo zone - keep only if high confidence
+        elif det.get('conf', 0) >= conf_boost:
+            keep.append(det)
+
+    return keep
 # ============================================================================
 # ANGLE DETECTION HELPERS (IMPROVED)
 # ============================================================================

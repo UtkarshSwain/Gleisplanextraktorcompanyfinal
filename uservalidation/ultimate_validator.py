@@ -16,6 +16,7 @@ import numpy as np
 from typing import List, Dict
 from uservalidation.data_validator2 import EnhancedDataValidator, ValidationIssue
 from uservalidation.missing_detection_analyzer import MissingDetectionAnalyzer, MissingDetectionRegion
+from core.linking import coord_to_sort_key
 
 # Import shared validation config (single source of truth)
 from validation_config import (
@@ -1582,8 +1583,9 @@ class UltimateValidator:
             coords_with_values = pd.DataFrame()
 
         if not coords_with_values.empty:
-            # Sort by coordinate value
-            coords_sorted = coords_with_values.sort_values('coord_value').copy()
+            # Sort by coordinate value (using sort key for Antwerp string format)
+            coords_with_values['_sort_key'] = coords_with_values['coord_value'].apply(coord_to_sort_key)
+            coords_sorted = coords_with_values.sort_values('_sort_key').drop(columns=['_sort_key']).copy()
 
             # Group by page
             for page in coords_sorted['page'].unique():
@@ -1601,7 +1603,14 @@ class UltimateValidator:
                     if pd.isna(curr_val) or pd.isna(next_val):
                         continue
 
-                    gap = next_val - curr_val
+                    # Convert to numeric for gap calculation (handles Antwerp string format)
+                    curr_numeric = coord_to_sort_key(curr_val)
+                    next_numeric = coord_to_sort_key(next_val)
+
+                    if curr_numeric is None or next_numeric is None:
+                        continue
+
+                    gap = next_numeric - curr_numeric
 
                     # Flag large gaps (> 0.5 km = 500m typically indicates missing coordinate)
                     if gap > 0.5:
