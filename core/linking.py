@@ -813,6 +813,157 @@ def link_anchor_to_coord(anchor, coords, config: 'LayoutConfig' = None, learned_
     
     return best
 
+
+def link_anchor_to_text_id(anchor, text_ids, config: 'LayoutConfig' = None):
+    """
+    Link anchor (symbol) to text_id detection using spatial relationships.
+
+    ANTWERP-SPECIFIC: Links symbol-only classes (signal, mech_point, etc.) to
+    external text_id labels detected by YOLO and OCR'd separately.
+
+    Args:
+        anchor: Symbol detection dict (e.g., signal, mech_point)
+        text_ids: List of text_id detections with OCR'd text in anchor_text field
+        config: LayoutConfig with name_search_rule per class (required for Antwerp)
+
+    Returns:
+        Best matching text_id detection or None
+
+    Note: Wien profiles unaffected - this function is only called for Antwerp.
+    """
+    if not text_ids or config is None:
+        return None
+
+    # Get name search rule for this class
+    name_rule = config.get_name_search_rule(anchor["name"])
+    if name_rule is None:
+        return None
+
+    # Get enabled search directions
+    search_dirs = {
+        'inside': name_rule.inside,
+        'left': name_rule.left,
+        'right': name_rule.right,
+        'below': name_rule.below,
+        'above': name_rule.above
+    }
+
+    # If no directions enabled, return None
+    if not any(search_dirs.values()):
+        return None
+
+    # Get spatial config
+    sp = config.spatial
+    debug_linking = config.debug_linking
+
+    # Get base multipliers (class-specific or default)
+    cls_name = anchor["name"]
+    if cls_name == "signal":
+        base_dy_multiplier = sp.signal_dy_multiplier
+        base_dx_multiplier = sp.signal_dx_multiplier
+    else:
+        base_dy_multiplier = sp.default_dy_multiplier
+        base_dx_multiplier = sp.default_dx_multiplier
+
+    # Get search steps (progressive radius expansion)
+    search_steps = getattr(sp, 'text_id_search_steps', [1.0, 1.5, 2.0, 2.5])
+
+    anchor_cx = anchor["cx"]
+    anchor_cy = anchor["cy"]
+
+    if debug_linking:
+        anchor_text_debug = anchor.get("text", anchor.get("anchor_text", ""))
+        print(f"\n[text_id linking] {cls_name} '{anchor_text_debug}' at ({anchor_cx:.0f},{anchor_cy:.0f})")
+        print(f"  Base multipliers: dy={base_dy_multiplier}, dx={base_dx_multiplier}")
+        print(f"  Search steps: {search_steps}")
+        print(f"  Search directions: {[k for k,v in search_dirs.items() if v]}")
+        print(f"  Available text_ids: {len(text_ids)}")
+
+    best = None
+    best_dist = float('inf')
+    matched_step = None
+
+    # Try progressively larger search radii
+    for step_idx, step_multiplier in enumerate(search_steps, 1):
+        # Calculate search radius for this step
+        dy_max = base_dy_multiplier * anchor["h"] * step_multiplier
+        dx_max = base_dx_multiplier * anchor["w"] * step_multiplier
+
+        if debug_linking and step_idx > 1:
+            print(f"  Step {step_idx}: Expanding search radius to dy_max={dy_max:.0f}, dx_max={dx_max:.0f}")
+
+        # Search for text_ids within this radius
+        for text_id in text_ids:
+            tid_cx = text_id["cx"]
+            tid_cy = text_id["cy"]
+
+            # Calculate absolute distances
+            dx = abs(tid_cx - anchor_cx)
+            dy = abs(tid_cy - anchor_cy)
+
+            # Distance check (if outside search radius, skip)
+            if dy > dy_max or dx > dx_max:
+                if debug_linking and step_idx == 1:  # Only log on first step
+                    tid_text = text_id.get("anchor_text", text_id.get("text", "?"))
+                    print(f"  text_id '{tid_text}' SKIP: too far (dx={dx:.0f}, dy={dy:.0f})")
+                continue
+
+            # Calculate Euclidean distance for scoring
+            dist = math.sqrt(dx**2 + dy**2)
+
+            # Determine direction
+            is_inside = (text_id["x1"] >= anchor["x1"] and text_id["x2"] <= anchor["x2"] and
+                         text_id["y1"] >= anchor["y1"] and text_id["y2"] <= anchor["y2"])
+            is_left = tid_cx < anchor_cx
+            is_right = tid_cx > anchor_cx
+            is_below = tid_cy > anchor_cy
+            is_above = tid_cy < anchor_cy
+
+            # Check if text_id is in any enabled search direction
+            direction_ok = False
+            matched_dir = None
+
+            if search_dirs['inside'] and is_inside:
+                direction_ok = True
+                matched_dir = 'inside'
+            elif search_dirs['left'] and is_left:
+                direction_ok = True
+                matched_dir = 'left'
+            elif search_dirs['right'] and is_right:
+                direction_ok = True
+                matched_dir = 'right'
+            elif search_dirs['below'] and is_below:
+                direction_ok = True
+                matched_dir = 'below'
+            elif search_dirs['above'] and is_above:
+                direction_ok = True
+                matched_dir = 'above'
+
+            if not direction_ok:
+                continue
+
+            # This text_id is a candidate
+            if dist < best_dist:
+                best = text_id
+                best_dist = dist
+                matched_step = step_idx
+                if debug_linking:
+                    tid_text = text_id.get("anchor_text", text_id.get("text", "?"))
+                    print(f"  text_id '{tid_text}' NEW BEST: dist={dist:.0f} dir={matched_dir} (step {step_idx})")
+
+        # If we found a match at this step, stop searching
+        if best:
+            if debug_linking:
+                best_text = best.get("anchor_text", best.get("text", "?"))
+                print(f"  → LINKED to text_id: '{best_text}' (found at step {matched_step})")
+            break
+
+    if debug_linking and not best:
+        print(f"  → NO MATCH")
+
+    return best
+
+
 def link_haltetafel_to_gks(haltetafel_det, gks_dets, coords, gks_coord_map,
                            max_distance=250,  #  Increased from 150
                            dy_tolerance=100,   #  Increased from 80

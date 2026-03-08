@@ -183,6 +183,9 @@ class SpatialConfig:
     default_dx_multiplier: float = 1.0
     signal_extended_dx_ratio: float = 5.0
 
+    # Progressive search steps for text_id linking (Antwerp-specific)
+    text_id_search_steps: List[float] = field(default_factory=lambda: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
+
     # Search window dimensions
     inside_padding_ratio: float = 0.10
     right_window_width_ratio: float = 2.5

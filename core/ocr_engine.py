@@ -592,14 +592,14 @@ def _preprocess_text_id_artifacts(img: np.ndarray) -> np.ndarray:
     # Invert (text should be white on black for morphology)
     inv = cv2.bitwise_not(binary)
 
-    # Remove thin vertical artifacts (< 3px wide)
+    # Remove thin vertical artifacts (< 1px wide)
     # Use opening with horizontal kernel to remove vertical lines
-    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))  # Horizontal 5x1
+    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 1))  # Horizontal 2x1
     no_vlines = cv2.morphologyEx(inv, cv2.MORPH_OPEN, kernel_h)
 
-    # Remove thin horizontal artifacts (< 3px tall)
+    # Remove thin horizontal artifacts (< 1px tall)
     # Use opening with vertical kernel to remove horizontal lines
-    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))  # Vertical 1x5
+    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 2))  # Vertical 1x2
     no_hlines = cv2.morphologyEx(no_vlines, cv2.MORPH_OPEN, kernel_v)
 
     # Optional: Small closing to reconnect text that may have been broken
@@ -616,8 +616,78 @@ def _preprocess_text_id_artifacts(img: np.ndarray) -> np.ndarray:
     return result
 
 
+def _remove_thin_artifacts_cc(img: np.ndarray) -> np.ndarray:
+    """
+    Remove thin line artifacts using connected component analysis.
+    More intelligent than morphological operations - preserves text characters better.
+
+    Analyzes each connected component and removes:
+    - Very small noise (< 30 pixels)
+    - Thin line artifacts with extreme aspect ratio (> 8:1) and small area (< 100 pixels)
+    - Single-pixel strokes that are long (< 2px width/height AND > 15px length)
+
+    Preserves:
+    - Text characters like "S", "C", "O" (normal area and aspect ratio)
+    - Multi-pixel text strokes
+
+    Args:
+        img: BGR image array
+
+    Returns:
+        Cleaned BGR image with thin artifacts removed
+    """
+    # Convert to grayscale
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img
+
+    # Threshold to binary (inverted: text=white, background=black)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # Find connected components
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+
+    # Create output image (start with all black)
+    result = np.zeros_like(binary)
+
+    # Analyze each component (skip background label 0)
+    for i in range(1, num_labels):
+        x = stats[i, cv2.CC_STAT_LEFT]
+        y = stats[i, cv2.CC_STAT_TOP]
+        w = stats[i, cv2.CC_STAT_WIDTH]
+        h = stats[i, cv2.CC_STAT_HEIGHT]
+        area = stats[i, cv2.CC_STAT_AREA]
+
+        # Calculate aspect ratio
+        aspect_ratio = max(w, h) / (min(w, h) + 1e-6)
+
+        # Filter criteria - identify artifacts to REMOVE:
+        # 1. Very small area (< 30 pixels) = noise
+        is_noise = area < 30
+
+        # 2. Extreme aspect ratio (> 8:1) AND small area (< 100) = thin line artifact
+        is_thin_line = (aspect_ratio > 8.0) and (area < 100)
+
+        # 3. Very thin width or height (< 2 pixels) AND tall/wide (> 15) = stroke artifact like "|"
+        is_stroke_artifact = ((w < 2 and h > 15) or (h < 2 and w > 15))
+
+        # Keep component if it doesn't match any artifact criteria
+        if not (is_noise or is_thin_line or is_stroke_artifact):
+            result[labels == i] = 255
+
+    # Invert back (text=black, background=white)
+    result = cv2.bitwise_not(result)
+
+    # Convert back to BGR if needed
+    if len(img.shape) == 3:
+        result = cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
+
+    return result
+
+
 @paddle_ocr_locked
-def ocr_simple(det: dict, bgr_color: np.ndarray, pad: int = 4, preprocess_fn=None, debug_class: str = "") -> str:
+def ocr_simple(det: dict, bgr_color: np.ndarray, pad: int = 4, preprocess_fn=None, debug_class: str = "", skip_color_preprocessing: bool = False) -> str:
     """
     Simple OCR: Crop and run PaddleOCR with automatic rotation for vertical text.
     Also handles colored text (orange/red) via min-channel preprocessing.
@@ -630,6 +700,7 @@ def ocr_simple(det: dict, bgr_color: np.ndarray, pad: int = 4, preprocess_fn=Non
         pad: Padding around crop (default 4px)
         preprocess_fn: Optional preprocessing function to apply to crop before OCR
         debug_class: Optional class name for debug crop saving (e.g., "text_id", "coordinate")
+        skip_color_preprocessing: If True, skip color preprocessing (for black text on white background)
 
     Returns:
         OCR text result (empty string if no text found)
@@ -694,6 +765,10 @@ def ocr_simple(det: dict, bgr_color: np.ndarray, pad: int = 4, preprocess_fn=Non
         # Try original color
         result_color = run_ocr(img)
 
+        # Skip color preprocessing if requested (for black text on white background)
+        if skip_color_preprocessing:
+            return result_color
+
         # Try preprocessed (for colored text like orange/red)
         img_processed = _preprocess_colored_text(img)
         result_processed = run_ocr(img_processed)
@@ -749,6 +824,28 @@ def ocr_simple(det: dict, bgr_color: np.ndarray, pad: int = 4, preprocess_fn=Non
             else:
                 score -= 3.0  # Penalty: large km (100+) likely means text is backwards
 
+        # Penalty: Leading zeros in km position (except '0' itself)
+        # '004' is unusual, '0' or '4' is normal
+        if km_value is not None and km_value < 100:
+            km_str = km_match.group(1)
+            if len(km_str) > 1 and km_str[0] == '0':
+                # Has leading zeros (e.g., '004', '012')
+                score -= 2.0  # Penalty: unusual format
+
+        # Bonus: Prefer 3-digit meter values (typical Antwerp format)
+        # Extract meter portion after + or -
+        meter_match = re.search(r'[+\-]\s*(\d+)', text)
+        if meter_match:
+            meter_str = meter_match.group(1)
+            meter_len = len(meter_str.replace('.', '').split()[0])  # Digits before decimal/space
+
+            if meter_len == 3:
+                score += 2.0  # Bonus: typical 3-digit meter (e.g., '033', '415', '184')
+            elif meter_len == 1:
+                score -= 1.0  # Penalty: single-digit meter unusual (e.g., '3')
+            elif meter_len == 2:
+                score += 0.5  # Small bonus: 2-digit meter acceptable (e.g., '28')
+
         # Garbage characters reduce score
         # Accept both + and - (minus is OCR error for plus)
         garbage_chars = sum(1 for c in text if c not in '0123456789+-. ')
@@ -780,10 +877,34 @@ def ocr_simple(det: dict, bgr_color: np.ndarray, pad: int = 4, preprocess_fn=Non
                 (score_ccw, result_ccw, 'ccw'),
                 (score_orig, result_orig, 'orig')
             ]
-            best = max(results, key=lambda x: x[0])
 
-            if DEBUG_OCR:
-                print(f"[ocr_simple] vertical: cw='{result_cw}'({score_cw:.1f}) ccw='{result_ccw}'({score_ccw:.1f}) orig='{result_orig}'({score_orig:.1f}) -> '{best[1]}' ({best[2]})")
+            # Find max score
+            max_score = max(r[0] for r in results)
+
+            # Get all results with max score (handle ties)
+            top_results = [r for r in results if r[0] == max_score]
+
+            if len(top_results) > 1:
+                # Multiple results tied for best score - use majority voting
+                # Count how many times each text appears
+                from collections import Counter
+                text_counts = Counter(r[1] for r in top_results)
+
+                # Pick the text that appears most often (majority vote)
+                most_common_text, count = text_counts.most_common(1)[0]
+
+                # Find the first result with that text
+                best = next(r for r in top_results if r[1] == most_common_text)
+
+                if DEBUG_OCR:
+                    tied_scores = ', '.join(f"{r[2]}='{r[1]}'({r[0]:.1f})" for r in top_results)
+                    print(f"[ocr_simple] vertical: {tied_scores} -> '{best[1]}' ({best[2]}) [majority: {count}/{len(top_results)}]")
+            else:
+                # Only one best result
+                best = top_results[0]
+
+                if DEBUG_OCR:
+                    print(f"[ocr_simple] vertical: cw='{result_cw}'({score_cw:.1f}) ccw='{result_ccw}'({score_ccw:.1f}) orig='{result_orig}'({score_orig:.1f}) -> '{best[1]}' ({best[2]})")
 
             # Save final crop with OCR result for debugging
             if debug_class:
@@ -892,6 +1013,10 @@ def ocr_simple_coordinate(det: dict, bgr_color: np.ndarray, config=None) -> str:
     if not raw:
         return ""
 
+    # Post-processing: Remove common artifact characters before format-specific cleaning
+    # Remove "|" (vertical line artifacts from scan imperfections)
+    raw = raw.replace("|", "")
+
     # Use Antwerp-specific cleaning (different format from Wien)
     # Antwerp: "0+033.5" format, Wien: "0,1234 Gl.113" format
     cleaned = _clean_antwerp_coordinate(raw)
@@ -905,7 +1030,7 @@ def ocr_simple_coordinate(det: dict, bgr_color: np.ndarray, config=None) -> str:
 def ocr_simple_text(det: dict, bgr_color: np.ndarray, config=None, debug_class: str = "text_id") -> str:
     """
     Simple text OCR for high-DPI scans (text_id class).
-    Applies morphological preprocessing to remove small line artifacts.
+    NO preprocessing - all image preprocessing methods damage 'S' characters in this font.
 
     Args:
         det: Detection dict with x1, y1, x2, y2 keys
@@ -919,7 +1044,21 @@ def ocr_simple_text(det: dict, bgr_color: np.ndarray, config=None, debug_class: 
         pad = config.ocr.simple_ocr_padding.get("text_id",
               config.ocr.simple_ocr_padding.get("default", 4))
 
-    return ocr_simple(det, bgr_color, pad=pad, preprocess_fn=_preprocess_text_id_artifacts, debug_class=debug_class)
+    # DISABLED: Connected component analysis ALSO damages "S" characters
+    # The thin curved segments of "S" (< 2px wide) get filtered out as artifacts
+    # return ocr_simple(det, bgr_color, pad=pad, preprocess_fn=_remove_thin_artifacts_cc, debug_class=debug_class)
+
+    # Best approach: Let PaddleOCR handle raw 800 DPI crops directly
+    # Skip color preprocessing to avoid orange line artifacts being read as "i"
+    result = ocr_simple(det, bgr_color, pad=pad, preprocess_fn=None, debug_class=debug_class, skip_color_preprocessing=True)
+
+    # Post-processing: Remove common artifact characters
+    # Remove "|" (vertical line artifacts from scan imperfections)
+    # Remove spaces (PaddleOCR sometimes adds spurious spaces)
+    result = result.replace("|", "")
+    result = result.replace(" ", "")
+
+    return result
 
 
 # ===================== =======================================================
@@ -2835,10 +2974,11 @@ def ocr_anchor_name(anchor: dict, bgr_color: np.ndarray, engine: str, config=Non
     OCR for anchor boxes with correct dual-angle routing.
 
     If config.ocr.use_simple_ocr=True, uses simple OCR for supported classes.
+    For symbol-only classes (requires_ocr=false), skips direct OCR and uses name window search.
     """
     cls = anchor["name"]
 
-    # Simple OCR mode for high-DPI scans (Antwerp)
+    # Simple OCR mode for high-DPI scans (Antwerp text_id and coordinate classes)
     if config is not None and hasattr(config, 'ocr') and config.ocr.use_simple_ocr:
         # Use simple OCR for text_id and other generic classes
         if cls not in {"signal", "weichen_block", "gks_gesteuert", "gks_festkodiert"}:
@@ -2916,7 +3056,7 @@ def ocr_anchor_name(anchor: dict, bgr_color: np.ndarray, engine: str, config=Non
         return name
 
     rule = LINK_RULES.get(cls, {}).get("mode", "either")
-    windows = name_windows_for(anchor, bgr_color.shape, rule)
+    windows = name_windows_for(anchor, bgr_color.shape, rule, config)
     for (x1, y1, x2, y2) in windows:
         crop = Image.fromarray(cv2.cvtColor(bgr_color[y1:y2, x1:x2], cv2.COLOR_BGR2RGB))
         best_name, best_score = None, -1.0

@@ -28,13 +28,13 @@ model_path: null
 debug_signals: false
 debug_angle_routing: false
 debug_ocr: true  # Enable to see OCR results during testing
-debug_linking: false
+debug_linking: true  # Enable to see name linking messages
 debug_track: false
 debug_custom_symbols: false
 debug_yolo: false
 debug_ui_bbox: false
 debug_comparison: false
-debug_crops: false  # Set to true to save OCR crops for inspection
+debug_crops: true  # Set to true to save OCR crops for inspection
 
 # System settings
 poppler_path: null
@@ -62,10 +62,11 @@ classes:
     linking_rule:
       mode: "below"
     name_search_rule:
-      inside: true
-      left: true
-      right: true
-      below: true
+      inside: false
+      left: false
+      right: false
+      below: true   # text_id below signal
+      above: true   # text_id above signal
 
   - name: "coordinate"
     class_id: 1
@@ -97,6 +98,12 @@ classes:
     requires_coordinate: true
     linking_rule:
       mode: "either"
+    name_search_rule:
+      inside: false
+      left: false
+      right: false
+      below: true   # text_id below point
+      above: true   # text_id above point
 
   - name: "elec_point"
     class_id: 3
@@ -106,6 +113,12 @@ classes:
     requires_coordinate: true
     linking_rule:
       mode: "either"
+    name_search_rule:
+      inside: false
+      left: false
+      right: false
+      below: true   # text_id below point
+      above: true   # text_id above point
 
   - name: "insulation_joint"
     class_id: 4
@@ -152,6 +165,12 @@ classes:
     requires_coordinate: true
     linking_rule:
       mode: "either"
+    name_search_rule:
+      inside: false
+      left: true    # Search left (includes below-left diagonal)
+      right: true   # Search right (includes above-right diagonal)
+      below: true   # Search below
+      above: true   # Search above (distance range search)
 
   - name: "coupling_coil_disabled"
     class_id: 9
@@ -161,6 +180,12 @@ classes:
     requires_coordinate: true
     linking_rule:
       mode: "either"
+    name_search_rule:
+      inside: false
+      left: true    # Search left (includes below-left diagonal)
+      right: true   # Search right (includes above-right diagonal)
+      below: true   # Search below
+      above: true   # Search above (distance range search)
 
   - name: "spie_loop"
     class_id: 10
@@ -170,6 +195,12 @@ classes:
     requires_coordinate: true
     linking_rule:
       mode: "either"
+    name_search_rule:
+      inside: false
+      left: false
+      right: false
+      below: true   # text_id below loop
+      above: true   # text_id above loop
 
 # =============================================================================
 # DETECTION CONFIGURATION (YOLO)
@@ -327,6 +358,9 @@ spatial:
   default_dy_multiplier: 1.5
   default_dx_multiplier: 1.0
   signal_extended_dx_ratio: 5.0
+
+  # Progressive text_id search steps (stepwise radius expansion)
+  text_id_search_steps: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5]  # Try these multipliers progressively
 
   # Search window dimensions
   inside_padding_ratio: 0.10

@@ -47,6 +47,7 @@ cache/
 *.pth
 best.pt
 yolov8n.pt
+Gleisplanextraktoryolomodel/
 
 # Archive folder with old versions
 archive_old_versions/

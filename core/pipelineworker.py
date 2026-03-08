@@ -45,7 +45,7 @@ from core.ocr_engine import ocr_anchor_name, ocr_best_angle, ocr_text, ocr_custo
 from core.image_processing import parse_weichen_block, ensure_landscape
 from core.linking import (
     detect_fahrtrichtung, detect_haltepunkt_signal_group, link_haltetafel_to_gks,
-    link_anchor_to_coord, merge_duplicate_signals, link_isolierstoss_fallback,
+    link_anchor_to_coord, link_anchor_to_text_id, merge_duplicate_signals, link_isolierstoss_fallback,
     detect_fahrtrichtung_gks_relaxed, detect_fahrtrichtung_gks_nearest
 )
 import numpy as np
@@ -1003,9 +1003,74 @@ class PipelineWorker(QtCore.QThread):
                         print(f"Total Haltepunkt soft-claimed: {len(haltepunkt_coord_ids)}")
                         print(f"{'='*70}\n")
 
-                        print(f"\n{'='*70}")
-                        print(f" STEP 2: Linking all elements (including haltetafel)")
-                        print(f"{'='*70}")
+                    # ========================================================================
+                    # STEP 1D: Link symbol-only anchors to text_id labels (ANTWERP ONLY)
+                    # ========================================================================
+                    # For Antwerp profile: Symbol-only classes (signal, mech_point, etc.) need
+                    # to be linked to external text_id labels detected separately by YOLO.
+                    # This is detection-to-detection spatial linking, not OCR-based.
+                    if (self.config is not None and
+                        hasattr(self.config, 'ocr') and
+                        self.config.ocr.use_simple_ocr):  # Antwerp profile marker
+
+                        if DEBUG_LINKING:
+                            print(f"\n{'='*70}")
+                            print(f" STEP 1D: Linking symbol-only anchors to text_id (Antwerp)")
+                            print(f"{'='*70}")
+
+                        # Extract text_id detections from anchor_results
+                        text_id_detections = []
+                        for (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf) in anchor_results:
+                            if a["name"] == "text_id":
+                                # Store text_id detection with its OCR'd text
+                                a["anchor_text"] = name_txt  # Copy OCR text to detection dict
+                                text_id_detections.append(a)
+
+                        if DEBUG_LINKING:
+                            print(f"Found {len(text_id_detections)} text_id detections")
+
+                        # Link each symbol-only anchor to nearest text_id
+                        text_id_links = {}  # Map anchor_id -> text_id detection
+                        used_text_id_ids = set()
+
+                        for (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf) in anchor_results:
+                            # Skip text_id (they are the source, not target)
+                            if a["name"] == "text_id":
+                                continue
+
+                            # Check if this class has name_search_rule configured
+                            cls_def = self.config.get_class_by_name(a["name"])
+                            if cls_def and cls_def.name_search_rule:
+                                # Check if any search direction is enabled
+                                has_name_search = (cls_def.name_search_rule.inside or
+                                                   cls_def.name_search_rule.left or
+                                                   cls_def.name_search_rule.right or
+                                                   cls_def.name_search_rule.below or
+                                                   cls_def.name_search_rule.above)
+
+                                if has_name_search:
+                                    # Filter out already-used text_ids
+                                    available_text_ids = [tid for tid in text_id_detections
+                                                          if id(tid) not in used_text_id_ids]
+
+                                    # Link to nearest text_id
+                                    linked_text_id = link_anchor_to_text_id(a, available_text_ids, config=self.config)
+
+                                    if linked_text_id is not None:
+                                        # Store the link
+                                        text_id_links[id(a)] = linked_text_id
+                                        used_text_id_ids.add(id(linked_text_id))
+
+                                        # Update anchor's anchor_text with text_id's text
+                                        text_id_text = linked_text_id.get("anchor_text", linked_text_id.get("text", ""))
+                                        a["anchor_text"] = text_id_text
+
+                                        if DEBUG_LINKING:
+                                            print(f"Linked {a['name']} → text_id '{text_id_text}'")
+
+                        if DEBUG_LINKING:
+                            print(f"Total symbol-to-text_id links: {len(text_id_links)}")
+                            print(f"{'='*70}\n")
 
                     #  STEP 2: Now process ALL elements (including haltetafel)
                     # Initialize counters for NO_OCR_CLASSES to generate unique names
@@ -1019,8 +1084,14 @@ class PipelineWorker(QtCore.QThread):
 
                         # Generate counter-based names for NO_OCR_CLASSES (except haltepunkt which has special handling)
                         if a["name"] in no_ocr_counters:
-                            name_txt = f"{a['name']} {no_ocr_counters[a['name']]}"
-                            no_ocr_counters[a["name"]] += 1
+                            # Check if STEP 1D already linked a text_id to this anchor (Antwerp only)
+                            if "anchor_text" in a and a["anchor_text"]:
+                                # Use the linked text_id name
+                                name_txt = a["anchor_text"]
+                            else:
+                                # Generate counter-based name
+                                name_txt = f"{a['name']} {no_ocr_counters[a['name']]}"
+                                no_ocr_counters[a["name"]] += 1
                         
                         #  NEW: SKIP if this signal is haltepunkt-referenced
                         if a["name"] == "signal" and id(a) in haltepunkt_referenced_signals:
