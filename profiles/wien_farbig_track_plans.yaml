@@ -1,0 +1,436 @@
+# =============================================================================
+# Wien Track Plans - Farbig (Color) Profile
+# =============================================================================
+# This profile contains all parameters optimized for colored railway
+# layout plans scanned at 500 DPI.
+#
+# Version: 1.0
+# Last updated: 2024
+# Compatible with: YOLO v8 OBB model (wienfarbig)
+#
+# Siemens Mobility GmbH
+# =============================================================================
+
+profile_name: "wien_farbig_track_plans"
+profile_version: "1.0"
+description: "Wien Gleispläne Farbig (A0, 500 DPI)"
+
+# Model configuration (optional - can be overridden at runtime)
+model_path: null
+
+# Debug flags (all disabled for production)
+debug_signals: false
+debug_angle_routing: false
+debug_ocr: false
+debug_linking: false
+debug_track: false
+debug_custom_symbols: false
+debug_yolo: false
+debug_ui_bbox: false
+debug_comparison: false
+debug_crops: false  # Set to true to save OCR crops for inspection
+
+# System settings
+poppler_path: null
+zoom_size: 2048
+
+# =============================================================================
+# CLASS DEFINITIONS (13 DB Symbol Types)
+# =============================================================================
+# Values from config.py CLASS_THRESH and NMS_THRESHOLDS
+# =============================================================================
+
+classes:
+  - name: "signal"
+    class_id: 0
+    confidence_threshold: 0.40
+    nms_threshold: 0.32
+    requires_ocr: true
+    requires_coordinate: true
+    id_pattern: "^[A-ZÄÖÜ]{1,4}\\d{1,4}$"
+    numeric_ok: false
+    linking_rule:
+      mode: "below"
+    name_search_rule:
+      left: true
+      right: true
+      below: true
+      above: true
+
+  - name: "gm_block"
+    class_id: 1
+    confidence_threshold: 0.22
+    nms_threshold: 0.40
+    requires_ocr: false
+    fixed_text: "GM"
+    linking_rule:
+      mode: "below"
+    name_search_rule:
+      inside: true
+      right: true
+      below: true
+
+  - name: "gks_festkodiert"
+    class_id: 2
+    confidence_threshold: 0.85
+    nms_threshold: 0.30
+    requires_ocr: true
+    id_pattern: "^\\d{3,4}$"
+    numeric_ok: true
+    linking_rule:
+      mode: "either"
+    name_search_rule:
+      inside: true
+      left: true
+      right: true
+      below: true
+
+  - name: "gks_gesteuert"
+    class_id: 3
+    confidence_threshold: 0.50
+    nms_threshold: 0.30
+    requires_ocr: true
+    id_pattern: "^\\d{3,4}$"
+    numeric_ok: true
+    linking_rule:
+      mode: "either"
+    name_search_rule:
+      inside: true
+      left: true
+      right: true
+      below: true
+
+  - name: "weichen_block"
+    class_id: 4
+    confidence_threshold: 0.42
+    nms_threshold: 0.30
+    requires_ocr: true
+    numeric_ok: true
+    linking_rule:
+      mode: "inside"
+      block: true
+    name_search_rule:
+      inside: true
+      right: true
+      below: true
+
+  - name: "isolierstoß"
+    class_id: 5
+    confidence_threshold: 0.09
+    nms_threshold: 0.40
+    requires_ocr: false
+    linking_rule:
+      mode: "above"
+      tilted_ok: true
+
+  - name: "haltepunkt"
+    class_id: 6
+    confidence_threshold: 0.32
+    nms_threshold: 0.40
+    requires_ocr: false
+    linking_rule:
+      mode: "either"
+
+  - name: "sverbinder"
+    class_id: 7
+    confidence_threshold: 0.50
+    nms_threshold: 0.40
+    requires_ocr: false
+    linking_rule:
+      mode: "above"
+
+  - name: "coordinate"
+    class_id: 8
+    confidence_threshold: 0.10
+    nms_threshold: 0.25
+    requires_ocr: true
+
+  - name: "prellbock"
+    class_id: 9
+    confidence_threshold: 0.30
+    nms_threshold: 0.40
+    requires_ocr: false
+    fixed_text: "PB"
+    numeric_ok: true
+    linking_rule:
+      mode: "right_or_below"
+      dx_multiplier: 2.0
+      prefer_horizontal: true
+    name_search_rule:
+      inside: true
+      right: true
+      below: true
+
+  - name: "haltetafel"
+    class_id: 10
+    confidence_threshold: 0.81
+    nms_threshold: 0.35
+    requires_ocr: false
+    linking_rule:
+      mode: "either"
+      dx_multiplier: 2.0
+      fallback_dy_steps: [2.0, 2.5]
+
+  - name: "weichenende"
+    class_id: 11
+    confidence_threshold: 0.70
+    nms_threshold: 0.40
+    requires_ocr: false
+    linking_rule:
+      mode: "either"
+      dx_multiplier: 3.0
+      prefer_horizontal: true
+      fallback_dy_steps: [1.5, 2.0, 2.5]
+
+  - name: "weichengruppenende"
+    class_id: 12
+    confidence_threshold: 0.70
+    nms_threshold: 0.40
+    requires_ocr: false
+    linking_rule:
+      mode: "either"
+      dx_multiplier: 3.0
+      prefer_horizontal: true
+      search_left: true
+      fallback_dy_steps: [1.5, 2.0, 2.5, 3.0]
+
+# =============================================================================
+# DETECTION CONFIGURATION (YOLO)
+# =============================================================================
+# Values from config.py processing parameters
+# =============================================================================
+
+detection:
+  tile_size: 2048
+  overlap_pct: 40
+  dpi: 500
+  pred_imgsz: 1024
+  tile_halo: 320
+  obb_only: true
+
+  # Legend strip exclusion
+  exclude_legend_strip: true
+  legend_strip_width_percent: 12
+  legend_strip_max_pixels: 4200
+
+  # Title block margins (for track detection)
+  title_block_margin_height: 100  # when legend strip is excluded
+  title_block_margin_height_default: 25  # when legend strip is NOT excluded
+  title_block_margin_width_default: 8  # when legend strip is NOT excluded
+
+  # Test-time augmentation
+  use_tta: true
+  tta_scales: [1.0]
+  tta_flips: [0, 1]
+  tta_min_votes: 1
+
+  # Uncertain detection thresholds
+  uncertain_thresh_multiplier: 0.5
+  min_uncertain_thresh_default: 0.10
+  min_uncertain_thresh:
+    coordinate: 0.01
+    isolierstoß: 0.01
+
+# =============================================================================
+# OCR CONFIGURATION (PaddleOCR)
+# =============================================================================
+# Values from config.py OCR settings
+# =============================================================================
+
+ocr:
+  engine: "paddleocr"
+  max_workers: 8
+
+  # Signal-specific parameters
+  sig_one_window: true
+  sig_pad: 14
+  sig_expand_x: 0.18
+  sig_expand_y: 0.22
+  sig_use_tighten: false
+  sig_score_min: 1.3
+  sig_line_thick: 5
+  signal_text_height_hint: null
+
+  # Left bias expansion
+  left_bias_expansion_classes: ["signal"]
+  left_bias_ratio_h: 0.8
+
+  # Angle detection
+  angle_tol: 12.0
+
+  # PaddleOCR preprocessing
+  denoise_strength: 4
+  sharpen_amount: 1.3
+  use_preprocessing: true
+  use_adaptive_threshold: true
+  use_morph_operations: true
+
+  # Per-class OCR confidence thresholds
+  confidence_thresholds:
+    signal: 0.50
+    gks_gesteuert: 0.40
+    gks_festkodiert: 0.40
+    coordinate: 0.65
+    default: 0.45
+
+  # Cardinal (horizontal/vertical) text parameters
+  cardinal_detection_padding:
+    coordinate: 4
+    signal: 4
+    weichenende: 8
+    haltetafel: 4
+    prellbock: 4
+    gks_gesteuert: 8
+    gks_festkodiert: 8
+    weichengruppenende: 4
+    weichen_block: 2
+
+  cardinal_expansion_factor:
+    coordinate: [1.0, 1.0]
+    signal: [1.0, 1.0]
+    gks_gesteuert: [0.6, 0.6]
+    gks_festkodiert: [0.6, 0.6]
+    weichen_block: [1.1, 1.0]
+
+  # Angular (rotated) text parameters
+  angular_detection_padding:
+    coordinate: 4
+    signal: 8
+    weichenende: 4
+    haltetafel: 4
+    prellbock: 4
+    gks_gesteuert: 6
+    gks_festkodiert: 6
+
+  angular_expansion_factor:
+    coordinate: [1.0, 1.0]
+    signal: [1.0, 1.05]
+    gks_gesteuert: [0.75, 0.75]
+    gks_festkodiert: [0.75, 0.75]
+
+# =============================================================================
+# SPATIAL RELATIONSHIP CONFIGURATION
+# =============================================================================
+# Hardcoded multipliers from linking.py extracted here
+# =============================================================================
+
+spatial:
+  # Name window search multipliers
+  signal_dy_multiplier: 2.2
+  signal_dx_multiplier: 2.4
+  default_dy_multiplier: 1.6
+  default_dx_multiplier: 1.0
+  signal_extended_dx_ratio: 5.0
+
+  # Search window dimensions
+  inside_padding_ratio: 0.10
+  right_window_width_ratio: 2.5
+  right_window_height_ratio: 0.6
+  left_window_width_ratio: 4.0
+  left_window_height_ratio: 0.6
+  sverbinder_window_width_ratio: 0.9
+  sverbinder_window_height_ratio: 0.3
+
+  # Coordinate linking distances
+  dy_max_base_multiplier: 1.6
+  dx_base_multiplier: 0.6
+  dx_tight_multiplier: 0.45
+  dx_minimum_threshold: 30
+  left_search_bonus: 1.3
+
+  # Haltetafel-GKS linking
+  haltetafel_gks_max_distance: 250
+  haltetafel_gks_dy_tolerance: 100
+  haltetafel_gks_dx_tolerance: 300
+
+  # Signal-GKS linking (Fahrtrichtung detection) - Standard mode
+  signal_gks_max_distance: 250
+  signal_gks_dy_min: 30
+  signal_gks_dy_max: 200
+  signal_gks_dx_tolerance_left: 120
+  signal_gks_dx_tolerance_right: 120
+  signal_gks_angle_tolerance: 20.0
+
+  # Signal-GKS linking - Relaxed mode (fallback)
+  signal_gks_relaxed_dx_tolerance: 200
+  signal_gks_relaxed_dy_max: 600
+  signal_gks_relaxed_angle_tolerance: 25.0
+
+  # Signal-GKS linking - Nearest mode (last resort)
+  signal_gks_nearest_max_distance: 800
+  signal_gks_nearest_angle_tolerance: 30.0
+
+  # Track perpendicular detection
+  track_perpendicular_max_distance: 1500
+  track_window_size: 25
+  track_search_radius: 500
+  track_sample_distance: 200
+
+  # Haltepunkt-Signal-Coordinate clustering
+  haltepunkt_cluster_max_distance: 250
+  haltepunkt_signal_dy_min: 30
+  haltepunkt_signal_dy_max: 200
+  haltepunkt_coord_dy_min: 20
+  haltepunkt_coord_dy_max: 150
+  haltepunkt_dx_tolerance: 100
+  haltepunkt_angle_tolerance: 20.0  # Max angle difference for angular haltepunkt
+
+  # Isolierstoß fallback linking
+  isolierstoss_fallback_radius: 300
+
+  # Adaptive pattern learning
+  adaptive_search_dx_multiplier: 3.0
+  adaptive_search_dx_minimum: 150
+  adaptive_search_dy_multiplier: 3.0
+  adaptive_search_dy_minimum: 80
+
+  # Signal group clustering
+  spatial_threshold_single_section: 1000
+  spatial_threshold_gap_multiplier: 3.0
+  spatial_threshold_section_gap_min: 1000
+  spatial_threshold_section_gap_max: 2500
+
+# =============================================================================
+# VALIDATION CONFIGURATION
+# =============================================================================
+
+validation:
+  # German coordinate format: "12,345 Gl.113"
+  coordinate_pattern: '^\s*([+-]?\d{1,3}[,\.]\d{3,4})\s*(?:(?:GI|Gl)\.?\s*([A-Za-z0-9./-]{1,6}))?\s*$'
+
+  # Per-class ID patterns
+  class_id_patterns:
+    signal: "^[A-ZÄÖÜ]{1,4}\\d{1,4}$"
+    gks_gesteuert: "^\\d{3,4}$"
+    gks_festkodiert: "^\\d{3,4}$"
+
+  # Classes allowing pure numeric IDs
+  numeric_ok_classes:
+    - "gks_gesteuert"
+    - "gks_festkodiert"
+    - "weichen_block"
+    - "prellbock"
+
+  # Decimal separator configuration (for coordinate parsing)
+  # German format uses comma as decimal separator: "12,345"
+  # Other formats may use dot: "12.345"
+  decimal_separator_input: ","   # What appears in scanned documents
+  decimal_separator_output: "."  # What to normalize to (for float parsing)
+
+# =============================================================================
+# COMPONENT SELECTION (for interfaces.py)
+# =============================================================================
+
+components:
+  detector: "yolo"
+  linker: "rule_based"
+  ocr_engine: "paddleocr"
+  validator: "rule_based"
+  storage: ["local_file"]
+
+component_config:
+  detector_args:
+    model_path: null  # Set at runtime
+  storage_args:
+    local_file:
+      output_dir: "output/"

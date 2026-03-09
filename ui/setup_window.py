@@ -64,7 +64,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         w, h = get_adaptive_window_size(1000, 800, max_screen_pct=0.85)
         self.resize(w, h)
         center_window(self)
-        self.pdf_path = None; self.model_path = None; self.ocr_engine = "paddleocr"
+        self.pdf_path = None; self.model_path = "Gleisplanextraktoryolomodel/wienschwarz.pt"; self.ocr_engine = "paddleocr"
         self.profile_path = "profiles/siemens_track_plans.yaml"  # Default profile
         self.layout_config = None  # Will be loaded when analysis starts
         self.view = InteractiveGraphicsView(self)
@@ -218,13 +218,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 padding: {scale_value(6)}px 0px;
             """)
 
-        if hasattr(self, 'lbl_model') and "Kein Modell" in self.lbl_model.text():
-            self.lbl_model.setStyleSheet(f"""
-                color: {self.theme_colors['text_secondary']};
-                font-size: 8pt;
-                font-weight: normal;
-                padding: {scale_value(6)}px 0px;
-            """)
 
         # Update log
         if hasattr(self, 'log'):
@@ -403,63 +396,18 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
         top.addWidget(self.pdf_frame)
 
-        # Step 2: Model - Compact
-        self.model_frame = self._create_step_frame_compact(
-            step_num="02",
-            title="KI-MODELL"
-        )
-        model_layout = self.model_frame.layout()
-
-        self.btn_model = QtWidgets.QPushButton("DURCHSUCHEN")
-        self.btn_model.setMinimumHeight(scale_value(36))
-        self.btn_model.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
-        self.btn_model.setStyleSheet("""
-            QPushButton {
-                font-size: 9pt;
-                font-weight: 700;
-                letter-spacing: 1px;
-                padding: 8px 16px;
-                border-radius: 8px;
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                           stop:0 #009999, stop:1 #00adef);
-                color: white;
-                border: none;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                           stop:0 #00b3b3, stop:1 #33c1ff);
-            }
-            QPushButton:pressed {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                                           stop:0 #007f7f, stop:1 #0088cc);
-            }
-        """)
-        self.btn_model.setToolTip("Wählen Sie das KI-Modell (.pt Datei)")
-        model_layout.addWidget(self.btn_model)
-
-        # Compact status
-        self.lbl_model = QtWidgets.QLabel("Kein Modell")
-        self.lbl_model.setStyleSheet(f"font-size: 8pt; font-weight: normal; color: #a0a4b8; padding: {scale_value(6)}px 0px;")
-        self.lbl_model.setAlignment(QtCore.Qt.AlignCenter)
-        self.lbl_model.setMinimumHeight(scale_value(24))
-        self.lbl_model.setWordWrap(True)  # Allow long filenames to wrap
-        model_layout.addWidget(self.lbl_model)
-        model_layout.addStretch()  # Anchor widgets to top, prevent vertical shift on resize
-
-        top.addWidget(self.model_frame)
-
-        # Step 3: Profile Selection - Compact
+        # Step 2: Profile Selection - Compact
         self.profile_frame = self._create_step_frame_compact(
-            step_num="03",
+            step_num="02",
             title="PROFIL"
         )
         profile_layout = self.profile_frame.layout()
 
         self.combo_profile = QtWidgets.QComboBox()
         self.combo_profile.addItems([
-            "Wien Gleispläne",
-            "Antwerp Railway Schematics (DRAFT)"
-            # Future layout types will be added here
+            "Wien Schwarz",
+            "Wien Farbig",
+            "Antwerp"
         ])
         self.combo_profile.setMinimumHeight(scale_value(36))
         self.combo_profile.setStyleSheet("""
@@ -506,9 +454,9 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
         top.addWidget(self.profile_frame)
 
-        # Step 4: Run - Compact
+        # Step 3: Run - Compact
         self.run_frame = self._create_step_frame_compact(
-            step_num="04",
+            step_num="03",
             title="AUSFÜHREN"
         )
         run_layout = self.run_frame.layout()
@@ -618,7 +566,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
         # Connect button signals
         self.btn_pdf.clicked.connect(self.on_open_pdf)
-        self.btn_model.clicked.connect(self.on_select_model)
         self.btn_run.clicked.connect(self.on_run)
 
         #  NOW create menus and toolbar AFTER all widgets exist
@@ -832,13 +779,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 self._add_recent_pdf(p)
                 self._update_run_button_state()
                 self._update_resolution_warning(p)
-            elif p_lower.endswith(".pt"):
-                self.model_path = p
-                self.lbl_model.setText(f" {os.path.basename(self.model_path)}")
-                self.lbl_model.setStyleSheet("color: #00a8b0; font-weight: 600; font-size: 9pt;")
-                self.on_status(f"Modell geladen: {os.path.basename(self.model_path)}")
-                self._add_recent_model(p)
-                self._update_run_button_state()
         e.acceptProposedAction()
 
     def _display_placeholder(self, text: str):
@@ -873,29 +813,20 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             self._add_recent_pdf(fn)
             self._update_run_button_state()
             self._update_resolution_warning(fn)
-    def on_select_model(self):
-        fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Auswählen von YOLO .pt", "", "PyTorch Weights (*.pt)")
-        if fn:
-            self.model_path = fn
-            self.lbl_model.setText(f" {os.path.basename(fn)}")
-            self.lbl_model.setStyleSheet("color: #00a8b0; font-weight: 600; font-size: 9pt;")
-            self.on_status(f" Modell geladen: {os.path.basename(fn)}")
-            self._add_recent_model(fn)  #  Track recent file
-            self._update_run_button_state()  #  Update button state
+
     def on_ocr_changed(self, txt:str): self.ocr_engine = txt; self.on_status(f"OCR-Engine geändert zu: {txt}")
 
     def on_profile_changed(self, index: int):
-        """Handle profile/layout type selection change."""
-        # Each layout type has its own profile with tuned parameters
+        """Handle profile/layout type selection change - also sets the YOLO model automatically."""
+        # Each layout type has its own profile and corresponding YOLO model
         profile_map = {
-            0: ("profiles/siemens_track_plans.yaml", "Wien Gleispläne"),
-            1: ("profiles/antwerp_track_plans.yaml", "Antwerp Railway Schematics (DRAFT)"),
-            # Future layout types:
-            # 2: ("profiles/other_layout.yaml", "Other Layout Type"),
+            0: ("profiles/siemens_track_plans.yaml", "Wien Schwarz", "Gleisplanextraktoryolomodel/wienschwarz.pt"),
+            1: ("profiles/siemens_track_plans.yaml", "Wien Farbig", "Gleisplanextraktoryolomodel/wienfarbig.pt"),
+            2: ("profiles/antwerp_track_plans.yaml", "Antwerp", "Gleisplanextraktoryolomodel/antwerp.pt"),
         }
-        self.profile_path, description = profile_map.get(index, profile_map[0])
+        self.profile_path, description, self.model_path = profile_map.get(index, profile_map[0])
         self.lbl_profile.setText(description)
-        self.on_status(f"Layout-Typ: {description}")
+        self.on_status(f"Layout-Typ: {description} (Modell: {os.path.basename(self.model_path)})")
 
     def _load_profile(self) -> bool:
         """Load the selected profile configuration."""
@@ -1454,12 +1385,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         act_open_pdf.triggered.connect(self.on_open_pdf)
         toolbar.addAction(act_open_pdf)
 
-        act_open_model = QtWidgets.QAction("Modell laden", self)
-        act_open_model.setToolTip("Modell laden\n\nWählen Sie das trainierte KI-Modell (.pt Datei)\n\nTastenkürzel: Strg+M")
-        act_open_model.setShortcut("Ctrl+M")
-        act_open_model.triggered.connect(self.on_select_model)
-        toolbar.addAction(act_open_model)
-
         toolbar.addSeparator()
 
         # Run Action - Main action
@@ -1509,10 +1434,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         act_open_pdf = file_menu.addAction("Gleisplan öffnen...")
         act_open_pdf.setShortcut("Ctrl+O")
         act_open_pdf.triggered.connect(self.on_open_pdf)
-
-        act_open_model = file_menu.addAction("YOLO-Modell laden...")
-        act_open_model.setShortcut("Ctrl+M")
-        act_open_model.triggered.connect(self.on_select_model)
 
         file_menu.addSeparator()
 
