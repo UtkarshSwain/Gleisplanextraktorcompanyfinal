@@ -921,6 +921,9 @@ def ocr_simple(det: dict, bgr_color: np.ndarray, pad: int = 4, preprocess_fn=Non
             # Horizontal text - run OCR with color variants
             result = run_ocr_with_color_variants(crop)
 
+            if DEBUG_OCR:
+                print(f"[ocr_simple] horizontal ({debug_class}): '{result}' box=({det['x1']:.0f},{det['y1']:.0f})-({det['x2']:.0f},{det['y2']:.0f})")
+
             # Save final crop with OCR result for debugging
             if debug_class:
                 _save_debug_crop(crop, debug_class, result, suffix="final")
@@ -956,6 +959,16 @@ def _clean_antwerp_coordinate(text: str) -> str:
         km = match.group(1)
         separator = match.group(2)  # Preserve original separator (+ or -)
         meters = match.group(3)
+
+        # Fix reversed coordinates: '000+0' should be '0+000'
+        # If km has more digits than meters (without decimals), it's likely reversed
+        meters_int_part = meters.split('.')[0] if '.' in meters else meters
+        if len(km) > 1 and len(meters_int_part) == 1 and km.startswith('0'):
+            # Reversed: swap km and meters
+            km, meters = meters, km
+            if DEBUG_OCR:
+                print(f"[antwerp_clean] reversed fix: '{text}' -> '{km}{separator}{meters}'")
+
         result = f"{km}{separator}{meters}"  # Keep original separator
         if DEBUG_OCR:
             print(f"[antwerp_clean] matched: '{text}' -> '{result}'")

@@ -2723,7 +2723,7 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
 
     # Get search parameters
     search_steps = getattr(sp, 'coord_search_steps', [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
-    dx_tolerance = getattr(sp, 'coord_dx_tolerance', 50)
+    dx_steps = getattr(sp, 'coord_dx_steps', [5, 10, 15, 20, 25, 30])  # Progressive dx tolerance
     dy_min = getattr(sp, 'coord_dy_min', 30)
     dy_base = getattr(sp, 'coord_dy_base', 100)
     pair_dy_max = getattr(sp, 'terminal_bond_pair_dy_max', 150)
@@ -2734,7 +2734,7 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
     if debug_linking:
         print(f"\n[Antwerp coord linking] Phase 1 elements: {len(phase1_elements)}, Coordinates: {len(coords)}")
         print(f"  Classes: {phase1_classes}")
-        print(f"  Search steps: {search_steps}, dx_tolerance: {dx_tolerance}, dy_base: {dy_base}")
+        print(f"  dx_steps: {dx_steps}, dy_steps: {search_steps}, dy_base: {dy_base}")
         # Show coordinate X positions for debugging
         coord_x_positions = sorted([(c.get("cx", 0), c.get("text", "?")) for c in coords])
         print(f"  Coordinate X positions: {[(x, t[:10]) for x, t in coord_x_positions]}")
@@ -2762,7 +2762,9 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
             dx = abs(tb1["cx"] - tb2["cx"])
             dy = abs(tb1["cy"] - tb2["cy"])
 
-            if dx <= dx_tolerance and dy <= pair_dy_max:
+            # Use max dx_step for pair detection
+            dx_max_for_pairs = max(dx_steps) if dx_steps else 30
+            if dx <= dx_max_for_pairs and dy <= pair_dy_max:
                 # Found a pair! Find coordinate in between
                 pair_top_y = min(tb1["cy"], tb2["cy"])
                 pair_bottom_y = max(tb1["cy"], tb2["cy"])
@@ -2784,7 +2786,7 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
                     coord_cy = coord["cy"]
 
                     # Check horizontal alignment
-                    if abs(coord_cx - pair_cx) > dx_tolerance:
+                    if abs(coord_cx - pair_cx) > dx_max_for_pairs:
                         continue
 
                     # Check if coordinate is IN BETWEEN the pair
@@ -2824,44 +2826,56 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
 
         best_coord = None
         best_dist = float('inf')
-        matched_step = None
+        matched_dx_step = None
+        matched_dy_step = None
 
-        # Progressive search
-        for step_idx, step_multiplier in enumerate(search_steps, 1):
-            dy_max = dy_base * step_multiplier
-
-            if debug_linking and step_idx > 1:
-                print(f"    Step {step_idx}: dy_max={dy_max:.0f}")
-
-            for coord in coords:
-                coord_id = coord.get('row_id', id(coord))
-                if coord_id in used_coord_ids:
-                    continue
-
-                coord_cx = coord["cx"]
-                coord_cy = coord["cy"]
-
-                # Check horizontal alignment
-                dx = abs(coord_cx - elem_cx)
-                if dx > dx_tolerance:
-                    continue
-
-                # Check vertical distance (above or below)
-                dy = abs(coord_cy - elem_cy)
-                if dy < dy_min or dy > dy_max:
-                    continue
-
-                # Calculate score (prefer closer coordinates)
-                dist = math.sqrt(dx**2 + dy**2)
-
-                if dist < best_dist:
-                    best_coord = coord
-                    best_dist = dist
-                    matched_step = step_idx
-
-            # If found at this step, stop searching
-            if best_coord:
+        # 2D Progressive search: outer loop = dx, inner loop = dy
+        # For each dx tolerance, try all dy steps before increasing dx
+        search_done = False
+        for dx_idx, dx_max in enumerate(dx_steps, 1):
+            if search_done:
                 break
+
+            if debug_linking and dx_idx > 1:
+                print(f"    dx_step {dx_idx}: dx_max={dx_max}")
+
+            for dy_idx, step_multiplier in enumerate(search_steps, 1):
+                dy_max = dy_base * step_multiplier
+
+                if debug_linking and dy_idx > 1 and dx_idx == 1:
+                    print(f"    dy_step {dy_idx}: dy_max={dy_max:.0f}")
+
+                for coord in coords:
+                    coord_id = coord.get('row_id', id(coord))
+                    if coord_id in used_coord_ids:
+                        continue
+
+                    coord_cx = coord["cx"]
+                    coord_cy = coord["cy"]
+
+                    # Check horizontal alignment with current dx_max
+                    dx = abs(coord_cx - elem_cx)
+                    if dx > dx_max:
+                        continue
+
+                    # Check vertical distance (above or below)
+                    dy = abs(coord_cy - elem_cy)
+                    if dy < dy_min or dy > dy_max:
+                        continue
+
+                    # Calculate score (prefer closer coordinates)
+                    dist = math.sqrt(dx**2 + dy**2)
+
+                    if dist < best_dist:
+                        best_coord = coord
+                        best_dist = dist
+                        matched_dx_step = dx_idx
+                        matched_dy_step = dy_idx
+
+                # If found at this dy step, stop dy search
+                if best_coord:
+                    search_done = True
+                    break
 
         if best_coord:
             coord_text = best_coord.get("text", best_coord.get("anchor_text", "?"))
@@ -2870,10 +2884,10 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
             results[elem_id] = coord_text
 
             if debug_linking:
-                print(f"    → LINKED: '{coord_text}' (step {matched_step}, dist={best_dist:.0f})")
+                print(f"    → LINKED: '{coord_text}' (dx_step={matched_dx_step}, dy_step={matched_dy_step}, dist={best_dist:.0f})")
         else:
             if debug_linking:
-                print(f"    → NO MATCH")
+                print(f"    → NO MATCH (searched dx_steps={dx_steps}, dy_steps up to {dy_base * search_steps[-1]:.0f})")
 
     if debug_linking:
         print(f"\n  [Antwerp coord linking] Total linked: {len(results)}")

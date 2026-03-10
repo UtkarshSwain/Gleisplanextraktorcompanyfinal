@@ -188,7 +188,7 @@ class SpatialConfig:
 
     # Coordinate linking for Antwerp Phase 1 elements
     coord_search_steps: List[float] = field(default_factory=lambda: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0])
-    coord_dx_tolerance: int = 15       # Minimal - coordinates directly above/below (allows dx up to 15)
+    coord_dx_steps: List[int] = field(default_factory=lambda: [5, 10, 15, 20, 25, 30])  # Progressive dx tolerance steps
     coord_dy_min: int = 30             # Minimum vertical distance
     coord_dy_base: int = 300           # Base vertical distance (multiplied by steps) - max 2100px at step 7.0
     terminal_bond_pair_dy_max: int = 300  # Max vertical distance to consider terminal_bonds as paired

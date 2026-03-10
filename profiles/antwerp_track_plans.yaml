@@ -34,7 +34,7 @@ debug_custom_symbols: false
 debug_yolo: false
 debug_ui_bbox: false
 debug_comparison: false
-debug_crops: true  # Set to true to save OCR crops for inspection
+debug_crops: false  # Set to true to save OCR crops for inspection
 
 # System settings
 poppler_path: null
@@ -364,7 +364,7 @@ spatial:
 
   # Coordinate linking for Phase 1 elements (s_bond, short_bond, terminal_bond, insulation_joint, spie_loop)
   coord_search_steps: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0]  # Progressive vertical distance multipliers
-  coord_dx_tolerance: 15      # Minimal - coordinates directly above/below (allows dx up to 15)
+  coord_dx_steps: [5, 10, 15, 20, 25, 30]  # Progressive horizontal tolerance steps - for each dx, all dy steps are tried
   coord_dy_min: 30            # Minimum vertical distance
   coord_dy_base: 300          # Base vertical distance (multiplied by steps) - max 2100px at step 7.0
   terminal_bond_pair_dy_max: 300  # Max vertical distance to consider terminal_bonds as paired

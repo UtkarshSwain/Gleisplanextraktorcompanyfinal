@@ -110,6 +110,7 @@ class ProfileManager:
         debug_yolo = data.get('debug_yolo', False)
         debug_ui_bbox = data.get('debug_ui_bbox', False)
         debug_comparison = data.get('debug_comparison', False)
+        debug_crops = data.get('debug_crops', False)
 
         # System settings
         poppler_path = data.get('poppler_path')
@@ -137,6 +138,7 @@ class ProfileManager:
             debug_yolo=debug_yolo,
             debug_ui_bbox=debug_ui_bbox,
             debug_comparison=debug_comparison,
+            debug_crops=debug_crops,
             poppler_path=poppler_path,
             zoom_size=zoom_size
         )
