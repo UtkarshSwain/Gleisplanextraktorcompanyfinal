@@ -362,6 +362,14 @@ spatial:
   # Progressive text_id search steps (stepwise radius expansion)
   text_id_search_steps: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5]  # Try these multipliers progressively
 
+  # Coordinate linking for Phase 1 elements (s_bond, short_bond, terminal_bond, insulation_joint, spie_loop)
+  coord_search_steps: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0]  # Progressive vertical distance multipliers
+  coord_dx_tolerance: 15      # Minimal - coordinates directly above/below (allows dx up to 15)
+  coord_dy_min: 30            # Minimum vertical distance
+  coord_dy_base: 300          # Base vertical distance (multiplied by steps) - max 2100px at step 7.0
+  terminal_bond_pair_dy_max: 300  # Max vertical distance to consider terminal_bonds as paired
+  coord_phase1_classes: ["s_bond", "short_bond", "terminal_bond", "insulation_joint", "spie_loop"]
+
   # Search window dimensions
   inside_padding_ratio: 0.10
   right_window_width_ratio: 2.5

@@ -2685,3 +2685,197 @@ def parse_coord(text: str, config: 'LayoutConfig' = None):
         print(f"[parse_coord] Parsed: '{original_text}' → value={f}, gi_gl={gi_gl}")
 
     return f, gi_gl
+
+
+def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config: 'LayoutConfig' = None):
+    """
+    Link Antwerp Phase 1 elements to coordinates using vertical alignment.
+
+    ANTWERP-SPECIFIC: Links bond/junction elements to coordinates that are
+    vertically above or below, with horizontal alignment.
+
+    Phase 1 classes (simple pattern):
+        - s_bond, short_bond, terminal_bond, insulation_joint, spie_loop
+
+    Algorithm:
+        - Coordinate must be horizontally aligned (X overlap or close X position)
+        - Coordinate must be vertically above OR below the element
+        - Progressive search steps expand vertical search radius
+        - Special case: paired terminal_bonds share coordinate in between
+
+    Args:
+        detections: List of all detections
+        coords: List of coordinate detections with OCR'd text
+        config: LayoutConfig with spatial parameters
+
+    Returns:
+        dict mapping element detection ID to coordinate text
+    """
+    if not detections or not coords or config is None:
+        return {}
+
+    sp = config.spatial
+    debug_linking = config.debug_linking
+
+    # Get Phase 1 classes from config
+    phase1_classes = getattr(sp, 'coord_phase1_classes',
+                             ["s_bond", "short_bond", "terminal_bond", "insulation_joint", "spie_loop"])
+
+    # Get search parameters
+    search_steps = getattr(sp, 'coord_search_steps', [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
+    dx_tolerance = getattr(sp, 'coord_dx_tolerance', 50)
+    dy_min = getattr(sp, 'coord_dy_min', 30)
+    dy_base = getattr(sp, 'coord_dy_base', 100)
+    pair_dy_max = getattr(sp, 'terminal_bond_pair_dy_max', 150)
+
+    # Filter to Phase 1 elements
+    phase1_elements = [d for d in detections if d.get("name", "").lower() in [c.lower() for c in phase1_classes]]
+
+    if debug_linking:
+        print(f"\n[Antwerp coord linking] Phase 1 elements: {len(phase1_elements)}, Coordinates: {len(coords)}")
+        print(f"  Classes: {phase1_classes}")
+        print(f"  Search steps: {search_steps}, dx_tolerance: {dx_tolerance}, dy_base: {dy_base}")
+        # Show coordinate X positions for debugging
+        coord_x_positions = sorted([(c.get("cx", 0), c.get("text", "?")) for c in coords])
+        print(f"  Coordinate X positions: {[(x, t[:10]) for x, t in coord_x_positions]}")
+
+    results = {}
+    used_coord_ids = set()
+
+    # First pass: detect terminal_bond pairs and link shared coordinates
+    terminal_bonds = [d for d in phase1_elements if d.get("name", "").lower() == "terminal_bond"]
+
+    if debug_linking and terminal_bonds:
+        print(f"\n  Checking {len(terminal_bonds)} terminal_bonds for pairs...")
+
+    paired_tb_ids = set()  # Track which terminal_bonds are paired
+
+    for i, tb1 in enumerate(terminal_bonds):
+        if id(tb1) in paired_tb_ids:
+            continue
+
+        for tb2 in terminal_bonds[i+1:]:
+            if id(tb2) in paired_tb_ids:
+                continue
+
+            # Check if tb1 and tb2 are horizontally aligned and vertically close (paired)
+            dx = abs(tb1["cx"] - tb2["cx"])
+            dy = abs(tb1["cy"] - tb2["cy"])
+
+            if dx <= dx_tolerance and dy <= pair_dy_max:
+                # Found a pair! Find coordinate in between
+                pair_top_y = min(tb1["cy"], tb2["cy"])
+                pair_bottom_y = max(tb1["cy"], tb2["cy"])
+                pair_cx = (tb1["cx"] + tb2["cx"]) / 2
+
+                if debug_linking:
+                    print(f"  PAIR: terminal_bonds at y={tb1['cy']:.0f} and y={tb2['cy']:.0f}, dx={dx:.0f}")
+
+                # Search for coordinate in between
+                best_coord = None
+                best_dist = float('inf')
+
+                for coord in coords:
+                    coord_id = coord.get('row_id', id(coord))
+                    if coord_id in used_coord_ids:
+                        continue
+
+                    coord_cx = coord["cx"]
+                    coord_cy = coord["cy"]
+
+                    # Check horizontal alignment
+                    if abs(coord_cx - pair_cx) > dx_tolerance:
+                        continue
+
+                    # Check if coordinate is IN BETWEEN the pair
+                    if pair_top_y <= coord_cy <= pair_bottom_y:
+                        dist = abs(coord_cy - (pair_top_y + pair_bottom_y) / 2)
+                        if dist < best_dist:
+                            best_coord = coord
+                            best_dist = dist
+
+                if best_coord:
+                    coord_text = best_coord.get("text", best_coord.get("anchor_text", "?"))
+                    coord_id = best_coord.get('row_id', id(best_coord))
+                    used_coord_ids.add(coord_id)
+
+                    # Link both terminal_bonds to this coordinate
+                    results[id(tb1)] = coord_text
+                    results[id(tb2)] = coord_text
+                    paired_tb_ids.add(id(tb1))
+                    paired_tb_ids.add(id(tb2))
+
+                    if debug_linking:
+                        print(f"  → PAIR LINKED: '{coord_text}' (in between pair)")
+
+    # Second pass: link remaining elements (non-paired) using above/below search
+    for elem in phase1_elements:
+        elem_id = id(elem)
+        if elem_id in results:
+            continue  # Already linked (e.g., paired terminal_bond)
+
+        elem_cx = elem["cx"]
+        elem_cy = elem["cy"]
+        elem_w = elem.get("w", 50)
+        elem_name = elem.get("name", "?")
+
+        if debug_linking:
+            print(f"\n  [{elem_name}] at ({elem_cx:.0f}, {elem_cy:.0f})")
+
+        best_coord = None
+        best_dist = float('inf')
+        matched_step = None
+
+        # Progressive search
+        for step_idx, step_multiplier in enumerate(search_steps, 1):
+            dy_max = dy_base * step_multiplier
+
+            if debug_linking and step_idx > 1:
+                print(f"    Step {step_idx}: dy_max={dy_max:.0f}")
+
+            for coord in coords:
+                coord_id = coord.get('row_id', id(coord))
+                if coord_id in used_coord_ids:
+                    continue
+
+                coord_cx = coord["cx"]
+                coord_cy = coord["cy"]
+
+                # Check horizontal alignment
+                dx = abs(coord_cx - elem_cx)
+                if dx > dx_tolerance:
+                    continue
+
+                # Check vertical distance (above or below)
+                dy = abs(coord_cy - elem_cy)
+                if dy < dy_min or dy > dy_max:
+                    continue
+
+                # Calculate score (prefer closer coordinates)
+                dist = math.sqrt(dx**2 + dy**2)
+
+                if dist < best_dist:
+                    best_coord = coord
+                    best_dist = dist
+                    matched_step = step_idx
+
+            # If found at this step, stop searching
+            if best_coord:
+                break
+
+        if best_coord:
+            coord_text = best_coord.get("text", best_coord.get("anchor_text", "?"))
+            coord_id = best_coord.get('row_id', id(best_coord))
+            used_coord_ids.add(coord_id)
+            results[elem_id] = coord_text
+
+            if debug_linking:
+                print(f"    → LINKED: '{coord_text}' (step {matched_step}, dist={best_dist:.0f})")
+        else:
+            if debug_linking:
+                print(f"    → NO MATCH")
+
+    if debug_linking:
+        print(f"\n  [Antwerp coord linking] Total linked: {len(results)}")
+
+    return results

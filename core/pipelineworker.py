@@ -46,7 +46,7 @@ from core.image_processing import parse_weichen_block, ensure_landscape
 from core.linking import (
     detect_fahrtrichtung, detect_haltepunkt_signal_group, link_haltetafel_to_gks,
     link_anchor_to_coord, link_anchor_to_text_id, merge_duplicate_signals, link_isolierstoss_fallback,
-    detect_fahrtrichtung_gks_relaxed, detect_fahrtrichtung_gks_nearest
+    detect_fahrtrichtung_gks_relaxed, detect_fahrtrichtung_gks_nearest, link_antwerp_coordinates
 )
 import numpy as np
 import gc
@@ -1072,6 +1072,56 @@ class PipelineWorker(QtCore.QThread):
                             print(f"Total symbol-to-text_id links: {len(text_id_links)}")
                             print(f"{'='*70}\n")
 
+                    # ========================================================================
+                    # STEP 1E: Link Phase 1 elements to coordinates (ANTWERP ONLY)
+                    # ========================================================================
+                    # For Antwerp profile: Link bond/junction elements to coordinates using
+                    # vertical alignment (above/below). Phase 1 elements:
+                    # s_bond, short_bond, terminal_bond, insulation_joint, spie_loop
+                    antwerp_coord_links = {}  # Map element id -> coordinate text
+                    if (self.config is not None and
+                        hasattr(self.config, 'ocr') and
+                        self.config.ocr.use_simple_ocr):  # Antwerp profile marker
+
+                        if DEBUG_LINKING:
+                            print(f"\n{'='*70}")
+                            print(f" STEP 1E: Linking Phase 1 elements to coordinates (Antwerp)")
+                            print(f"{'='*70}")
+
+                        # Extract all detections from anchor_results
+                        all_detections = [a for (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf) in anchor_results]
+
+                        # Build coordinate detections from coords list with OCR text from coord_meta
+                        # (coordinates are NOT in anchor_results - they're processed separately)
+                        coord_detections = []
+                        for c in coords:
+                            c_id = id(c)
+                            if c_id in coord_meta:
+                                # Add OCR text to coordinate detection
+                                c["text"] = coord_meta[c_id].get("text", "")
+                                coord_detections.append(c)
+
+                        if DEBUG_LINKING:
+                            print(f"  Total detections: {len(all_detections)}, Coordinates: {len(coord_detections)}")
+                            if coord_detections:
+                                print(f"  Coordinate examples: {[c.get('text', '?') for c in coord_detections[:5]]}")
+
+                        # Link elements to coordinates
+                        antwerp_coord_links = link_antwerp_coordinates(
+                            all_detections, coord_detections, config=self.config
+                        )
+
+                        # Apply coordinate links to detections
+                        for (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf) in anchor_results:
+                            if id(a) in antwerp_coord_links:
+                                a["linked_coordinate"] = antwerp_coord_links[id(a)]
+                                if DEBUG_LINKING:
+                                    print(f"  Applied coordinate '{antwerp_coord_links[id(a)]}' to {a['name']}")
+
+                        if DEBUG_LINKING:
+                            print(f"Total element-to-coordinate links: {len(antwerp_coord_links)}")
+                            print(f"{'='*70}\n")
+
                     #  STEP 2: Now process ALL elements (including haltetafel)
                     # Initialize counters for NO_OCR_CLASSES to generate unique names
                     # Note: haltepunkt has its own counter logic in its special handling section
@@ -1520,7 +1570,13 @@ class PipelineWorker(QtCore.QThread):
                                 coord_txt = coord_txt.strip()
 
                             cbbox = (linked["x1"], linked["y1"], linked["x2"], linked["y2"])
-                        
+
+                        # Check if STEP 1E already linked a coordinate to this anchor (Antwerp only)
+                        if "linked_coordinate" in a and a["linked_coordinate"] and not coord_txt:
+                            coord_txt = a["linked_coordinate"]
+                            if DEBUG_LINKING:
+                                print(f"  Using STEP 1E linked_coordinate '{coord_txt}' for {a['name']}")
+
                         element_for_uuid = {
                             'cls': a["name"],
                             'page': pidx,
