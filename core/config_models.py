@@ -193,6 +193,8 @@ class SpatialConfig:
     coord_dy_base: int = 300           # Base vertical distance (multiplied by steps) - max 2100px at step 7.0
     terminal_bond_pair_dy_max: int = 300  # Max vertical distance to consider terminal_bonds as paired
     coord_phase1_classes: List[str] = field(default_factory=lambda: ["s_bond", "short_bond", "terminal_bond", "insulation_joint", "spie_loop"])
+    coord_phase2_classes: List[str] = field(default_factory=lambda: ["signal"])  # Phase 2: directional search based on text position
+    signal_coord_dx_steps: List[int] = field(default_factory=lambda: [50, 100, 150, 200, 250])  # Larger dx steps for signals
 
     # Search window dimensions
     inside_padding_ratio: float = 0.10

@@ -882,6 +882,7 @@ def link_anchor_to_text_id(anchor, text_ids, config: 'LayoutConfig' = None):
     best = None
     best_dist = float('inf')
     matched_step = None
+    best_matched_dir = None  # Track direction of best match (for signal coordinate linking)
 
     # Try progressively larger search radii
     for step_idx, step_multiplier in enumerate(search_steps, 1):
@@ -947,6 +948,7 @@ def link_anchor_to_text_id(anchor, text_ids, config: 'LayoutConfig' = None):
                 best = text_id
                 best_dist = dist
                 matched_step = step_idx
+                best_matched_dir = matched_dir  # Store direction for coordinate linking
                 if debug_linking:
                     tid_text = text_id.get("anchor_text", text_id.get("text", "?"))
                     print(f"  text_id '{tid_text}' NEW BEST: dist={dist:.0f} dir={matched_dir} (step {step_idx})")
@@ -961,7 +963,8 @@ def link_anchor_to_text_id(anchor, text_ids, config: 'LayoutConfig' = None):
     if debug_linking and not best:
         print(f"  → NO MATCH")
 
-    return best
+    # Return both text_id and direction (for signal coordinate linking)
+    return (best, best_matched_dir)
 
 
 def link_haltetafel_to_gks(haltetafel_det, gks_dets, coords, gks_coord_map,
@@ -2888,6 +2891,119 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
         else:
             if debug_linking:
                 print(f"    → NO MATCH (searched dx_steps={dx_steps}, dy_steps up to {dy_base * search_steps[-1]:.0f})")
+
+    if debug_linking:
+        print(f"\n  [Antwerp coord linking] Phase 1 linked: {len(results)}")
+
+    # ==========================================================================
+    # PHASE 2: Signal coordinate linking (directional based on text position)
+    # ==========================================================================
+    phase2_classes = getattr(sp, 'coord_phase2_classes', ["signal"])
+    phase2_elements = [d for d in detections if d.get("name", "").lower() in [c.lower() for c in phase2_classes]]
+
+    # Use signal-specific dx_steps (larger tolerance for signals)
+    signal_dx_steps = getattr(sp, 'signal_coord_dx_steps', [50, 100, 150, 200, 250])
+
+    if debug_linking and phase2_elements:
+        print(f"\n  [Phase 2] Processing {len(phase2_elements)} signals with directional search")
+        print(f"    signal_dx_steps: {signal_dx_steps}")
+
+    for elem in phase2_elements:
+        elem_id = id(elem)
+        if elem_id in results:
+            continue  # Already linked
+
+        elem_cx = elem["cx"]
+        elem_cy = elem["cy"]
+        elem_name = elem.get("name", "?")
+
+        # Get text position to determine search direction
+        ocr_position = elem.get("ocr_region_source", "")
+        if ocr_position == "below":
+            search_direction = "below"
+        elif ocr_position == "above":
+            search_direction = "above"
+        else:
+            # No direction known - skip this signal (don't search both directions)
+            if debug_linking:
+                print(f"\n  [{elem_name}] at ({elem_cx:.0f}, {elem_cy:.0f}) → SKIPPED: no text_id direction")
+            continue
+
+        if debug_linking:
+            print(f"\n  [{elem_name}] at ({elem_cx:.0f}, {elem_cy:.0f}) direction={search_direction}")
+
+        best_coord = None
+        best_dist = float('inf')
+        matched_dx_step = None
+        matched_dy_step = None
+
+        # 2D Progressive search with directional constraint (using signal-specific dx_steps)
+        search_done = False
+        for dx_idx, dx_max in enumerate(signal_dx_steps, 1):
+            if search_done:
+                break
+
+            if debug_linking and dx_idx > 1:
+                print(f"    dx_step {dx_idx}: dx_max={dx_max}")
+
+            for dy_idx, step_multiplier in enumerate(search_steps, 1):
+                dy_max = dy_base * step_multiplier
+
+                if debug_linking and dy_idx > 1 and dx_idx == 1:
+                    print(f"    dy_step {dy_idx}: dy_max={dy_max:.0f}")
+
+                for coord in coords:
+                    coord_id = coord.get('row_id', id(coord))
+                    if coord_id in used_coord_ids:
+                        continue
+
+                    coord_cx = coord["cx"]
+                    coord_cy = coord["cy"]
+
+                    # Check horizontal alignment
+                    dx = abs(coord_cx - elem_cx)
+                    if dx > dx_max:
+                        continue
+
+                    # Check vertical distance with directional constraint
+                    dy = abs(coord_cy - elem_cy)
+                    if dy < dy_min or dy > dy_max:
+                        continue
+
+                    # Apply directional constraint for signals
+                    # Apply directional constraint (signals without direction are skipped earlier)
+                    if search_direction == "below":
+                        # Coordinate must be BELOW element (coord_cy > elem_cy)
+                        if coord_cy <= elem_cy:
+                            continue
+                    elif search_direction == "above":
+                        # Coordinate must be ABOVE element (coord_cy < elem_cy)
+                        if coord_cy >= elem_cy:
+                            continue
+
+                    dist = math.sqrt(dx**2 + dy**2)
+
+                    if dist < best_dist:
+                        best_coord = coord
+                        best_dist = dist
+                        matched_dx_step = dx_idx
+                        matched_dy_step = dy_idx
+
+                if best_coord:
+                    search_done = True
+                    break
+
+        if best_coord:
+            coord_text = best_coord.get("text", best_coord.get("anchor_text", "?"))
+            coord_id = best_coord.get('row_id', id(best_coord))
+            used_coord_ids.add(coord_id)
+            results[elem_id] = coord_text
+
+            if debug_linking:
+                print(f"    → LINKED: '{coord_text}' (dx_step={matched_dx_step}, dy_step={matched_dy_step}, dist={best_dist:.0f})")
+        else:
+            if debug_linking:
+                print(f"    → NO MATCH (direction={search_direction})")
 
     if debug_linking:
         print(f"\n  [Antwerp coord linking] Total linked: {len(results)}")

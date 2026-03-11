@@ -1053,8 +1053,8 @@ class PipelineWorker(QtCore.QThread):
                                     available_text_ids = [tid for tid in text_id_detections
                                                           if id(tid) not in used_text_id_ids]
 
-                                    # Link to nearest text_id
-                                    linked_text_id = link_anchor_to_text_id(a, available_text_ids, config=self.config)
+                                    # Link to nearest text_id (returns tuple: text_id, direction)
+                                    linked_text_id, text_id_direction = link_anchor_to_text_id(a, available_text_ids, config=self.config)
 
                                     if linked_text_id is not None:
                                         # Store the link
@@ -1065,8 +1065,12 @@ class PipelineWorker(QtCore.QThread):
                                         text_id_text = linked_text_id.get("anchor_text", linked_text_id.get("text", ""))
                                         a["anchor_text"] = text_id_text
 
+                                        # Store direction in anchor (used for Phase 2 signal coordinate search)
+                                        if text_id_direction in ['above', 'below']:
+                                            a["ocr_region_source"] = text_id_direction
+
                                         if DEBUG_LINKING:
-                                            print(f"Linked {a['name']} → text_id '{text_id_text}'")
+                                            print(f"Linked {a['name']} → text_id '{text_id_text}' (dir={text_id_direction})")
 
                         if DEBUG_LINKING:
                             print(f"Total symbol-to-text_id links: {len(text_id_links)}")
@@ -1089,6 +1093,7 @@ class PipelineWorker(QtCore.QThread):
                             print(f"{'='*70}")
 
                         # Extract all detections from anchor_results
+                        # Note: ocr_region_source is already set by link_anchor_to_text_id() for signals
                         all_detections = [a for (a, a_color, name_txt, weichen_coords, ocr_bbox, ocr_position, ocr_conf) in anchor_results]
 
                         # Build coordinate detections from coords list with OCR text from coord_meta
@@ -1600,7 +1605,7 @@ class PipelineWorker(QtCore.QThread):
                             ocr_y1=ocr_bbox[1] if ocr_bbox else None,
                             ocr_x2=ocr_bbox[2] if ocr_bbox else None,
                             ocr_y2=ocr_bbox[3] if ocr_bbox else None,
-                            ocr_region_source=ocr_position,
+                            ocr_region_source=a.get("ocr_region_source", ocr_position),  # Prefer text_id direction for signals
                             notes="", weichen_coordinates=[],
                             fahrtrichtung=fahrtrichtung,
                             _fahrtrichtung_source=fahrtrichtung_source  #  CHANGE 3
@@ -1666,25 +1671,31 @@ class PipelineWorker(QtCore.QThread):
             if self.run_analysis:
                 self.status.emit(f"Analyse abgeschlossen: {len(df_all)} Einträge gefunden")
                 
-                if DEBUG_LINKING:
-                    print(f"\n{'='*70}")
-                    print(f" MERGING DUPLICATE SIGNALS")
-                    print(f"{'='*70}")
-                original_len = len(all_rows)
+                # Only merge signals for Wien profiles (Antwerp signals are unique, don't need merging)
+                is_antwerp = (self.config is not None and
+                              hasattr(self.config, 'ocr') and
+                              self.config.ocr.use_simple_ocr)
 
-                #  Merge WITHOUT track fallback
-                all_rows = merge_duplicate_signals(
-                    all_rows,
-                    track_skeleton=None,  #  Don't pass track skeleton to merge
-                    gks_dets=gks_dets
-                )
-                df_all = pd.DataFrame(all_rows)
+                if not is_antwerp:
+                    if DEBUG_LINKING:
+                        print(f"\n{'='*70}")
+                        print(f" MERGING DUPLICATE SIGNALS")
+                        print(f"{'='*70}")
+                    original_len = len(all_rows)
 
-                merged_len = len(all_rows)
-                if DEBUG_LINKING:
-                    if original_len != merged_len:
-                        print(f"Merge complete: {original_len} → {merged_len} (saved {original_len - merged_len} rows)")
-                    print(f"{'='*70}\n")
+                    #  Merge WITHOUT track fallback
+                    all_rows = merge_duplicate_signals(
+                        all_rows,
+                        track_skeleton=None,  #  Don't pass track skeleton to merge
+                        gks_dets=gks_dets
+                    )
+                    df_all = pd.DataFrame(all_rows)
+
+                    merged_len = len(all_rows)
+                    if DEBUG_LINKING:
+                        if original_len != merged_len:
+                            print(f"Merge complete: {original_len} → {merged_len} (saved {original_len - merged_len} rows)")
+                        print(f"{'='*70}\n")
                 
                 # ========================================
                 #  TRACK FALLBACK FOR MERGED SIGNALS (MAJORITY VOTE)
