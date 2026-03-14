@@ -332,7 +332,7 @@ def name_windows_for(anchor: dict, img_shape: Tuple[int, int, int], mode: str, c
             use_signal_multipliers = True
     else:
         # Fallback: use signal multipliers for "signal" class only (backward compat)
-        use_signal_multipliers = (anchor["name"] == "signal")
+        use_signal_multipliers = (anchor["name"].lower() == "signal")
 
     if use_signal_multipliers:
         dy = int(signal_dy_mult * ah)
@@ -858,7 +858,7 @@ def link_anchor_to_text_id(anchor, text_ids, config: 'LayoutConfig' = None):
 
     # Get base multipliers (class-specific or default)
     cls_name = anchor["name"]
-    if cls_name == "signal":
+    if cls_name.lower() == "signal":
         base_dy_multiplier = sp.signal_dy_multiplier
         base_dx_multiplier = sp.signal_dx_multiplier
     else:
@@ -895,6 +895,22 @@ def link_anchor_to_text_id(anchor, text_ids, config: 'LayoutConfig' = None):
 
         # Search for text_ids within this radius
         for text_id in text_ids:
+            # For signals, only consider text_ids starting with 'S' (not TCC*, T*, IA*, etc.)
+            if cls_name.lower() == "signal":
+                tid_text = text_id.get("anchor_text", text_id.get("text", ""))
+                if not tid_text.upper().startswith("S"):
+                    if debug_linking and step_idx == 1:
+                        print(f"  text_id '{tid_text}' SKIP: not S* prefix (signal only links to S*)")
+                    continue
+
+            # For coupling coils, only consider text_ids starting with 'TCC'
+            if cls_name.lower() in ["coupling_coil_active", "coupling_coil_disabled"]:
+                tid_text = text_id.get("anchor_text", text_id.get("text", ""))
+                if not tid_text.upper().startswith("TCC"):
+                    if debug_linking and step_idx == 1:
+                        print(f"  text_id '{tid_text}' SKIP: not TCC* prefix (coupling coil only links to TCC*)")
+                    continue
+
             tid_cx = text_id["cx"]
             tid_cy = text_id["cy"]
 
@@ -2725,10 +2741,10 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
                              ["s_bond", "short_bond", "terminal_bond", "insulation_joint", "spie_loop"])
 
     # Get search parameters
-    search_steps = getattr(sp, 'coord_search_steps', [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
+    search_steps = getattr(sp, 'coord_search_steps', [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0])
     dx_steps = getattr(sp, 'coord_dx_steps', [5, 10, 15, 20, 25, 30])  # Progressive dx tolerance
     dy_min = getattr(sp, 'coord_dy_min', 30)
-    dy_base = getattr(sp, 'coord_dy_base', 100)
+    dy_base = getattr(sp, 'coord_dy_base', 300)
     pair_dy_max = getattr(sp, 'terminal_bond_pair_dy_max', 150)
 
     # Filter to Phase 1 elements
@@ -2813,6 +2829,102 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
                     if debug_linking:
                         print(f"  → PAIR LINKED: '{coord_text}' (in between pair)")
 
+    # =========================================================================
+    # EDGE CASE: Duplicate Coordinate Pairing (same text value, side-by-side)
+    # =========================================================================
+    # When two coordinates have the same text (e.g., "2+750") and are horizontally
+    # adjacent, assign them based on euclidean distance: each element gets the
+    # coordinate it's closest to. This prevents wrong assignments when bond
+    # and signal are both near the same pair of duplicate coordinates.
+
+    # Get pairing parameters
+    pair_min_dx = getattr(sp, 'coord_pair_min_dx', 50)
+    pair_max_dx = getattr(sp, 'coord_pair_max_dx', 200)
+    pair_max_dy = getattr(sp, 'coord_pair_max_dy', 100)
+
+    # Get Phase 2 elements early for pairing (also used later in Phase 2 search)
+    phase2_classes = getattr(sp, 'coord_phase2_classes', ["signal"])
+    phase2_elements = [d for d in detections if d.get("name", "").lower() in [c.lower() for c in phase2_classes]]
+    signal_dx_steps = getattr(sp, 'signal_coord_dx_steps', [50, 100, 150, 200, 250])
+
+    # Group coordinates by text value
+    from collections import defaultdict
+    coord_by_text = defaultdict(list)
+    for coord in coords:
+        text = coord.get("text", coord.get("anchor_text", ""))
+        if text:
+            coord_by_text[text].append(coord)
+
+    # Find and process duplicate pairs
+    for text, coord_list in coord_by_text.items():
+        if len(coord_list) != 2:
+            continue  # Only handle exact pairs
+
+        c1, c2 = coord_list
+        pair_dx = abs(c1["cx"] - c2["cx"])
+        pair_dy = abs(c1["cy"] - c2["cy"])
+
+        # Check pair criteria: horizontally adjacent, same row
+        if not (pair_min_dx <= pair_dx <= pair_max_dx and pair_dy <= pair_max_dy):
+            continue
+
+        # Skip if either coordinate already used
+        c1_id = c1.get('row_id', id(c1))
+        c2_id = c2.get('row_id', id(c2))
+        if c1_id in used_coord_ids or c2_id in used_coord_ids:
+            continue
+
+        if debug_linking:
+            print(f"\n  DUPLICATE PAIR: '{text}' (dx={pair_dx:.0f}, dy={pair_dy:.0f})")
+
+        # Determine left/right coordinates
+        left_coord = c1 if c1["cx"] < c2["cx"] else c2
+        right_coord = c2 if c1["cx"] < c2["cx"] else c1
+
+        # Find ALL elements (Phase 1 + Phase 2) near this pair
+        # Use expanded dx tolerance for pairing (edge cases need larger range)
+        # This is safe because pairing only triggers for duplicate coordinate pairs
+        pair_elem_dx_max = getattr(sp, 'coord_pair_elem_dx_max', 250)  # Expanded range for pairing (same as signal_dx_steps max)
+
+        all_elements = phase1_elements + phase2_elements
+        nearby = []
+        for elem in all_elements:
+            if id(elem) in results:
+                continue  # Already linked
+
+            # Check proximity to either coordinate (using expanded range for pairing)
+            for coord in [left_coord, right_coord]:
+                elem_dx = abs(elem["cx"] - coord["cx"])
+                elem_dy = abs(elem["cy"] - coord["cy"])
+                if elem_dx <= pair_elem_dx_max and dy_min <= elem_dy <= dy_base * max(search_steps):
+                    nearby.append(elem)
+                    break
+
+        if len(nearby) >= 2:
+            # Find closest element to each coordinate (based on euclidean distance)
+            def dist_to_coord(elem, coord):
+                return math.sqrt((elem["cx"] - coord["cx"])**2 + (elem["cy"] - coord["cy"])**2)
+
+            # Find element closest to left coord
+            left_elem = min(nearby, key=lambda e: dist_to_coord(e, left_coord))
+            left_dist = dist_to_coord(left_elem, left_coord)
+
+            # Find element closest to right coord (excluding left_elem)
+            remaining = [e for e in nearby if id(e) != id(left_elem)]
+            if remaining:
+                right_elem = min(remaining, key=lambda e: dist_to_coord(e, right_coord))
+                right_dist = dist_to_coord(right_elem, right_coord)
+
+                # Assign: closest element to each coord
+                results[id(left_elem)] = text
+                results[id(right_elem)] = text
+                used_coord_ids.add(left_coord.get('row_id', id(left_coord)))
+                used_coord_ids.add(right_coord.get('row_id', id(right_coord)))
+
+                if debug_linking:
+                    print(f"    → {left_elem.get('name')} (x={left_elem['cx']:.0f}, dist={left_dist:.0f}) ← left coord")
+                    print(f"    → {right_elem.get('name')} (x={right_elem['cx']:.0f}, dist={right_dist:.0f}) ← right coord")
+
     # Second pass: link remaining elements (non-paired) using above/below search
     for elem in phase1_elements:
         elem_id = id(elem)
@@ -2821,7 +2933,6 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
 
         elem_cx = elem["cx"]
         elem_cy = elem["cy"]
-        elem_w = elem.get("w", 50)
         elem_name = elem.get("name", "?")
 
         if debug_linking:
@@ -2898,11 +3009,8 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
     # ==========================================================================
     # PHASE 2: Signal coordinate linking (directional based on text position)
     # ==========================================================================
-    phase2_classes = getattr(sp, 'coord_phase2_classes', ["signal"])
-    phase2_elements = [d for d in detections if d.get("name", "").lower() in [c.lower() for c in phase2_classes]]
-
-    # Use signal-specific dx_steps (larger tolerance for signals)
-    signal_dx_steps = getattr(sp, 'signal_coord_dx_steps', [50, 100, 150, 200, 250])
+    # Note: phase2_classes, phase2_elements, signal_dx_steps defined earlier
+    # for duplicate coordinate pairing
 
     if debug_linking and phase2_elements:
         print(f"\n  [Phase 2] Processing {len(phase2_elements)} signals with directional search")
@@ -2933,15 +3041,13 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
             print(f"\n  [{elem_name}] at ({elem_cx:.0f}, {elem_cy:.0f}) direction={search_direction}")
 
         best_coord = None
-        best_dist = float('inf')
+        best_dy = float('inf')  # Use dy as primary metric for better vertical matching
+        best_dx = None
         matched_dx_step = None
         matched_dy_step = None
 
-        # 2D Progressive search with directional constraint (using signal-specific dx_steps)
-        search_done = False
+        # 2D Full search with directional constraint (search ALL steps, pick best by dy)
         for dx_idx, dx_max in enumerate(signal_dx_steps, 1):
-            if search_done:
-                break
 
             if debug_linking and dx_idx > 1:
                 print(f"    dx_step {dx_idx}: dx_max={dx_max}")
@@ -2976,22 +3082,27 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
                         # Coordinate must be BELOW element (coord_cy > elem_cy)
                         if coord_cy <= elem_cy:
                             continue
+                        # Coordinate must be LEFT of element (coord_cx < elem_cx)
+                        if coord_cx >= elem_cx:
+                            continue
                     elif search_direction == "above":
                         # Coordinate must be ABOVE element (coord_cy < elem_cy)
                         if coord_cy >= elem_cy:
                             continue
+                        # Coordinate must be RIGHT of element (coord_cx > elem_cx)
+                        if coord_cx <= elem_cx:
+                            continue
 
-                    dist = math.sqrt(dx**2 + dy**2)
-
-                    if dist < best_dist:
+                    # Use dy as primary metric (not Euclidean distance)
+                    # This ensures we pick the vertically closest coordinate
+                    if dy < best_dy:
                         best_coord = coord
-                        best_dist = dist
+                        best_dy = dy
+                        best_dx = dx
                         matched_dx_step = dx_idx
                         matched_dy_step = dy_idx
 
-                if best_coord:
-                    search_done = True
-                    break
+                # No early break - search ALL dx/dy combinations to find best by dy
 
         if best_coord:
             coord_text = best_coord.get("text", best_coord.get("anchor_text", "?"))
@@ -3000,10 +3111,160 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
             results[elem_id] = coord_text
 
             if debug_linking:
-                print(f"    → LINKED: '{coord_text}' (dx_step={matched_dx_step}, dy_step={matched_dy_step}, dist={best_dist:.0f})")
+                print(f"    → LINKED: '{coord_text}' (dx_step={matched_dx_step}, dy_step={matched_dy_step}, dy={best_dy:.0f}, dx={best_dx:.0f})")
         else:
             if debug_linking:
                 print(f"    → NO MATCH (direction={search_direction})")
+
+    # ==========================================================================
+    # PHASE 3: Coupling coil coordinate linking
+    # STEP 1: Try vertical search first (with smaller/tighter dx/dy steps)
+    # STEP 2: If no coordinate found, fall back to sharing nearby signal's coordinate
+    # ==========================================================================
+    phase3_classes = getattr(sp, 'coord_phase3_classes', ["coupling_coil_active", "coupling_coil_disabled"])
+    phase3_elements = [d for d in detections if d.get("name", "").lower() in [c.lower() for c in phase3_classes]]
+
+    # Get coupling coil search parameters (smaller steps for tight vertical search)
+    coil_dx_steps = getattr(sp, 'coupling_coil_dx_steps', [5, 10, 15, 20, 25, 30, 40, 50, 60, 70])
+    coil_dy_steps = getattr(sp, 'coupling_coil_dy_steps', [1.0, 1.5, 2.0])
+
+    # Get signal fallback parameters
+    coil_signal_dx_max = getattr(sp, 'coupling_coil_signal_dx_max', 300)
+    coil_signal_dy_max = getattr(sp, 'coupling_coil_signal_dy_max', 100)
+
+    # Get all signals with their linked coordinates (for fallback)
+    signals_with_coords = [(d, results.get(id(d))) for d in detections
+                           if d.get("name", "").lower() == "signal" and id(d) in results]
+
+    if debug_linking and phase3_elements:
+        print(f"\n  [Phase 3] Processing {len(phase3_elements)} coupling coils")
+        print(f"    Vertical search steps: dx={coil_dx_steps}, dy={coil_dy_steps}")
+        print(f"    Signals with coordinates (for fallback): {len(signals_with_coords)}")
+
+    for elem in phase3_elements:
+        elem_id = id(elem)
+        if elem_id in results:
+            continue  # Already linked
+
+        elem_cx = elem["cx"]
+        elem_cy = elem["cy"]
+        elem_name = elem.get("name", "?")
+
+        # Get coupling coil's text direction (from text_id linking)
+        coil_ocr_pos = elem.get("ocr_region_source", "")
+
+        if debug_linking:
+            print(f"\n  [{elem_name}] at ({elem_cx:.0f}, {elem_cy:.0f}) direction={coil_ocr_pos if coil_ocr_pos else 'none'}")
+
+        # STEP 1: Try vertical search first with directional constraint
+        best_coord = None
+        best_dy = float('inf')  # Use dy as primary metric
+        best_dx = None
+        matched_dx_step = None
+        matched_dy_step = None
+
+        # Full search - no early break, find best by dy
+        for dx_idx, dx_max in enumerate(coil_dx_steps, 1):
+
+            for dy_idx, step_multiplier in enumerate(coil_dy_steps, 1):
+                dy_max = dy_base * step_multiplier
+
+                for coord in coords:
+                    coord_id = coord.get('row_id', id(coord))
+                    if coord_id in used_coord_ids:
+                        continue
+
+                    coord_cx = coord["cx"]
+                    coord_cy = coord["cy"]
+
+                    dx = abs(coord_cx - elem_cx)
+                    if dx > dx_max:
+                        continue
+
+                    dy = abs(coord_cy - elem_cy)
+                    if dy < dy_min or dy > dy_max:
+                        continue
+
+                    # Apply Y directional constraint + X constraint with tolerance
+                    x_tolerance = 10  # Allow 10px into opposite direction
+
+                    if coil_ocr_pos == "below":
+                        # Coordinate must be BELOW element (coord_cy > elem_cy)
+                        if coord_cy <= elem_cy:
+                            continue
+                        # Coord expected LEFT, but allow slightly right (up to 10px)
+                        if coord_cx > elem_cx + x_tolerance:
+                            continue
+                    elif coil_ocr_pos == "above":
+                        # Coordinate must be ABOVE element (coord_cy < elem_cy)
+                        if coord_cy >= elem_cy:
+                            continue
+                        # Coord expected RIGHT, but allow slightly left (up to 10px)
+                        if coord_cx < elem_cx - x_tolerance:
+                            continue
+                    # If no direction known, allow bidirectional search (no constraint)
+
+                    # Use dy as primary metric (not Euclidean distance)
+                    if dy < best_dy:
+                        best_coord = coord
+                        best_dy = dy
+                        best_dx = dx
+                        matched_dx_step = dx_idx
+                        matched_dy_step = dy_idx
+
+                # No early break - search ALL dx/dy combinations to find best by dy
+
+        if best_coord:
+            # Found coordinate directly above/below with directional match
+            coord_text = best_coord.get("text", best_coord.get("anchor_text", "?"))
+            coord_id = best_coord.get('row_id', id(best_coord))
+            used_coord_ids.add(coord_id)
+            results[elem_id] = coord_text
+
+            if debug_linking:
+                print(f"    → LINKED (vertical): '{coord_text}' (dx_step={matched_dx_step}, dy_step={matched_dy_step}, dy={best_dy:.0f}, dx={best_dx:.0f})")
+        else:
+            # STEP 2: Fallback - share nearby signal's coordinate
+            if debug_linking:
+                print(f"    No vertical match, trying signal fallback...")
+
+            nearby_signal_coord = None
+
+            for signal, signal_coord in signals_with_coords:
+                sig_cx = signal["cx"]
+                sig_cy = signal["cy"]
+
+                dx = abs(sig_cx - elem_cx)
+                dy = abs(sig_cy - elem_cy)
+
+                # Get signal's text direction
+                sig_ocr_pos = signal.get("ocr_region_source", "")
+
+                # Check if coil is on the EXPECTED side based on signal's text direction
+                # Text above → coil should be RIGHT of signal (elem_cx > sig_cx)
+                # Text below → coil should be LEFT of signal (elem_cx < sig_cx)
+                if sig_ocr_pos == "above":
+                    coil_on_expected_side = elem_cx > sig_cx
+                elif sig_ocr_pos == "below":
+                    coil_on_expected_side = elem_cx < sig_cx
+                else:
+                    # No direction known, skip this signal
+                    continue
+
+                if coil_on_expected_side and dx <= coil_signal_dx_max and dy <= coil_signal_dy_max:
+                    nearby_signal_coord = signal_coord
+                    if debug_linking:
+                        direction = "right" if sig_ocr_pos == "above" else "left"
+                        print(f"    Found signal {direction} at ({sig_cx:.0f}, {sig_cy:.0f}) with coord '{signal_coord}'")
+                    break
+
+            if nearby_signal_coord:
+                results[elem_id] = nearby_signal_coord
+                if debug_linking:
+                    print(f"    → SHARED from signal: '{nearby_signal_coord}'")
+            else:
+                if debug_linking:
+                    print(f"    → NO MATCH")
 
     if debug_linking:
         print(f"\n  [Antwerp coord linking] Total linked: {len(results)}")

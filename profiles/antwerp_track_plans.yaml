@@ -371,6 +371,11 @@ spatial:
   coord_phase1_classes: ["s_bond", "short_bond", "terminal_bond", "insulation_joint", "spie_loop"]
   coord_phase2_classes: ["signal"]  # Phase 2: directional search based on text position (above/below)
   signal_coord_dx_steps: [50, 100, 150, 200, 250]  # Larger dx steps for signals (text/coord further from symbol)
+  coord_phase3_classes: ["coupling_coil_active", "coupling_coil_disabled"]  # Phase 3: vertical search first, signal fallback second
+  coupling_coil_dx_steps: [5, 10, 15, 20, 25, 30, 40, 50, 60, 70]  # dx steps for vertical search (increased for edge cases)
+  coupling_coil_dy_steps: [1.0, 1.5, 2.0]  # Fewer dy multipliers for tight search (first try)
+  coupling_coil_signal_dx_max: 300  # For signal fallback (actual: 236-257px)
+  coupling_coil_signal_dy_max: 100  # For signal fallback (actual dy=84 for TCC01061)
 
   # Search window dimensions
   inside_padding_ratio: 0.10

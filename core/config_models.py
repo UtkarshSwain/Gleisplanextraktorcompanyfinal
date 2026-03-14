@@ -195,6 +195,17 @@ class SpatialConfig:
     coord_phase1_classes: List[str] = field(default_factory=lambda: ["s_bond", "short_bond", "terminal_bond", "insulation_joint", "spie_loop"])
     coord_phase2_classes: List[str] = field(default_factory=lambda: ["signal"])  # Phase 2: directional search based on text position
     signal_coord_dx_steps: List[int] = field(default_factory=lambda: [50, 100, 150, 200, 250])  # Larger dx steps for signals
+    coord_phase3_classes: List[str] = field(default_factory=lambda: ["coupling_coil_active", "coupling_coil_disabled"])  # Phase 3: vertical search first, signal fallback second
+    coupling_coil_dx_steps: List[int] = field(default_factory=lambda: [5, 10, 15, 20, 25, 30, 40, 50, 60, 70])  # dx steps for vertical search
+    coupling_coil_dy_steps: List[float] = field(default_factory=lambda: [1.0, 1.5, 2.0])  # Fewer dy multipliers for tight search
+    coupling_coil_signal_dx_max: int = 300  # For signal fallback
+    coupling_coil_signal_dy_max: int = 100  # For signal fallback (actual dy=84 for TCC01061)
+
+    # Duplicate coordinate pairing (edge case: two coords with same value side-by-side)
+    coord_pair_min_dx: int = 50       # Minimum X distance between pair coords
+    coord_pair_max_dx: int = 200      # Maximum X distance between pair coords
+    coord_pair_max_dy: int = 100      # Maximum Y difference (must be ~same row)
+    coord_pair_elem_dx_max: int = 250 # Max dx for elements to be considered "nearby" pair (same as signal_dx_steps max)
 
     # Search window dimensions
     inside_padding_ratio: float = 0.10

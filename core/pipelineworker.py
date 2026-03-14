@@ -749,7 +749,7 @@ class PipelineWorker(QtCore.QThread):
                         print(f" FAHRTRICHTUNG DETECTION - Page {pidx} (GKS-based only)")
                         print(f"{'='*70}")
 
-                    signal_dets = [a for a, _, _, _, _, _, _ in anchor_results if a["name"] == "signal"]
+                    signal_dets = [a for a, _, _, _, _, _, _ in anchor_results if a["name"].lower() == "signal"]
                     gks_dets = [a for a, _, _, _, _, _, _ in anchor_results if a["name"] == "gks_gesteuert"]
                     fahrtrichtung_map = {}
 
@@ -1065,12 +1065,23 @@ class PipelineWorker(QtCore.QThread):
                                         text_id_text = linked_text_id.get("anchor_text", linked_text_id.get("text", ""))
                                         a["anchor_text"] = text_id_text
 
-                                        # Store direction in anchor (used for Phase 2 signal coordinate search)
+                                        # Store vertical direction in anchor (used for Phase 2/3 coordinate search)
+                                        # For 'above'/'below' directions, use directly
+                                        # For 'left'/'right' directions, calculate Y relationship
                                         if text_id_direction in ['above', 'below']:
                                             a["ocr_region_source"] = text_id_direction
+                                        elif text_id_direction in ['left', 'right']:
+                                            # For horizontal text_ids, determine vertical position
+                                            text_id_cy = linked_text_id.get("cy", 0)
+                                            anchor_cy = a.get("cy", 0)
+                                            if text_id_cy > anchor_cy:
+                                                a["ocr_region_source"] = "below"  # text_id is below anchor
+                                            elif text_id_cy < anchor_cy:
+                                                a["ocr_region_source"] = "above"  # text_id is above anchor
 
                                         if DEBUG_LINKING:
-                                            print(f"Linked {a['name']} → text_id '{text_id_text}' (dir={text_id_direction})")
+                                            vertical_dir = a.get("ocr_region_source", "none")
+                                            print(f"Linked {a['name']} → text_id '{text_id_text}' (dir={text_id_direction}, vertical={vertical_dir})")
 
                         if DEBUG_LINKING:
                             print(f"Total symbol-to-text_id links: {len(text_id_links)}")
@@ -1149,12 +1160,12 @@ class PipelineWorker(QtCore.QThread):
                                 no_ocr_counters[a["name"]] += 1
                         
                         #  NEW: SKIP if this signal is haltepunkt-referenced
-                        if a["name"] == "signal" and id(a) in haltepunkt_referenced_signals:
+                        if a["name"].lower() == "signal" and id(a) in haltepunkt_referenced_signals:
                             if DEBUG_LINKING:
                                 print(f"SKIPPING signal '{name_txt}' (haltepunkt-referenced)")
                             continue  #  Don't process this signal at all
-                        
-                        if a["name"] == "signal":
+
+                        if a["name"].lower() == "signal":
                             #  CHANGE 2: Extract fahrtrichtung and source from map
                             fahr_data = fahrtrichtung_map.get(id(a))
                             if fahr_data:
@@ -1538,7 +1549,7 @@ class PipelineWorker(QtCore.QThread):
 
                         #  EXISTING CODE FOR OTHER CLASSES
                         # For signals: also exclude haltepunkt soft-claimed coordinates
-                        if a["name"] == "signal":
+                        if a["name"].lower() == "signal":
                             available_coords = [c for c in coords if id(c) not in used_coord_ids and id(c) not in haltepunkt_coord_ids]
                         elif a["name"] in ["weichenende", "weichengruppenende"]:
                             # LOWEST PRIORITY: exclude ALL claimed coordinates from ALL sources
