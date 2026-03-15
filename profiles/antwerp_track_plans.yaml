@@ -256,7 +256,7 @@ detection:
   use_centroid_halo: true
   halo_ratio: 0.12  # 12% from edges
   halo_conf_boost: 0.50
-  filter_contained_boxes: true
+  filter_contained_boxes: false
   contained_box_threshold: 0.80
   prefer_larger_nms: true
 
@@ -360,11 +360,11 @@ spatial:
   signal_extended_dx_ratio: 5.0
 
   # Progressive text_id search steps (stepwise radius expansion)
-  text_id_search_steps: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5]  # Try these multipliers progressively
+  text_id_search_steps: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]  # Try these multipliers progressively
 
   # Coordinate linking for Phase 1 elements (s_bond, short_bond, terminal_bond, insulation_joint, spie_loop)
   coord_search_steps: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0]  # Progressive vertical distance multipliers
-  coord_dx_steps: [5, 10, 15, 20, 25, 30]  # Progressive horizontal tolerance steps - for each dx, all dy steps are tried
+  coord_dx_steps: [5, 10, 15, 20, 25, 30, 40, 50, 60]  # Progressive horizontal tolerance steps - for each dx, all dy steps are tried
   coord_dy_min: 30            # Minimum vertical distance
   coord_dy_base: 300          # Base vertical distance (multiplied by steps) - max 2100px at step 7.0
   terminal_bond_pair_dy_max: 300  # Max vertical distance to consider terminal_bonds as paired

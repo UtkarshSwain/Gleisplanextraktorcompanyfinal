@@ -2750,6 +2750,17 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
     # Filter to Phase 1 elements
     phase1_elements = [d for d in detections if d.get("name", "").lower() in [c.lower() for c in phase1_classes]]
 
+    # Sort by class priority (order in phase1_classes determines processing order)
+    # This ensures terminal_bonds process before insulation_joints, etc.
+    def get_class_priority(elem):
+        name = elem.get("name", "").lower()
+        try:
+            return [c.lower() for c in phase1_classes].index(name)
+        except ValueError:
+            return len(phase1_classes)  # Unknown classes go last
+
+    phase1_elements.sort(key=get_class_priority)
+
     if debug_linking:
         print(f"\n[Antwerp coord linking] Phase 1 elements: {len(phase1_elements)}, Coordinates: {len(coords)}")
         print(f"  Classes: {phase1_classes}")
@@ -2766,6 +2777,8 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
 
     if debug_linking and terminal_bonds:
         print(f"\n  Checking {len(terminal_bonds)} terminal_bonds for pairs...")
+        for tb in terminal_bonds:
+            print(f"    TB at ({tb['cx']:.0f}, {tb['cy']:.0f})")
 
     paired_tb_ids = set()  # Track which terminal_bonds are paired
 
@@ -2781,8 +2794,12 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
             dx = abs(tb1["cx"] - tb2["cx"])
             dy = abs(tb1["cy"] - tb2["cy"])
 
-            # Use max dx_step for pair detection
-            dx_max_for_pairs = max(dx_steps) if dx_steps else 30
+            # Use config value for pair detection (not dx_steps max)
+            dx_max_for_pairs = getattr(sp, 'terminal_bond_pair_dx_max', 150)
+
+            if debug_linking:
+                print(f"    Checking TB pair: dx={dx:.0f}, dy={dy:.0f} (max: dx={dx_max_for_pairs}, dy={pair_dy_max})")
+
             if dx <= dx_max_for_pairs and dy <= pair_dy_max:
                 # Found a pair! Find coordinate in between
                 pair_top_y = min(tb1["cy"], tb2["cy"])
@@ -2857,73 +2874,166 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
 
     # Find and process duplicate pairs
     for text, coord_list in coord_by_text.items():
-        if len(coord_list) != 2:
-            continue  # Only handle exact pairs
+        if len(coord_list) < 2:
+            continue  # Need at least 2 coords with same text
 
-        c1, c2 = coord_list
-        pair_dx = abs(c1["cx"] - c2["cx"])
-        pair_dy = abs(c1["cy"] - c2["cy"])
+        # Find all horizontally adjacent pairs within this group
+        # (handles case where 4+ coords have same text value)
+        found_pairs = []
+        for i, c1 in enumerate(coord_list):
+            for c2 in coord_list[i+1:]:
+                pair_dx = abs(c1["cx"] - c2["cx"])
+                pair_dy = abs(c1["cy"] - c2["cy"])
+                # Check pair criteria: horizontally adjacent, same row
+                if pair_min_dx <= pair_dx <= pair_max_dx and pair_dy <= pair_max_dy:
+                    found_pairs.append((c1, c2, pair_dx, pair_dy))
 
-        # Check pair criteria: horizontally adjacent, same row
-        if not (pair_min_dx <= pair_dx <= pair_max_dx and pair_dy <= pair_max_dy):
-            continue
+        # Process each found pair
+        for c1, c2, pair_dx, pair_dy in found_pairs:
+            # Skip if either coordinate already used
+            c1_id = c1.get('row_id', id(c1))
+            c2_id = c2.get('row_id', id(c2))
+            if c1_id in used_coord_ids or c2_id in used_coord_ids:
+                continue
 
-        # Skip if either coordinate already used
-        c1_id = c1.get('row_id', id(c1))
-        c2_id = c2.get('row_id', id(c2))
-        if c1_id in used_coord_ids or c2_id in used_coord_ids:
-            continue
+            if debug_linking:
+                print(f"\n  DUPLICATE PAIR: '{text}' (dx={pair_dx:.0f}, dy={pair_dy:.0f})")
 
-        if debug_linking:
-            print(f"\n  DUPLICATE PAIR: '{text}' (dx={pair_dx:.0f}, dy={pair_dy:.0f})")
+            # Determine left/right coordinates
+            left_coord = c1 if c1["cx"] < c2["cx"] else c2
+            right_coord = c2 if c1["cx"] < c2["cx"] else c1
 
-        # Determine left/right coordinates
-        left_coord = c1 if c1["cx"] < c2["cx"] else c2
-        right_coord = c2 if c1["cx"] < c2["cx"] else c1
+            # Find ALL elements (Phase 1 + Phase 2) near this pair
+            # Use expanded dx tolerance for pairing (edge cases need larger range)
+            # This is safe because pairing only triggers for duplicate coordinate pairs
+            pair_elem_dx_max = getattr(sp, 'coord_pair_elem_dx_max', 250)  # Expanded range for pairing (same as signal_dx_steps max)
 
-        # Find ALL elements (Phase 1 + Phase 2) near this pair
-        # Use expanded dx tolerance for pairing (edge cases need larger range)
-        # This is safe because pairing only triggers for duplicate coordinate pairs
-        pair_elem_dx_max = getattr(sp, 'coord_pair_elem_dx_max', 250)  # Expanded range for pairing (same as signal_dx_steps max)
+            all_elements = phase1_elements + phase2_elements
+            nearby = []
+            for elem in all_elements:
+                if id(elem) in results:
+                    continue  # Already linked
 
-        all_elements = phase1_elements + phase2_elements
-        nearby = []
-        for elem in all_elements:
-            if id(elem) in results:
-                continue  # Already linked
+                # Check proximity to either coordinate (using expanded range for pairing)
+                for coord in [left_coord, right_coord]:
+                    elem_dx = abs(elem["cx"] - coord["cx"])
+                    elem_dy = abs(elem["cy"] - coord["cy"])
+                    if elem_dx <= pair_elem_dx_max and dy_min <= elem_dy <= dy_base * max(search_steps):
+                        nearby.append(elem)
+                        break
 
-            # Check proximity to either coordinate (using expanded range for pairing)
-            for coord in [left_coord, right_coord]:
-                elem_dx = abs(elem["cx"] - coord["cx"])
-                elem_dy = abs(elem["cy"] - coord["cy"])
-                if elem_dx <= pair_elem_dx_max and dy_min <= elem_dy <= dy_base * max(search_steps):
-                    nearby.append(elem)
-                    break
+            if debug_linking:
+                nearby_names = [e.get("name", "?") for e in nearby]
+                print(f"    Nearby elements ({len(nearby)}): {nearby_names}")
 
-        if len(nearby) >= 2:
-            # Find closest element to each coordinate (based on euclidean distance)
-            def dist_to_coord(elem, coord):
-                return math.sqrt((elem["cx"] - coord["cx"])**2 + (elem["cy"] - coord["cy"])**2)
+            if len(nearby) >= 2:
+                def dist_to_coord(elem, coord):
+                    return math.sqrt((elem["cx"] - coord["cx"])**2 + (elem["cy"] - coord["cy"])**2)
 
-            # Find element closest to left coord
-            left_elem = min(nearby, key=lambda e: dist_to_coord(e, left_coord))
-            left_dist = dist_to_coord(left_elem, left_coord)
+                # Check for paired terminal_bonds (2 terminal_bonds very close together)
+                terminal_bonds = [e for e in nearby if e.get("name", "").lower() == "terminal_bond"]
+                signals = [e for e in nearby if e.get("name", "").lower() == "signal"]
 
-            # Find element closest to right coord (excluding left_elem)
-            remaining = [e for e in nearby if id(e) != id(left_elem)]
-            if remaining:
-                right_elem = min(remaining, key=lambda e: dist_to_coord(e, right_coord))
-                right_dist = dist_to_coord(right_elem, right_coord)
+                tb_pair_dx_max = getattr(sp, 'terminal_bond_pair_dx_max', 150)
+                tb_pair_dy_max = getattr(sp, 'terminal_bond_pair_dy_max', 50)
 
-                # Assign: closest element to each coord
-                results[id(left_elem)] = text
-                results[id(right_elem)] = text
-                used_coord_ids.add(left_coord.get('row_id', id(left_coord)))
-                used_coord_ids.add(right_coord.get('row_id', id(right_coord)))
+                paired_terminal_bonds = None
+                if len(terminal_bonds) >= 2:
+                    # Check ALL combinations to find actual paired terminal_bonds
+                    # (not just first two, as they may not be the physical pair)
+                    best_pair = None
+                    best_pair_dist = float('inf')
+                    for i in range(len(terminal_bonds)):
+                        for j in range(i + 1, len(terminal_bonds)):
+                            tb1, tb2 = terminal_bonds[i], terminal_bonds[j]
+                            tb_dx = abs(tb1["cx"] - tb2["cx"])
+                            tb_dy = abs(tb1["cy"] - tb2["cy"])
+                            if tb_dx <= tb_pair_dx_max and tb_dy <= tb_pair_dy_max:
+                                # Found a valid pair, check if it's the closest pair
+                                pair_dist = math.sqrt(tb_dx**2 + tb_dy**2)
+                                if pair_dist < best_pair_dist:
+                                    best_pair = [tb1, tb2]
+                                    best_pair_dist = pair_dist
 
-                if debug_linking:
-                    print(f"    → {left_elem.get('name')} (x={left_elem['cx']:.0f}, dist={left_dist:.0f}) ← left coord")
-                    print(f"    → {right_elem.get('name')} (x={right_elem['cx']:.0f}, dist={right_dist:.0f}) ← right coord")
+                    if best_pair:
+                        paired_terminal_bonds = best_pair
+                        tb_dx = abs(best_pair[0]["cx"] - best_pair[1]["cx"])
+                        tb_dy = abs(best_pair[0]["cy"] - best_pair[1]["cy"])
+                        if debug_linking:
+                            print(f"    PAIRED terminal_bonds detected (dx={tb_dx:.0f}, dy={tb_dy:.0f})")
+
+                if paired_terminal_bonds and signals:
+                    # CASE B: Paired terminal_bonds + signal
+                    # Both terminal_bonds get coord closest to their center
+                    # Signal gets the other coord
+                    tb_center_x = (paired_terminal_bonds[0]["cx"] + paired_terminal_bonds[1]["cx"]) / 2
+                    tb_center_y = (paired_terminal_bonds[0]["cy"] + paired_terminal_bonds[1]["cy"]) / 2
+
+                    # Calculate distance from TB pair center to coordinate pair center
+                    coord_center_x = (left_coord["cx"] + right_coord["cx"]) / 2
+                    coord_center_y = (left_coord["cy"] + right_coord["cy"]) / 2
+                    pair_to_coord_dist = math.sqrt((tb_center_x - coord_center_x)**2 + (tb_center_y - coord_center_y)**2)
+
+                    # Only use CASE B if TB pair is reasonably close to this coordinate pair
+                    max_pair_to_coord_dist = getattr(sp, 'terminal_bond_pair_to_coord_max_dist', dy_base * 3)
+
+                    if pair_to_coord_dist > max_pair_to_coord_dist:
+                        # TB pair is too far from this coord pair, fall through to CASE A/C
+                        if debug_linking:
+                            print(f"    TB pair too far from coords (dist={pair_to_coord_dist:.0f} > {max_pair_to_coord_dist:.0f}), using standard assignment")
+                        paired_terminal_bonds = None  # Reset to trigger CASE A/C
+
+                if paired_terminal_bonds and signals:
+                    # TB pair is close enough, proceed with CASE B assignment
+                    # (tb_center already calculated above)
+
+                    # Find which coord is closer to terminal_bond center
+                    dist_to_left = math.sqrt((tb_center_x - left_coord["cx"])**2 + (tb_center_y - left_coord["cy"])**2)
+                    dist_to_right = math.sqrt((tb_center_x - right_coord["cx"])**2 + (tb_center_y - right_coord["cy"])**2)
+
+                    if dist_to_left < dist_to_right:
+                        tb_coord = left_coord
+                        signal_coord = right_coord
+                    else:
+                        tb_coord = right_coord
+                        signal_coord = left_coord
+
+                    tb_coord_text = tb_coord.get("text", tb_coord.get("anchor_text", "?"))
+                    signal_coord_text = signal_coord.get("text", signal_coord.get("anchor_text", "?"))
+
+                    # Assign both terminal_bonds to same coordinate
+                    for tb in paired_terminal_bonds:
+                        results[id(tb)] = tb_coord_text
+
+                    # Assign signal to other coordinate
+                    results[id(signals[0])] = signal_coord_text
+
+                    # Mark both coords as used
+                    used_coord_ids.add(left_coord.get('row_id', id(left_coord)))
+                    used_coord_ids.add(right_coord.get('row_id', id(right_coord)))
+
+                    if debug_linking:
+                        print(f"    → terminal_bond pair → '{tb_coord_text}'")
+                        print(f"    → {signals[0].get('name')} → '{signal_coord_text}'")
+
+                else:
+                    # CASE A/C: Standard 1:1 assignment (existing logic)
+                    left_elem = min(nearby, key=lambda e: dist_to_coord(e, left_coord))
+                    left_dist = dist_to_coord(left_elem, left_coord)
+
+                    remaining = [e for e in nearby if id(e) != id(left_elem)]
+                    if remaining:
+                        right_elem = min(remaining, key=lambda e: dist_to_coord(e, right_coord))
+                        right_dist = dist_to_coord(right_elem, right_coord)
+
+                        results[id(left_elem)] = text
+                        results[id(right_elem)] = text
+                        used_coord_ids.add(left_coord.get('row_id', id(left_coord)))
+                        used_coord_ids.add(right_coord.get('row_id', id(right_coord)))
+
+                        if debug_linking:
+                            print(f"    → {left_elem.get('name')} (dist={left_dist:.0f}) ← left coord")
+                            print(f"    → {right_elem.get('name')} (dist={right_dist:.0f}) ← right coord")
 
     # Second pass: link remaining elements (non-paired) using above/below search
     for elem in phase1_elements:

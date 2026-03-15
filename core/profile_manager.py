@@ -316,6 +316,7 @@ class ProfileManager:
             default_dy_multiplier=spatial_data.get('default_dy_multiplier', 1.6),
             default_dx_multiplier=spatial_data.get('default_dx_multiplier', 1.0),
             signal_extended_dx_ratio=spatial_data.get('signal_extended_dx_ratio', 5.0),
+            text_id_search_steps=spatial_data.get('text_id_search_steps', [1.0, 1.5, 2.0, 2.5, 3.0, 3.5]),
             inside_padding_ratio=spatial_data.get('inside_padding_ratio', 0.10),
             right_window_width_ratio=spatial_data.get('right_window_width_ratio', 2.5),
             right_window_height_ratio=spatial_data.get('right_window_height_ratio', 0.6),
@@ -361,7 +362,16 @@ class ProfileManager:
             spatial_threshold_single_section=spatial_data.get('spatial_threshold_single_section', 1000),
             spatial_threshold_gap_multiplier=spatial_data.get('spatial_threshold_gap_multiplier', 3.0),
             spatial_threshold_section_gap_min=spatial_data.get('spatial_threshold_section_gap_min', 1000),
-            spatial_threshold_section_gap_max=spatial_data.get('spatial_threshold_section_gap_max', 2500)
+            spatial_threshold_section_gap_max=spatial_data.get('spatial_threshold_section_gap_max', 2500),
+            # Coordinate linking settings (Antwerp)
+            coord_search_steps=spatial_data.get('coord_search_steps', [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0]),
+            coord_dx_steps=spatial_data.get('coord_dx_steps', [5, 10, 15, 20, 25, 30]),
+            coord_dy_min=spatial_data.get('coord_dy_min', 30),
+            coord_dy_base=spatial_data.get('coord_dy_base', 300),
+            coord_phase1_classes=spatial_data.get('coord_phase1_classes', ["s_bond", "short_bond", "terminal_bond", "insulation_joint", "spie_loop"]),
+            signal_coord_dx_steps=spatial_data.get('signal_coord_dx_steps', [50, 100, 150, 200, 250]),
+            coupling_coil_dx_steps=spatial_data.get('coupling_coil_dx_steps', [5, 10, 15, 20, 25, 30, 40, 50, 60, 70]),
+            coupling_coil_dy_steps=spatial_data.get('coupling_coil_dy_steps', [1.0, 1.5, 2.0])
         )
 
     @staticmethod

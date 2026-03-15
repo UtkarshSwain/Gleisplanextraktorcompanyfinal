@@ -188,7 +188,7 @@ class SpatialConfig:
 
     # Coordinate linking for Antwerp Phase 1 elements
     coord_search_steps: List[float] = field(default_factory=lambda: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0])
-    coord_dx_steps: List[int] = field(default_factory=lambda: [5, 10, 15, 20, 25, 30])  # Progressive dx tolerance steps
+    coord_dx_steps: List[int] = field(default_factory=lambda: [5, 10, 15, 20, 25, 30, 40, 50, 60])  # Progressive dx tolerance steps
     coord_dy_min: int = 30             # Minimum vertical distance
     coord_dy_base: int = 300           # Base vertical distance (multiplied by steps) - max 2100px at step 7.0
     terminal_bond_pair_dy_max: int = 300  # Max vertical distance to consider terminal_bonds as paired
@@ -206,6 +206,11 @@ class SpatialConfig:
     coord_pair_max_dx: int = 200      # Maximum X distance between pair coords
     coord_pair_max_dy: int = 100      # Maximum Y difference (must be ~same row)
     coord_pair_elem_dx_max: int = 250 # Max dx for elements to be considered "nearby" pair (same as signal_dx_steps max)
+
+    # Terminal bond pairing (when 2 terminal_bonds are adjacent)
+    terminal_bond_pair_dx_max: int = 150  # Max X distance between paired terminal_bonds (actual dx ~141)
+    terminal_bond_pair_dy_max: int = 50   # Max Y distance between paired terminal_bonds
+    terminal_bond_pair_to_coord_max_dist: int = 900  # Max distance from TB pair center to coord pair center
 
     # Search window dimensions
     inside_padding_ratio: float = 0.10
