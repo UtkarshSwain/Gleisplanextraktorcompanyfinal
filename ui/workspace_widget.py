@@ -42,6 +42,7 @@ from uservalidation.validation_dialog2 import EnhancedDataValidator
 from ui.quality_inspector import QualityInspectorDialog
 import json
 from core.pipelineworker import NO_OCR_CLASSES
+from core.config_models import UIConfig, DEFAULT_UI_CONFIG
 import math
 import re
 from core.ocr_engine import manual_angular_ocr, ocr_coordinate_horizontal, ocr_coordinate_angular, ocr_signal_name
@@ -430,6 +431,43 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 print(f"[STATUS] {message}")
         except Exception as e:
             print(f"[STATUS ERROR] {message} ({e})")
+
+    def _get_ui_config(self) -> UIConfig:
+        """Get UI configuration from the current layout profile.
+
+        Returns the profile-specific UI config (columns, editors) or DEFAULT_UI_CONFIG
+        if no profile is loaded.
+        """
+        try:
+            # Access layout config through parent chain: workspace -> auditing -> main -> setup
+            if (self.parent_auditing and
+                hasattr(self.parent_auditing, 'main_app_ref') and
+                self.parent_auditing.main_app_ref and
+                hasattr(self.parent_auditing.main_app_ref, 'setup_window') and
+                self.parent_auditing.main_app_ref.setup_window and
+                hasattr(self.parent_auditing.main_app_ref.setup_window, 'layout_config') and
+                self.parent_auditing.main_app_ref.setup_window.layout_config):
+                return self.parent_auditing.main_app_ref.setup_window.layout_config.get_ui_config()
+        except Exception as e:
+            print(f"[UI CONFIG] Failed to get profile UI config: {e}")
+        return DEFAULT_UI_CONFIG
+
+    def _get_layout_config(self):
+        """Get the current layout config from the profile.
+
+        Returns None if no profile is loaded.
+        """
+        try:
+            if (self.parent_auditing and
+                hasattr(self.parent_auditing, 'main_app_ref') and
+                self.parent_auditing.main_app_ref and
+                hasattr(self.parent_auditing.main_app_ref, 'setup_window') and
+                self.parent_auditing.main_app_ref.setup_window and
+                hasattr(self.parent_auditing.main_app_ref.setup_window, 'layout_config')):
+                return self.parent_auditing.main_app_ref.setup_window.layout_config
+        except Exception as e:
+            print(f"[LAYOUT CONFIG] Failed to get profile config: {e}")
+        return None
 
     def _on_ocr_resize_timer_fired(self):
         """
@@ -877,7 +915,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
         
         # Tree widget - bigger font and row height for better readability
         self.tree = AuditingTreeWidget(self)
-        self.tree.setHeaderLabels(["Text/Nummer", "Koordinatentext", "Fahrtrichtung", "Seite"])
+        # Use profile-based columns (modular UI)
+        ui_config = self._get_ui_config()
+        column_headers = ui_config.get_column_headers()
+        self.tree.setHeaderLabels(column_headers)
+        self.tree.setColumnCount(len(column_headers))
+        # Store UI config for later use in _populate_tree
+        self._ui_config = ui_config
         self.tree.setSortingEnabled(True)
 
         # Make tree bigger with larger font (DPI-aware)
@@ -901,15 +945,15 @@ class WorkspaceWidget(QtWidgets.QWidget):
             }
         """)
 
-        self.tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.Interactive)
-        self.tree.header().setSectionResizeMode(1, QtWidgets.QHeaderView.Interactive)
-        self.tree.header().setSectionResizeMode(2, QtWidgets.QHeaderView.Interactive)
-        self.tree.header().setSectionResizeMode(3, QtWidgets.QHeaderView.Interactive)
-        # DPI-aware column widths
-        self.tree.header().resizeSection(0, scale_value(220))
-        self.tree.header().resizeSection(1, scale_value(170))
-        self.tree.header().resizeSection(2, scale_value(120))
-        self.tree.header().resizeSection(3, scale_value(90))
+        # Dynamic column resize modes based on profile
+        num_cols = len(column_headers)
+        for col_idx in range(num_cols):
+            self.tree.header().setSectionResizeMode(col_idx, QtWidgets.QHeaderView.Interactive)
+        # DPI-aware column widths (dynamic based on number of columns)
+        default_widths = [220, 170, 120, 100, 90]  # Reasonable defaults for up to 5 columns
+        for col_idx in range(num_cols):
+            width = default_widths[col_idx] if col_idx < len(default_widths) else 100
+            self.tree.header().resizeSection(col_idx, scale_value(width))
         self.tree.header().setStretchLastSection(True)
         self.tree.setMouseTracking(True)
         self.tree.itemEntered.connect(self.on_tree_item_hovered)
@@ -1648,7 +1692,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 parent_item.setFont(0, font)
                 parent_item.setFlags(parent_item.flags() & ~QtCore.Qt.ItemIsSelectable)
                 bg_brush = self.palette().window().color().lighter(115)
-                for col in range(4):
+                # Use profile-based column count for backgrounds
+                ui_config = self._get_ui_config()
+                num_cols = ui_config.get_column_count()
+                for col in range(num_cols):
                     parent_item.setBackground(col, bg_brush)
 
                 df_class = df_page[df_page['cls'] == cls_name]
@@ -1657,48 +1704,61 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                 for _, row in df_class.iterrows():
                     row_id = int(row['row_id'])
-
-                    # Determine primary and secondary text
-                    if cls_name == 'coordinate':
-                        primary_text = str(row.get('coord_text', ''))
-                        secondary_text = ""
-                        fahrtrichtung_text = ""
-                    elif is_no_ocr_class:
-                        # Check if anchor_text was already populated by the pipeline
-                        # (e.g., for haltepunkt or weichenende)
-                        existing_anchor_text = row.get('anchor_text', '')
-
-                        if existing_anchor_text:
-                            # Use the pre-formatted text from the pipeline
-                            primary_text = str(existing_anchor_text)
-                        else:
-                            # Fallback for other NO_OCR_CLASSES (like isolierstoß)
-                            primary_text = f"{cls_name} {item_counter}"
-                            item_counter += 1  # Only increment if we use the counter
-
-                        secondary_text = str(row.get('coord_text', ''))
-                        fahrtrichtung_text = ""
-                    else:
-                        primary_text = str(row.get('anchor_text', ''))
-                        secondary_text = str(row.get('coord_text', ''))
-
-                        if cls_name == "signal" and pd.notna(row.get('fahrtrichtung')):
-                            fahrtrichtung_text = str(row['fahrtrichtung'])
-                        else:
-                            fahrtrichtung_text = ""
-
-                    page_str = str(row.get('page', ''))
                     child_item = QtWidgets.QTreeWidgetItem(parent_item)
 
                     # Get confidence status for color coding
                     conf = float(row.get('conf', 0.0))
                     status = get_confidence_status(conf)
 
-                    # Set text WITHOUT emoji icons (clean text only)
-                    child_item.setText(0, primary_text)
-                    child_item.setText(1, secondary_text)
-                    child_item.setText(2, fahrtrichtung_text)
-                    child_item.setText(3, page_str)
+                    # Populate columns dynamically from profile config
+                    for col_idx, col_config in enumerate(ui_config.table_columns):
+                        field_name = col_config.field
+                        show_for = col_config.show_for_classes
+
+                        # Check if this column should show data for this class
+                        if show_for and cls_name.lower() not in [c.lower() for c in show_for]:
+                            # Column is restricted to specific classes and this isn't one of them
+                            child_item.setText(col_idx, "")
+                            continue
+
+                        # Get value from DataFrame row based on field name
+                        if field_name == 'anchor_text':
+                            if cls_name == 'coordinate':
+                                # For coordinates, show coord_text in first column
+                                value = str(row.get('coord_text', ''))
+                            elif is_no_ocr_class:
+                                existing_text = row.get('anchor_text', '')
+                                if existing_text:
+                                    value = str(existing_text)
+                                else:
+                                    value = f"{cls_name} {item_counter}"
+                                    item_counter += 1
+                            else:
+                                value = str(row.get('anchor_text', ''))
+                        elif field_name == 'coord_text':
+                            if cls_name == 'coordinate':
+                                # For coordinates, coord_text is already in anchor_text column
+                                value = ""
+                            else:
+                                value = str(row.get('coord_text', ''))
+                        elif field_name == 'fahrtrichtung':
+                            if pd.notna(row.get('fahrtrichtung')):
+                                value = str(row['fahrtrichtung'])
+                            else:
+                                value = ""
+                        elif field_name == 'durchrutschweg':
+                            if pd.notna(row.get('durchrutschweg')):
+                                value = str(row['durchrutschweg'])
+                            else:
+                                value = ""
+                        elif field_name == 'page':
+                            value = str(row.get('page', ''))
+                        else:
+                            # Generic field access
+                            raw_value = row.get(field_name, '')
+                            value = str(raw_value) if pd.notna(raw_value) else ""
+
+                        child_item.setText(col_idx, value)
 
                     # No colored backgrounds - user prefers clean dark theme
 

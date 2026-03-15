@@ -46,7 +46,8 @@ from core.image_processing import parse_weichen_block, ensure_landscape
 from core.linking import (
     detect_fahrtrichtung, detect_haltepunkt_signal_group, link_haltetafel_to_gks,
     link_anchor_to_coord, link_anchor_to_text_id, merge_duplicate_signals, link_isolierstoss_fallback,
-    detect_fahrtrichtung_gks_relaxed, detect_fahrtrichtung_gks_nearest, link_antwerp_coordinates
+    detect_fahrtrichtung_gks_relaxed, detect_fahrtrichtung_gks_nearest, link_antwerp_coordinates,
+    detect_fahrtrichtung_antwerp, calculate_durchrutschweg
 )
 import numpy as np
 import gc
@@ -1262,7 +1263,7 @@ class PipelineWorker(QtCore.QThread):
                                 ocr_y1=ocr_bbox[1] if ocr_bbox else None,
                                 ocr_x2=ocr_bbox[2] if ocr_bbox else None,
                                 ocr_y2=ocr_bbox[3] if ocr_bbox else None,
-                                ocr_region_source=ocr_position,
+                                ocr_region_source=a.get("ocr_region_source", ocr_position),
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=None,
                                 _fahrtrichtung_source='none'  #  CHANGE 3
@@ -1297,7 +1298,7 @@ class PipelineWorker(QtCore.QThread):
                                 ocr_y1=ocr_bbox[1] if ocr_bbox else None,
                                 ocr_x2=ocr_bbox[2] if ocr_bbox else None,
                                 ocr_y2=ocr_bbox[3] if ocr_bbox else None,
-                                ocr_region_source=ocr_position,
+                                ocr_region_source=a.get("ocr_region_source", ocr_position),
                                 notes="", weichen_coordinates=weichen_coords,
                                 fahrtrichtung=None,
                                 _fahrtrichtung_source='none'  #  CHANGE 3
@@ -1371,7 +1372,7 @@ class PipelineWorker(QtCore.QThread):
                                 ocr_y1=ocr_bbox[1] if ocr_bbox else None,
                                 ocr_x2=ocr_bbox[2] if ocr_bbox else None,
                                 ocr_y2=ocr_bbox[3] if ocr_bbox else None,
-                                ocr_region_source=ocr_position,
+                                ocr_region_source=a.get("ocr_region_source", ocr_position),
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=None,
                                 _fahrtrichtung_source='none'  #  CHANGE 3
@@ -1423,7 +1424,7 @@ class PipelineWorker(QtCore.QThread):
                                 ocr_y1=ocr_bbox[1] if ocr_bbox else None,
                                 ocr_x2=ocr_bbox[2] if ocr_bbox else None,
                                 ocr_y2=ocr_bbox[3] if ocr_bbox else None,
-                                ocr_region_source=ocr_position,
+                                ocr_region_source=a.get("ocr_region_source", ocr_position),
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=fahrtrichtung,
                                 _fahrtrichtung_source=fahrtrichtung_source  #  CHANGE 3
@@ -1470,7 +1471,7 @@ class PipelineWorker(QtCore.QThread):
                                 ocr_y1=ocr_bbox[1] if ocr_bbox else None,
                                 ocr_x2=ocr_bbox[2] if ocr_bbox else None,
                                 ocr_y2=ocr_bbox[3] if ocr_bbox else None,
-                                ocr_region_source=ocr_position,
+                                ocr_region_source=a.get("ocr_region_source", ocr_position),
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=fahrtrichtung,
                                 _fahrtrichtung_source=fahrtrichtung_source  #  CHANGE 3
@@ -1540,7 +1541,7 @@ class PipelineWorker(QtCore.QThread):
                                 ocr_y1=ocr_bbox[1] if ocr_bbox else None,
                                 ocr_x2=ocr_bbox[2] if ocr_bbox else None,
                                 ocr_y2=ocr_bbox[3] if ocr_bbox else None,
-                                ocr_region_source=ocr_position,
+                                ocr_region_source=a.get("ocr_region_source", ocr_position),
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=fahrtrichtung,
                                 _fahrtrichtung_source=fahrtrichtung_source
@@ -2047,6 +2048,49 @@ class PipelineWorker(QtCore.QThread):
 
                 if DEBUG_LINKING:
                     print(f"{'='*70}\n")
+
+            # ================================================================
+            # ANTWERP-SPECIFIC: Fahrtrichtung and Durchrutschweg calculations
+            # ================================================================
+            # Only run for Antwerp profiles - Wien uses GKS-based detection
+            if self.config is not None and self.config.is_antwerp_profile():
+                if DEBUG_LINKING:
+                    print(f"\n{'='*70}")
+                    print(f" ANTWERP: Fahrtrichtung + Durchrutschweg Calculation")
+                    print(f"{'='*70}")
+
+                # Get signal rows
+                signal_mask = df_all['cls'].str.lower() == 'signal'
+                antwerp_updated = 0
+
+                for idx in df_all[signal_mask].index:
+                    row_dict = df_all.loc[idx].to_dict()
+
+                    # Calculate Fahrtrichtung based on text_id position
+                    if not row_dict.get('fahrtrichtung'):
+                        fahr = detect_fahrtrichtung_antwerp(row_dict, self.config)
+                        if fahr:
+                            df_all.at[idx, 'fahrtrichtung'] = fahr
+                            df_all.at[idx, '_fahrtrichtung_source'] = 'antwerp_text_id'
+
+                    # Calculate Durchrutschweg from bond coordinates
+                    durchrutschweg = calculate_durchrutschweg(
+                        row_dict,
+                        all_rows,  # Pass all detections to find bonds
+                        self.config
+                    )
+                    if durchrutschweg is not None:
+                        df_all.at[idx, 'durchrutschweg'] = durchrutschweg
+                        antwerp_updated += 1
+
+                if DEBUG_LINKING:
+                    print(f"Updated {antwerp_updated} signals with Durchrutschweg")
+                    print(f"{'='*70}\n")
+
+                # Rebuild page_dfs with new columns
+                for page_num in df_all['page'].unique():
+                    page_num_int = int(page_num)
+                    page_dfs[page_num_int] = df_all[df_all['page'] == page_num].copy()
 
             self.progress.emit(100)
             self.done.emit(df_all, page_dfs, track_skeleton if self.detect_tracks else None, None, self.uncertain_detections)

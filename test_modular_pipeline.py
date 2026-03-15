@@ -24,7 +24,7 @@ def test_profile_loading():
     from core.profile_manager import ProfileManager
 
     profiles = [
-        ("profiles/siemens_track_plans.yaml", "siemens_track_plans"),
+        ("profiles/wien_track_plans.yaml", "wien_track_plans"),
         # Future layout types will be added here
     ]
 
@@ -66,7 +66,7 @@ def test_config_values():
     from core.profile_manager import ProfileManager
 
     try:
-        config = ProfileManager.load_profile("profiles/siemens_track_plans.yaml")
+        config = ProfileManager.load_profile("profiles/wien_track_plans.yaml")
 
         # Test detection params
         assert config.detection.tile_size == 2048, f"tile_size: {config.detection.tile_size}"
@@ -126,7 +126,7 @@ def test_ocr_engine_configuration():
     from core.ocr_engine import configure_from_config, DEBUG_ANGLE_ROUTING, SIG_SCORE_MIN
 
     try:
-        config = ProfileManager.load_profile("profiles/siemens_track_plans.yaml")
+        config = ProfileManager.load_profile("profiles/wien_track_plans.yaml")
 
         # Configure OCR module from config
         configure_from_config(config)
@@ -164,7 +164,7 @@ def test_linking_module_functions():
     from core.linking import name_windows_for, parse_coord
 
     try:
-        config = ProfileManager.load_profile("profiles/siemens_track_plans.yaml")
+        config = ProfileManager.load_profile("profiles/wien_track_plans.yaml")
 
         # Test name_windows_for with config
         anchor = {
@@ -253,7 +253,7 @@ def test_class_definitions():
     ]
 
     try:
-        config = ProfileManager.load_profile("profiles/siemens_track_plans.yaml")
+        config = ProfileManager.load_profile("profiles/wien_track_plans.yaml")
 
         found_classes = [cls.name for cls in config.classes]
 

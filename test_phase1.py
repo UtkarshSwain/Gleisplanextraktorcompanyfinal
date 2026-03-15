@@ -18,7 +18,7 @@ def test_profile_loading():
     from core.profile_manager import ProfileManager
 
     profiles = [
-        "profiles/siemens_track_plans.yaml",
+        "profiles/wien_track_plans.yaml",
         # Future layout types will be added here
     ]
 
@@ -60,7 +60,7 @@ def test_config_values():
     from core.profile_manager import ProfileManager
 
     try:
-        config = ProfileManager.load_profile("profiles/siemens_track_plans.yaml")
+        config = ProfileManager.load_profile("profiles/wien_track_plans.yaml")
 
         # Test detection params
         assert config.detection.tile_size == 2048, f"tile_size: {config.detection.tile_size}"

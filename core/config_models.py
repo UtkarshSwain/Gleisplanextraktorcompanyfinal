@@ -280,6 +280,12 @@ class SpatialConfig:
     spatial_threshold_section_gap_min: int = 1000
     spatial_threshold_section_gap_max: int = 2500
 
+    # Antwerp-specific: Durchrutschweg calculation parameters
+    durchrutschweg_bond_classes: List[str] = field(default_factory=lambda: ["s_bond", "short_bond", "insulation_joint"])
+    durchrutschweg_y_tolerance: int = 30  # pixels tolerance for "same Y" (bonds on same row)
+    durchrutschweg_first_bond_dy_max: int = 300  # max vertical distance from signal to first bond
+    durchrutschweg_first_bond_dx_max: int = 150  # max horizontal distance (first bond must be aligned with signal)
+
 
 @dataclass
 class LinkingRule:
@@ -368,6 +374,49 @@ class ComponentConfig:
 
 
 @dataclass
+class UIColumnConfig:
+    """Configuration for a single UI table column"""
+    name: str                # Display header name
+    field: str               # DataFrame field name to display
+    editor_type: str = "text"  # "text", "combo", "spin"
+    combo_values: List[str] = field(default_factory=list)  # For combo editors
+    spin_min: int = 1        # For spin editors
+    spin_max: int = 9999     # For spin editors
+    show_for_classes: List[str] = field(default_factory=list)  # Empty = all classes
+
+
+@dataclass
+class UIConfig:
+    """UI configuration from profile - defines table columns and editors"""
+    table_columns: List[UIColumnConfig] = field(default_factory=list)
+
+    def get_column_headers(self) -> List[str]:
+        """Get list of column header names"""
+        return [col.name for col in self.table_columns]
+
+    def get_column_fields(self) -> List[str]:
+        """Get list of DataFrame field names"""
+        return [col.field for col in self.table_columns]
+
+    def get_column_count(self) -> int:
+        """Get number of columns"""
+        return len(self.table_columns)
+
+
+# Default UI configuration (Wien-style, backwards compatible)
+DEFAULT_UI_CONFIG = UIConfig(
+    table_columns=[
+        UIColumnConfig(name="Text/Nummer", field="anchor_text"),
+        UIColumnConfig(name="Koordinatentext", field="coord_text"),
+        UIColumnConfig(name="Fahrtrichtung", field="fahrtrichtung",
+                       editor_type="combo", combo_values=["", "A", "B"],
+                       show_for_classes=["signal"]),
+        UIColumnConfig(name="Seite", field="page", editor_type="spin"),
+    ]
+)
+
+
+@dataclass
 class LayoutConfig:
     """
     Complete configuration for a railway layout type.
@@ -395,6 +444,9 @@ class LayoutConfig:
     spatial: SpatialConfig = field(default_factory=SpatialConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     components: ComponentConfig = field(default_factory=ComponentConfig)
+
+    # UI configuration (modular columns per profile)
+    ui: UIConfig = field(default_factory=lambda: DEFAULT_UI_CONFIG)
 
     # Model path (can be layout-specific)
     model_path: Optional[str] = None
@@ -506,3 +558,21 @@ class LayoutConfig:
         """Check if debug is enabled for a category"""
         flag_name = f"debug_{category.lower()}"
         return getattr(self, flag_name, False)
+
+    def get_ui_config(self) -> UIConfig:
+        """Get UI configuration, falling back to default if not defined"""
+        if self.ui and self.ui.table_columns:
+            return self.ui
+        return DEFAULT_UI_CONFIG
+
+    def get_table_column_headers(self) -> List[str]:
+        """Get table column headers from UI config"""
+        return self.get_ui_config().get_column_headers()
+
+    def get_table_column_fields(self) -> List[str]:
+        """Get table column DataFrame fields from UI config"""
+        return self.get_ui_config().get_column_fields()
+
+    def is_antwerp_profile(self) -> bool:
+        """Check if this is an Antwerp profile (for Antwerp-specific calculations)"""
+        return "antwerp" in self.profile_name.lower()

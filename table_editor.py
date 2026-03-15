@@ -5,33 +5,52 @@ import pandas as pd
 import re
 import csv
 from datetime import datetime
+from core.config_models import DEFAULT_UI_CONFIG
 
 class TableEditorDelegate(QtWidgets.QStyledItemDelegate):
-    """Custom delegate for enhanced cell editing"""
-    
+    """Custom delegate for enhanced cell editing - profile-aware"""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-    
-    def createEditor(self, parent: QtWidgets.QWidget, option: QtWidgets.QStyleOptionViewItem, 
+
+    def _get_ui_config(self):
+        """Get UI config from workspace via tree widget."""
+        tree = self.parent()
+        if tree and hasattr(tree, '_get_ui_config'):
+            return tree._get_ui_config()
+        return DEFAULT_UI_CONFIG
+
+    def createEditor(self, parent: QtWidgets.QWidget, option: QtWidgets.QStyleOptionViewItem,
                     index: QtCore.QModelIndex) -> QtWidgets.QWidget:
-        """Create editor widget based on column type"""
-        
+        """Create editor widget based on column type from profile config"""
+
         tree = self.parent()
         if not isinstance(tree, QtWidgets.QTreeWidget):
             return super().createEditor(parent, option, index)
-        
+
         column = index.column()
-        
-        if column == 2:  # Fahrtrichtung
-            editor = QtWidgets.QComboBox(parent)
-            editor.addItems(['', 'A', 'B'])
-            return editor
-        elif column == 3:  # Seite
-            editor = QtWidgets.QSpinBox(parent)
-            editor.setMinimum(1)
-            editor.setMaximum(9999)
-            return editor
+
+        # Get column config from profile
+        ui_config = self._get_ui_config()
+        if column < len(ui_config.table_columns):
+            col_config = ui_config.table_columns[column]
+            editor_type = col_config.editor_type
+
+            if editor_type == "combo":
+                editor = QtWidgets.QComboBox(parent)
+                editor.addItems(col_config.combo_values or ['', 'A', 'B'])
+                return editor
+            elif editor_type == "spin":
+                editor = QtWidgets.QSpinBox(parent)
+                editor.setMinimum(col_config.spin_min)
+                editor.setMaximum(col_config.spin_max)
+                return editor
+            else:  # "text" or default
+                editor = QtWidgets.QLineEdit(parent)
+                editor.setFrame(False)
+                return editor
         else:
+            # Fallback for unknown columns
             editor = QtWidgets.QLineEdit(parent)
             editor.setFrame(False)
             return editor
@@ -78,58 +97,59 @@ class TableEditorDelegate(QtWidgets.QStyledItemDelegate):
 
 
 class AddRowDialog(QtWidgets.QDialog):
-    """Dialog for adding new rows"""
-    
-    def __init__(self, categories: List[str], column_count: int, parent=None):
+    """Dialog for adding new rows - profile-aware"""
+
+    def __init__(self, categories: List[str], column_count: int, parent=None,
+                 column_names: List[str] = None):
         super().__init__(parent)
         self.setWindowTitle("Zeile hinzufügen")
         self.resize(500, 400)
-        
+
         self.categories = categories
         self.column_count = column_count
-        
+        # Use provided column names or fall back to default
+        self.column_names = column_names or ["Text/Nummer", "Koordinatentext", "Fahrtrichtung", "Seite"]
+
         self._build_ui()
-    
+
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
-        
+
         # Category selection
         cat_layout = QtWidgets.QFormLayout()
-        
+
         self.category_combo = QtWidgets.QComboBox()
         self.category_combo.addItems(self.categories)
         cat_layout.addRow("Kategorie:", self.category_combo)
-        
+
         layout.addLayout(cat_layout)
-        
+
         # Position
         pos_group = QtWidgets.QGroupBox("Position")
         pos_layout = QtWidgets.QVBoxLayout(pos_group)
-        
+
         self.pos_end = QtWidgets.QRadioButton("Am Ende hinzufügen")
         self.pos_end.setChecked(True)
         pos_layout.addWidget(self.pos_end)
-        
+
         self.pos_before = QtWidgets.QRadioButton("Vor ausgewählter Zeile einfügen")
         pos_layout.addWidget(self.pos_before)
-        
+
         self.pos_after = QtWidgets.QRadioButton("Nach ausgewählter Zeile einfügen")
         pos_layout.addWidget(self.pos_after)
-        
+
         layout.addWidget(pos_group)
-        
-        # Data input
+
+        # Data input - use profile-based column names
         data_group = QtWidgets.QGroupBox("Daten")
         data_layout = QtWidgets.QFormLayout(data_group)
-        
+
         self.data_inputs = []
-        column_names = ["Text/Nummer", "Koordinatentext", "Fahrtrichtung", "Seite"]
-        
-        for i in range(min(self.column_count, len(column_names))):
+        for i in range(min(self.column_count, len(self.column_names))):
             line_edit = QtWidgets.QLineEdit()
-            data_layout.addRow(f"{column_names[i]}:", line_edit)
+            data_layout.addRow(f"{self.column_names[i]}:", line_edit)
             self.data_inputs.append(line_edit)
-        
+
         layout.addWidget(data_group)
         
         # Buttons

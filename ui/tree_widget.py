@@ -1,5 +1,6 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
 from core.pipelineworker import NO_OCR_CLASSES
+from core.config_models import DEFAULT_UI_CONFIG
 from typing import List, Dict, Tuple, Optional, Any, TYPE_CHECKING
 import re
 
@@ -33,10 +34,12 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
         
         # Set custom delegate for better editing
         self.setItemDelegate(TableEditorDelegate(self))
-        
-        # Track column visibility and headers
-        self._column_visibility = [True, True, True, True]  # 4 columns
-        self._original_headers = ["Text/Nummer", "Koordinatentext", "Fahrtrichtung", "Seite"]
+
+        # Track column visibility and headers - get from workspace UI config
+        ui_config = self._get_ui_config()
+        num_cols = ui_config.get_column_count()
+        self._column_visibility = [True] * num_cols
+        self._original_headers = ui_config.get_column_headers()
         self._display_headers = self._original_headers.copy()
         self.setSortingEnabled(False)  # We'll handle sorting manually
         
@@ -60,6 +63,15 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
                 print(f"[TREE STATUS] {message}")
         except Exception as e:
             print(f"[TREE STATUS ERROR] {message} ({e})")
+
+    def _get_ui_config(self):
+        """Get UI configuration from workspace's profile config."""
+        try:
+            if self.workspace_ref and hasattr(self.workspace_ref, '_get_ui_config'):
+                return self.workspace_ref._get_ui_config()
+        except Exception as e:
+            print(f"[TREE] Failed to get UI config: {e}")
+        return DEFAULT_UI_CONFIG
     
     def _show_menu(self, pos: QtCore.QPoint):
         """Show context menu"""
@@ -191,7 +203,7 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
         categories = []
         for i in range(self.topLevelItemCount()):
             categories.append(self.topLevelItem(i).text(0))
-        
+
         if not categories:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -199,8 +211,11 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
                 "Keine Kategorien vorhanden."
             )
             return
-        
-        dialog = AddRowDialog(categories, self.columnCount(), self)
+
+        # Get column names from profile config
+        ui_config = self._get_ui_config()
+        column_names = ui_config.get_column_headers()
+        dialog = AddRowDialog(categories, self.columnCount(), self, column_names=column_names)
         
         if dialog.exec_() == QtWidgets.QDialog.Accepted:
             category, position, data = dialog.get_data()

@@ -65,7 +65,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         self.resize(w, h)
         center_window(self)
         self.pdf_path = None; self.model_path = "Gleisplanextraktoryolomodel/wienschwarz.pt"; self.ocr_engine = "paddleocr"
-        self.profile_path = "profiles/siemens_track_plans.yaml"  # Default profile
+        self.profile_path = "profiles/wien_track_plans.yaml"  # Default profile
         self.layout_config = None  # Will be loaded when analysis starts
         self.view = InteractiveGraphicsView(self)
         self.view.setStyleSheet("""
@@ -820,8 +820,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         """Handle profile/layout type selection change - also sets the YOLO model automatically."""
         # Each layout type has its own profile and corresponding YOLO model
         profile_map = {
-            0: ("profiles/siemens_track_plans.yaml", "Wien Schwarz", "Gleisplanextraktoryolomodel/wienschwarz.pt"),
-            1: ("profiles/siemens_track_plans.yaml", "Wien Farbig", "Gleisplanextraktoryolomodel/wienfarbig.pt"),
+            0: ("profiles/wien_track_plans.yaml", "Wien Schwarz", "Gleisplanextraktoryolomodel/wienschwarz.pt"),
+            1: ("profiles/wien_track_plans.yaml", "Wien Farbig", "Gleisplanextraktoryolomodel/wienfarbig.pt"),
             2: ("profiles/antwerp_track_plans.yaml", "Antwerp", "Gleisplanextraktoryolomodel/antwerp.pt"),
         }
         self.profile_path, description, self.model_path = profile_map.get(index, profile_map[0])

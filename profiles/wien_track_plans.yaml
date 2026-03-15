@@ -434,3 +434,29 @@ component_config:
   storage_args:
     local_file:
       output_dir: "output/"
+
+# =============================================================================
+# UI CONFIGURATION (Modular Table Columns)
+# =============================================================================
+# Defines the table columns shown in the auditing UI.
+# Wien profile: Standard 4 columns without Durchrutschweg
+# =============================================================================
+
+ui:
+  table_columns:
+    - name: "Text/Nummer"
+      field: "anchor_text"
+      editor_type: "text"
+    - name: "Koordinatentext"
+      field: "coord_text"
+      editor_type: "text"
+    - name: "Fahrtrichtung"
+      field: "fahrtrichtung"
+      editor_type: "combo"
+      combo_values: ["", "A", "B"]
+      show_for_classes: ["signal"]
+    - name: "Seite"
+      field: "page"
+      editor_type: "spin"
+      spin_min: 1
+      spin_max: 9999

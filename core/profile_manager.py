@@ -14,7 +14,7 @@ import os
 from core.config_models import (
     LayoutConfig, ClassDefinition, LinkingRule, NameSearchRule,
     DetectionConfig, OCRConfig, SpatialConfig, ValidationConfig,
-    ComponentConfig
+    ComponentConfig, UIConfig, UIColumnConfig, DEFAULT_UI_CONFIG
 )
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ class ProfileManager:
     Manages loading and validation of layout configuration profiles.
 
     Usage:
-        config = ProfileManager.load_profile("profiles/siemens_track_plans.yaml")
+        config = ProfileManager.load_profile("profiles/wien_track_plans.yaml")
         # config is now a LayoutConfig object with all parameters
     """
 
@@ -95,6 +95,9 @@ class ProfileManager:
         components = ProfileManager._parse_components(data.get('components', {}),
                                                        data.get('component_config', {}))
 
+        # Parse UI configuration (modular columns per profile)
+        ui = ProfileManager._parse_ui(data.get('ui', {}))
+
         # Parse optional fields
         model_path = data.get('model_path')
         aliases = data.get('aliases', {})
@@ -128,6 +131,7 @@ class ProfileManager:
             spatial=spatial,
             validation=validation,
             components=components,
+            ui=ui,
             model_path=model_path,
             debug_signals=debug_signals,
             debug_angle_routing=debug_angle_routing,
@@ -371,7 +375,12 @@ class ProfileManager:
             coord_phase1_classes=spatial_data.get('coord_phase1_classes', ["s_bond", "short_bond", "terminal_bond", "insulation_joint", "spie_loop"]),
             signal_coord_dx_steps=spatial_data.get('signal_coord_dx_steps', [50, 100, 150, 200, 250]),
             coupling_coil_dx_steps=spatial_data.get('coupling_coil_dx_steps', [5, 10, 15, 20, 25, 30, 40, 50, 60, 70]),
-            coupling_coil_dy_steps=spatial_data.get('coupling_coil_dy_steps', [1.0, 1.5, 2.0])
+            coupling_coil_dy_steps=spatial_data.get('coupling_coil_dy_steps', [1.0, 1.5, 2.0]),
+            # Antwerp-specific: Durchrutschweg calculation parameters
+            durchrutschweg_bond_classes=spatial_data.get('durchrutschweg_bond_classes', ["s_bond", "short_bond", "insulation_joint"]),
+            durchrutschweg_y_tolerance=spatial_data.get('durchrutschweg_y_tolerance', 30),
+            durchrutschweg_first_bond_dy_max=spatial_data.get('durchrutschweg_first_bond_dy_max', 300),
+            durchrutschweg_first_bond_dx_max=spatial_data.get('durchrutschweg_first_bond_dx_max', 150)
         )
 
     @staticmethod
@@ -424,6 +433,32 @@ class ProfileManager:
             else:
                 result[k] = (1.0, 1.0)  # Default
         return result
+
+    @staticmethod
+    def _parse_ui(ui_data: dict) -> UIConfig:
+        """Parse UI configuration from YAML (modular columns per profile)"""
+        if not ui_data or 'table_columns' not in ui_data:
+            # Return default UI config if no UI section defined
+            return DEFAULT_UI_CONFIG
+
+        columns = []
+        for col_data in ui_data.get('table_columns', []):
+            if isinstance(col_data, dict):
+                col = UIColumnConfig(
+                    name=col_data.get('name', ''),
+                    field=col_data.get('field', ''),
+                    editor_type=col_data.get('editor_type', 'text'),
+                    combo_values=col_data.get('combo_values', []),
+                    spin_min=col_data.get('spin_min', 1),
+                    spin_max=col_data.get('spin_max', 9999),
+                    show_for_classes=col_data.get('show_for_classes', [])
+                )
+                columns.append(col)
+
+        if not columns:
+            return DEFAULT_UI_CONFIG
+
+        return UIConfig(table_columns=columns)
 
     @staticmethod
     def list_available_profiles(profiles_dir: str = "profiles") -> List[str]:

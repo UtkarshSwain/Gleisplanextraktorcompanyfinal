@@ -377,6 +377,12 @@ spatial:
   coupling_coil_signal_dx_max: 300  # For signal fallback (actual: 236-257px)
   coupling_coil_signal_dy_max: 100  # For signal fallback (actual dy=84 for TCC01061)
 
+  # Durchrutschweg calculation parameters
+  durchrutschweg_bond_classes: ["s_bond", "short_bond", "insulation_joint"]
+  durchrutschweg_y_tolerance: 30        # pixels tolerance for "same Y" (bonds on same row)
+  durchrutschweg_first_bond_dy_max: 300  # max vertical distance from signal to first bond
+  durchrutschweg_first_bond_dx_max: 150  # starting horizontal tolerance (expands in 50px steps up to 700)
+
   # Search window dimensions
   inside_padding_ratio: 0.10
   right_window_width_ratio: 2.5
@@ -490,3 +496,33 @@ component_config:
   storage_args:
     local_file:
       output_dir: "output/"
+
+# =============================================================================
+# UI CONFIGURATION (Modular Table Columns)
+# =============================================================================
+# Defines the table columns shown in the auditing UI.
+# Each profile can have different columns based on its data model.
+# =============================================================================
+
+ui:
+  table_columns:
+    - name: "Text/Name"
+      field: "anchor_text"
+      editor_type: "text"
+    - name: "Koordinate"
+      field: "coord_text"
+      editor_type: "text"
+    - name: "Fahrtrichtung"
+      field: "fahrtrichtung"
+      editor_type: "combo"
+      combo_values: ["", "A", "B"]
+      show_for_classes: ["Signal"]
+    - name: "Durchrutschweg"
+      field: "durchrutschweg"
+      editor_type: "text"
+      show_for_classes: ["Signal"]
+    - name: "Seite"
+      field: "page"
+      editor_type: "spin"
+      spin_min: 1
+      spin_max: 9999

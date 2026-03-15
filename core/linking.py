@@ -3380,3 +3380,278 @@ def link_antwerp_coordinates(detections: List[dict], coords: List[dict], config:
         print(f"\n  [Antwerp coord linking] Total linked: {len(results)}")
 
     return results
+
+
+# ============================================================================
+# ANTWERP-SPECIFIC: Fahrtrichtung and Durchrutschweg Calculations
+# ============================================================================
+
+def detect_fahrtrichtung_antwerp(signal_row: dict, config: 'LayoutConfig' = None) -> str:
+    """
+    Determine Fahrtrichtung for Antwerp signals based on text_id position.
+
+    Antwerp logic:
+    - text_id BELOW signal → Fahrtrichtung = "A"
+    - text_id ABOVE signal → Fahrtrichtung = "B"
+
+    Args:
+        signal_row: Signal detection dict with 'ocr_region_source' field
+        config: LayoutConfig (optional, for future extensibility)
+
+    Returns:
+        "A", "B", or "" if position cannot be determined
+    """
+    # Get text position from OCR region source (set during text_id linking)
+    ocr_position = signal_row.get("ocr_region_source", "")
+
+    if ocr_position == "below":
+        return "A"
+    elif ocr_position == "above":
+        return "B"
+    else:
+        # Position unknown - cannot determine Fahrtrichtung
+        return ""
+
+
+def calculate_durchrutschweg(signal_row: dict, all_rows: List[dict],
+                              config: 'LayoutConfig' = None) -> Optional[str]:
+    """
+    Calculate Durchrutschweg (overrun distance) for Antwerp signals.
+
+    Algorithm (position-based with progressive dx tolerance):
+    1. Get Fahrtrichtung to determine first bond direction (ABOVE for A, BELOW for B)
+    2. Find first bond using progressive dx tolerance (50px increments up to 700px)
+       - Must be vertically close (dy < dy_max) in correct direction
+       - Try increasing dx until a bond is found
+    3. Find second bond horizontally from first bond (same Y row)
+       - If Fahrtrichtung A: search to the RIGHT
+       - If Fahrtrichtung B: search to the LEFT
+    4. Durchrutschweg = |coord_bond1 - coord_bond2|
+
+    Args:
+        signal_row: Signal detection dict
+        all_rows: List of all detections (to find bonds)
+        config: LayoutConfig with durchrutschweg parameters
+
+    Returns:
+        Durchrutschweg value as string, or None if cannot be calculated
+    """
+    # Check debug mode
+    debug = config.debug_linking if config else False
+    sig_name = signal_row.get("anchor_text", signal_row.get("row_id", "?"))
+
+    # Get Fahrtrichtung to determine search direction for second bond
+    fahrtrichtung = signal_row.get("fahrtrichtung", "")
+    if not fahrtrichtung:
+        fahrtrichtung = detect_fahrtrichtung_antwerp(signal_row, config)
+
+    if not fahrtrichtung:
+        if debug:
+            print(f"  [DURCHRUTSCHWEG] Signal {sig_name}: No Fahrtrichtung, skipping")
+        return None  # Cannot determine direction
+
+    # Get signal's coordinate - needed for debug output (first bond is found by position)
+    signal_coord = signal_row.get("coord_text", "")
+    if not signal_coord:
+        if debug:
+            print(f"  [DURCHRUTSCHWEG] Signal {sig_name}: No coord_text, skipping")
+        return None  # Signal has no coordinate
+
+    # Get parameters from config
+    if config:
+        sp = config.spatial
+        bond_classes = sp.durchrutschweg_bond_classes
+        y_tolerance = sp.durchrutschweg_y_tolerance
+        first_bond_dy_max = sp.durchrutschweg_first_bond_dy_max
+        first_bond_dx_max = sp.durchrutschweg_first_bond_dx_max
+    else:
+        bond_classes = ["s_bond", "short_bond", "insulation_joint"]
+        y_tolerance = 30
+        first_bond_dy_max = 300
+        first_bond_dx_max = 150
+
+    # Get signal position
+    sig_cx = signal_row.get("obb_cx") or signal_row.get("cx", 0)
+    sig_cy = signal_row.get("obb_cy") or signal_row.get("cy", 0)
+
+    # Filter bonds from all_rows
+    bonds = [r for r in all_rows if r.get("cls", "").lower() in [c.lower() for c in bond_classes]]
+
+    if debug:
+        print(f"  [DURCHRUTSCHWEG] Signal {sig_name} @ ({sig_cx}, {sig_cy}), coord='{signal_coord}', Fahr={fahrtrichtung}")
+        print(f"    Found {len(bonds)} bonds ({bond_classes})")
+
+    if not bonds:
+        if debug:
+            print(f"    -> No bonds found, cannot calculate")
+        return None  # No bonds found
+
+    # STEP 1: Find first bond using PROGRESSIVE dx tolerance
+    # Try increasing dx values until we find a bond in the correct direction
+    # Start with config value, then expand in 50px steps up to 700
+    dx_steps = [first_bond_dx_max]
+    for step in range(first_bond_dx_max + 50, 750, 50):  # 50px increments
+        dx_steps.append(step)
+    first_bond = None
+    used_dx = None
+
+    for dx_max_step in dx_steps:
+        best_dist = float('inf')
+        candidate = None
+
+        for bond in bonds:
+            bond_cx = bond.get("obb_cx") or bond.get("cx", 0)
+            bond_cy = bond.get("obb_cy") or bond.get("cy", 0)
+
+            dx = abs(bond_cx - sig_cx)
+            dy = abs(bond_cy - sig_cy)
+
+            # Check tolerances
+            if dx > dx_max_step:
+                continue
+            if dy > first_bond_dy_max:
+                continue
+
+            # Check vertical direction based on Fahrtrichtung
+            if fahrtrichtung == "A":
+                # Bond should be ABOVE signal (smaller Y)
+                if bond_cy >= sig_cy:
+                    continue
+            else:  # "B"
+                # Bond should be BELOW signal (larger Y)
+                if bond_cy <= sig_cy:
+                    continue
+
+            dist = dx + dy
+            if dist < best_dist:
+                best_dist = dist
+                candidate = bond
+
+        if candidate:
+            first_bond = candidate
+            used_dx = dx_max_step
+            break  # Found a bond, stop expanding dx
+
+    if first_bond and debug:
+        bond_coord = first_bond.get("coord_text", "")
+        print(f"    First bond (dx_step={used_dx}): {first_bond.get('cls', '?')} @ ({first_bond.get('obb_cx', '?')}, {first_bond.get('obb_cy', '?')}), coord='{bond_coord}'")
+
+    if not first_bond:
+        if debug:
+            print(f"    -> No first bond found (tried dx steps: {dx_steps}, dy_max={first_bond_dy_max})")
+        return None  # No matching bond found
+
+    # Get first bond position and coordinate
+    first_bond_cx = first_bond.get("obb_cx") or first_bond.get("cx", 0)
+    first_bond_cy = first_bond.get("obb_cy") or first_bond.get("cy", 0)
+    first_bond_coord = first_bond.get("coord_text", "")
+    first_bond_cls = first_bond.get("cls", "")
+
+    # Parse coordinate value
+    first_coord_val = _parse_coord_value(first_bond_coord, config)
+    if first_coord_val is None:
+        if debug:
+            print(f"    -> Cannot parse first bond coord '{first_bond_coord}'")
+        return None
+
+    # Find second bond horizontally (same Y with tolerance)
+    second_bond = None
+    second_bond_dist = float('inf')
+
+    for bond in bonds:
+        if bond is first_bond:
+            continue
+
+        bond_cx = bond.get("obb_cx") or bond.get("cx", 0)
+        bond_cy = bond.get("obb_cy") or bond.get("cy", 0)
+
+        # Check Y tolerance (same horizontal row)
+        if abs(bond_cy - first_bond_cy) > y_tolerance:
+            continue
+
+        # Check horizontal direction
+        if fahrtrichtung == "A":
+            # Search to the RIGHT (bond_cx > first_bond_cx)
+            if bond_cx <= first_bond_cx:
+                continue
+            dx = bond_cx - first_bond_cx
+        else:  # "B"
+            # Search to the LEFT (bond_cx < first_bond_cx)
+            if bond_cx >= first_bond_cx:
+                continue
+            dx = first_bond_cx - bond_cx
+
+        if dx < second_bond_dist:
+            second_bond = bond
+            second_bond_dist = dx
+
+    if not second_bond:
+        if debug:
+            direction = "RIGHT" if fahrtrichtung == "A" else "LEFT"
+            print(f"    -> No second bond found to the {direction} (y_tol={y_tolerance})")
+        return None  # No second bond found
+
+    # Get second bond coordinate
+    second_bond_cx = second_bond.get("obb_cx") or second_bond.get("cx", 0)
+    second_bond_cy = second_bond.get("obb_cy") or second_bond.get("cy", 0)
+    second_bond_coord = second_bond.get("coord_text", "")
+    second_bond_cls = second_bond.get("cls", "")
+
+    if debug:
+        print(f"    Second bond: {second_bond_cls} @ ({second_bond_cx:.0f}, {second_bond_cy:.0f}), coord='{second_bond_coord}'")
+
+    second_coord_val = _parse_coord_value(second_bond_coord, config)
+    if second_coord_val is None:
+        if debug:
+            print(f"    -> Cannot parse second bond coord '{second_bond_coord}'")
+        return None
+
+    # Calculate Durchrutschweg = absolute difference
+    durchrutschweg = abs(first_coord_val - second_coord_val)
+
+    if debug:
+        print(f"    -> Durchrutschweg = |{first_coord_val} - {second_coord_val}| = {durchrutschweg:.3f}")
+
+    # Format as string with same decimal places as coordinates (typically 3)
+    return f"{durchrutschweg:.3f}"
+
+
+def _parse_coord_value(coord_text: str, config: 'LayoutConfig' = None) -> Optional[float]:
+    """
+    Parse coordinate text to extract numeric value.
+
+    Supports two formats:
+    1. Wien format: "12,345" or "12.345" (direct decimal)
+    2. Antwerp format: "0+033.5" or "1+444.5" (km+meters.decimal)
+
+    Args:
+        coord_text: Coordinate string
+        config: LayoutConfig for profile detection
+
+    Returns:
+        Numeric value as float (in meters for Antwerp), or None if parsing fails
+    """
+    if not coord_text:
+        return None
+
+    try:
+        # Check for Antwerp format: km+meters.decimal (e.g., "0+033.5", "1+444.5")
+        antwerp_match = re.search(r'(\d+)[+\-](\d+(?:\.\d+)?)', coord_text)
+        if antwerp_match:
+            km = int(antwerp_match.group(1))
+            meters = float(antwerp_match.group(2))
+            # Convert to total meters: km * 1000 + meters
+            return km * 1000 + meters
+
+        # Wien format: digits with comma or dot separator (e.g., "12,345")
+        wien_match = re.search(r'([+-]?\d+[,\.]\d+)', coord_text)
+        if wien_match:
+            num_str = wien_match.group(1)
+            # Replace comma with dot for float conversion
+            num_str = num_str.replace(",", ".")
+            return float(num_str)
+
+    except Exception:
+        pass
+
+    return None
