@@ -26,7 +26,7 @@ import os
 __version__ = "1.0.0"
 __author__ = "Utkarsh Swain"
 __email__ = ""  # Add your email if desired
-__created__ = "2024"
+__created__ = "2025"
 __updated__ = "2026"
 __company__ = "Siemens Mobility GmbH"
 __app_name__ = "RailDoc Studio - Gleisplan-Modul"
