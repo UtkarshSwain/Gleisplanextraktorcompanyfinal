@@ -218,7 +218,9 @@ def configure_from_config(config: 'LayoutConfig') -> None:
         if val.class_id_patterns:
             CLASS_ID_PATTERNS.update(val.class_id_patterns)
         if val.numeric_ok_classes:
-            NUMERIC_OK = set(val.numeric_ok_classes)
+            # Update in-place to ensure imports in other modules see the change
+            NUMERIC_OK.clear()
+            NUMERIC_OK.update(val.numeric_ok_classes)
         # Decimal separator configuration
         if hasattr(val, 'decimal_separator_input'):
             DECIMAL_SEP_INPUT = val.decimal_separator_input
@@ -2495,10 +2497,21 @@ def ocr_text(pil_img: Image.Image, engine: str) -> str:
         if not result:
             return ""
         return sorted(result, key=lambda s: len(s), reverse=True)[0].strip()
-    else:
+    elif engine == "paddleocr":
+        # Use PaddleOCR when paddleocr engine is specified
+        paddle = get_paddleocr_instance()
+        if paddle is not None:
+            arr = np.array(pil_img.convert("L"))
+            txt, _ = paddleocr_recognize(arr)
+            return txt.strip() if txt else ""
+        # Fall through to Tesseract if PaddleOCR not available
+    # Tesseract fallback
+    try:
         import pytesseract
         cfg = "--psm 7 -l deu+eng"
         return pytesseract.image_to_string(pil_img, config=cfg).strip()
+    except Exception:
+        return ""
 
 def ocr_name_candidates(pil_img: Image.Image, engine: str) -> List[Tuple[str, float]]:
     win0 = _upscale_if_tiny(pil_img)
@@ -2520,15 +2533,30 @@ def ocr_name_candidates(pil_img: Image.Image, engine: str) -> List[Tuple[str, fl
                     conf = float(item[2]) if len(item) >= 3 and isinstance(item[2], (int, float)) else 0.5
                     if txt:
                         cands.append((txt, conf))
+    elif engine == "paddleocr":
+        # Use PaddleOCR when paddleocr engine is specified
+        paddle = get_paddleocr_instance()
+        if paddle is not None:
+            for v in variants:
+                arr = np.array(v)
+                txt, conf = paddleocr_recognize(arr)
+                if txt:
+                    for tok in (t.strip() for t in txt.split() if t.strip()):
+                        cands.append((tok, conf))
     else:
-        import pytesseract
-        cfg = "--psm 6 -l eng+deu -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789./-_"
-        for v in variants:
-            txt = pytesseract.image_to_string(v, config=cfg)
-            for tok in (t.strip() for t in txt.split() if t.strip()):
-                cands.append((tok, 0.50))
+        # Tesseract fallback
+        try:
+            import pytesseract
+            cfg = "--psm 6 -l eng+deu -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789./-_"
+            for v in variants:
+                txt = pytesseract.image_to_string(v, config=cfg)
+                for tok in (t.strip() for t in txt.split() if t.strip()):
+                    cands.append((tok, 0.50))
+        except Exception:
+            pass
 
     if not cands:
+        # Fallback to Tesseract if no candidates found
         try:
             import pytesseract
             cfg = "--psm 6 -l eng+deu -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789./-_"
@@ -2593,7 +2621,13 @@ def ocr_best_angle(pil_img: Image.Image, engine: str, angles=(-20, -15, -10, -5,
     return best
 
 def ocr_generic_name(anchor: dict, bgr_color: np.ndarray, engine: str, allow_numeric: bool,
-                    cls_name: Optional[str], debug_class: str = "") -> Optional[str]:
+                    cls_name: Optional[str], debug_class: str = "", pad: int = 8) -> Optional[str]:
+    """
+    Generic OCR for text extraction.
+
+    Args:
+        pad: Padding around crop box. Default 8 for 500 DPI (Wien), use 16+ for 800 DPI (Antwerp)
+    """
     # Use cls_name as fallback for debug_class
     if not debug_class:
         debug_class = cls_name or "generic"
@@ -2605,15 +2639,15 @@ def ocr_generic_name(anchor: dict, bgr_color: np.ndarray, engine: str, allow_num
     if _is_cardinal(ang_normalized):  # Check normalized angle
         # Cardinal path - simple rotation
         try:
-            pil_crop = rotated_crop_from_det(anchor, bgr_color, pad=8)
+            pil_crop = rotated_crop_from_det(anchor, bgr_color, pad=pad)
         except Exception:
-            pil_crop = crop_pil(bgr_color, anchor["x1"], anchor["y1"], anchor["x2"], anchor["y2"], pad=8)
+            pil_crop = crop_pil(bgr_color, anchor["x1"], anchor["y1"], anchor["x2"], anchor["y2"], pad=pad)
     else:
         # Angular path - perspective warp
         try:
-            pil_crop = perspective_crop_from_det(anchor, bgr_color, pad=8)
+            pil_crop = perspective_crop_from_det(anchor, bgr_color, pad=pad)
         except Exception:
-            pil_crop = rotated_crop_from_det(anchor, bgr_color, pad=8)
+            pil_crop = rotated_crop_from_det(anchor, bgr_color, pad=pad)
 
     pil_crop = _upscale_if_tiny(pil_crop, min_side=80, scale=3)
 
@@ -2649,7 +2683,7 @@ def ocr_generic_name(anchor: dict, bgr_color: np.ndarray, engine: str, allow_num
         all_items = []
         for v in variants_np:
             items = easyocr_readtext(
-                v, detail=1, paragraph=False, 
+                v, detail=1, paragraph=False,
                 rotation_info=rotations,  # ← Use smart ordering
                 allowlist=allowlist
             ) or []
@@ -2664,20 +2698,39 @@ def ocr_generic_name(anchor: dict, bgr_color: np.ndarray, engine: str, allow_num
             if sc > best_score:
                 best_name, best_score = tok, sc
 
+    elif engine == "paddleocr":
+        # Use PaddleOCR when paddleocr engine is specified
+        paddle = get_paddleocr_instance()
+        if paddle is not None:
+            wl = 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789./-_' if allow_numeric else 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ./-_'
+            for v in variants_np:
+                for rot_deg in rotations:
+                    test_img = Image.fromarray(v).rotate(rot_deg, expand=True, fillcolor=255) if rot_deg != 0 else Image.fromarray(v)
+                    txt, conf = paddleocr_recognize(test_img, whitelist=wl)
+                    if txt:
+                        for tok in (t.strip() for t in txt.split() if t.strip()):
+                            sc = score_name_token(tok, conf=conf, allow_numeric=allow_numeric, cls_name=cls_name)
+                            if sc > best_score:
+                                best_name, best_score = tok, sc
+
     else:
-        import pytesseract
-        wl = 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789./-_' if allow_numeric else 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ./-_'
-        cfg = f"--psm 6 -l eng+deu -c tessedit_char_whitelist={wl}"
-        
-        #  FIX: Test rotations in smart order for Tesseract too
-        for v in variants_np:
-            for rot_deg in rotations:  # Use smart-ordered rotations
-                test_img = Image.fromarray(v).rotate(rot_deg, expand=True, fillcolor=255) if rot_deg != 0 else Image.fromarray(v)
-                txt = pytesseract.image_to_string(test_img, config=cfg)
-                for tok in (t.strip() for t in txt.split() if t.strip()):
-                    sc = score_name_token(tok, conf=0.5, allow_numeric=allow_numeric, cls_name=cls_name)
-                    if sc > best_score:
-                        best_name, best_score = tok, sc
+        # Tesseract fallback
+        try:
+            import pytesseract
+            wl = 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789./-_' if allow_numeric else 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ./-_'
+            cfg = f"--psm 6 -l eng+deu -c tessedit_char_whitelist={wl}"
+
+            #  FIX: Test rotations in smart order for Tesseract too
+            for v in variants_np:
+                for rot_deg in rotations:  # Use smart-ordered rotations
+                    test_img = Image.fromarray(v).rotate(rot_deg, expand=True, fillcolor=255) if rot_deg != 0 else Image.fromarray(v)
+                    txt = pytesseract.image_to_string(test_img, config=cfg)
+                    for tok in (t.strip() for t in txt.split() if t.strip()):
+                        sc = score_name_token(tok, conf=0.5, allow_numeric=allow_numeric, cls_name=cls_name)
+                        if sc > best_score:
+                            best_name, best_score = tok, sc
+        except Exception:
+            pass
 
     # Debug: Save final result
     if debug_class and best_name:

@@ -291,8 +291,18 @@ ocr:
   max_workers: 6  # Parallel OCR threads
   tesseract_path: null
 
+  # Signal-specific parameters (scaled for 800 DPI - 1.6x Wien's values)
+  sig_one_window: true
+  sig_pad: 22  # 14 * 1.6 for 800 DPI
+  sig_expand_x: 0.20  # Slightly more expansion for larger images
+  sig_expand_y: 0.25
+  sig_use_tighten: false
+  sig_score_min: 1.3
+  sig_line_thick: 8  # Scaled for 800 DPI (5 * 1.6)
+  signal_text_height_hint: null
+
   # Left bias expansion (if text is left-aligned)
-  left_bias_expansion_classes: ["text_id"]
+  left_bias_expansion_classes: ["text_id", "signal"]
   left_bias_ratio_h: 0.8
 
   # Angle detection threshold
@@ -313,9 +323,10 @@ ocr:
   # Tune based on 800 DPI scan characteristics
   # Higher padding for coordinates to capture full "0+033.5" format (especially the "0+" prefix)
   simple_ocr_padding:
-    coordinate: 8  # More padding to capture full coordinate including "0+" prefix
-    text_id: 4     # Slightly more for text labels
-    default: 4     # Fallback for other classes
+    coordinate: 12  # More padding to capture full coordinate including "0+" prefix
+    text_id: 8      # Increased for text labels (was 4 - too small)
+    signal: 12      # For signal text (if any)
+    default: 8      # Fallback for other classes (increased from 4)
 
   # Per-class OCR confidence thresholds (tune based on testing)
   confidence_thresholds:
@@ -324,21 +335,26 @@ ocr:
     default: 0.45
 
   # Cardinal (horizontal/vertical) text parameters
+  # Scaled for 800 DPI (1.6x Wien's 500 DPI values)
   cardinal_detection_padding:
-    coordinate: 2  # Minimal padding for 800 DPI
-    text_id: 2
+    coordinate: 6  # Scaled from Wien's 4
+    signal: 6      # Scaled from Wien's 4
+    text_id: 6     # Scaled for 800 DPI
 
   cardinal_expansion_factor:
-    coordinate: [1.0, 1.0]  # No expansion
-    text_id: [1.0, 1.0]  # No expansion
+    coordinate: [1.0, 1.0]
+    signal: [1.0, 1.0]
+    text_id: [1.0, 1.0]
 
   # Angular (rotated) text parameters
   angular_detection_padding:
-    coordinate: 3  # Slightly more for rotated
-    text_id: 3
+    coordinate: 6  # Scaled for rotated
+    signal: 12     # Scaled from Wien's 8
+    text_id: 6
 
   angular_expansion_factor:
     coordinate: [1.0, 1.0]
+    signal: [1.0, 1.1]  # Slight vertical expansion for signals
     text_id: [1.1, 1.1]
 
 # =============================================================================
@@ -468,9 +484,10 @@ validation:
   class_id_patterns:
     text_id: "^.+$"  # Accept any text for text_id
 
-  # Classes allowing pure numeric IDs
+  # Classes allowing numeric characters in OCR (includes text_id and coordinate)
   numeric_ok_classes:
     - "text_id"
+    - "coordinate"
     - "mech_point"
     - "elec_point"
 

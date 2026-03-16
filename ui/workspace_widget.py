@@ -3562,9 +3562,16 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 else:
                     new_text = ocr_numeric_tilted_box(det, self.current_page_bgr_array, debug_class=cls)
             else:
+                # Use larger padding for high-DPI profiles (Antwerp 800 DPI needs ~16, Wien 500 DPI uses 8)
+                layout_config = self._get_layout_config()
+                ocr_pad = 8  # Default for Wien (500 DPI)
+                if layout_config and hasattr(layout_config, 'rendering') and layout_config.rendering:
+                    dpi = getattr(layout_config.rendering, 'dpi', 500)
+                    if dpi >= 700:  # High-DPI profile (like Antwerp 800 DPI)
+                        ocr_pad = 16
                 new_text = ocr_generic_name(det, self.current_page_bgr_array, "paddleocr",
-                                           allow_numeric=(cls in NUMERIC_OK), cls_name=cls, debug_class=cls)
-            
+                                           allow_numeric=(cls in NUMERIC_OK), cls_name=cls, debug_class=cls, pad=ocr_pad)
+
             item = self.row_id_to_tree_item.get(row_id)
             if item:
                 col_to_update = 0
@@ -3825,9 +3832,16 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     new_text = ""
             else:
                 # NUMERIC_OK already imported at top from core.ocr_engine
+                # Use larger padding for high-DPI profiles (Antwerp 800 DPI needs ~16, Wien 500 DPI uses 8)
+                layout_config = self._get_layout_config()
+                ocr_pad = 8  # Default for Wien (500 DPI)
+                if layout_config and hasattr(layout_config, 'rendering') and layout_config.rendering:
+                    dpi = getattr(layout_config.rendering, 'dpi', 500)
+                    if dpi >= 700:  # High-DPI profile (like Antwerp 800 DPI)
+                        ocr_pad = 16
                 new_text = ocr_generic_name(det, bgr_array, "paddleocr",
-                                           allow_numeric=(cls in NUMERIC_OK), cls_name=cls, debug_class=cls)
-                print(f" Generic OCR ({cls}): '{new_text}'")
+                                           allow_numeric=(cls in NUMERIC_OK), cls_name=cls, debug_class=cls, pad=ocr_pad)
+                print(f" Generic OCR ({cls}, pad={ocr_pad}): '{new_text}'")
 
             print(f"Final OCR result: '{new_text}'")
 
