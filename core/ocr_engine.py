@@ -765,7 +765,6 @@ def ocr_simple(det: dict, bgr_color: np.ndarray, pad: int = 4, preprocess_fn=Non
         Higher score = better match to expected format.
         Prefers small km values (0-9) over large ones (100+).
         """
-        import re
         if not text:
             return -1.0
 
@@ -948,8 +947,6 @@ def _clean_antwerp_coordinate(text: str) -> str:
 
     Antwerp format: km+meters.decimals (e.g., "0+033.5" = 0km + 33.5m)
     """
-    import re
-
     if not text:
         return ""
 
@@ -1096,13 +1093,16 @@ def ocr_simple_text(det: dict, bgr_color: np.ndarray, config=None, debug_class: 
 
     # Extract valid text_id pattern if there's garbage around it
     # Valid patterns: S followed by digits, T followed by digits, TCC followed by digits
+    # Use case-insensitive matching and convert to uppercase for consistency
     text_id_pattern = r'(S\d+|TCC\d+|T\d+)'
-    text_id_match = re.search(text_id_pattern, result)
-    if text_id_match and text_id_match.group(0) != result:
-        old_result = result
-        result = text_id_match.group(0)
-        if DEBUG_OCR:
-            print(f"[ocr_simple_text] extracted text_id: '{old_result}' -> '{result}'")
+    text_id_match = re.search(text_id_pattern, result, re.IGNORECASE)
+    if text_id_match:
+        extracted = text_id_match.group(0).upper()  # Normalize to uppercase
+        if extracted != result:
+            old_result = result
+            result = extracted
+            if DEBUG_OCR:
+                print(f"[ocr_simple_text] extracted text_id: '{old_result}' -> '{result}'")
 
     return result
 
@@ -1411,8 +1411,6 @@ def _clean_coordinate_overlap(text: str) -> str:
     if not text:
         return ""
 
-    import re
-
     original_text = text
 
     # PRE-FIX: Common OCR errors where 0 is misread as O/Q
@@ -1533,7 +1531,6 @@ def _score_coord_text(txt: str) -> float:
             return 0.5  # Malformed
         
         # Score main coordinate part (e.g., "0.0734" or "0+216.5")
-        import re
         main_digits = sum(c.isdigit() for c in main_part)
         main_has_dot = '.' in main_part
         main_has_km_sep = bool(re.search(r'\d[+\-]\d', main_part))  # Antwerp format
@@ -1557,9 +1554,8 @@ def _score_coord_text(txt: str) -> float:
             print(f"[score] Bracketed: '{txt}' → main={main_score:.2f}, bracket={bracket_score:.2f}, total={total_score:.2f}")
         
         return total_score
-    
+
     #  SIMPLE COORDINATE (no brackets) - supports Wien and Antwerp formats
-    import re
     digit_count = sum(c.isdigit() for c in txt)
     has_dot = '.' in txt
     has_comma = ',' in txt
@@ -1592,9 +1588,7 @@ def _fix_coordinate_brackets(text: str) -> str:
     """
     if not text:
         return ""
-    
-    import re
-    
+
     original_text = text  #  Save for debug
     
     # 1. Replace decimal separator (German uses comma, normalize to dot)
@@ -1642,7 +1636,6 @@ def _looks_like_coordinate(text: str) -> bool:
     # - Wien format: has dot (e.g., "0.0734")
     # - Antwerp format: has + or - followed by digit (e.g., "0+216.5")
     has_dot = '.' in text
-    import re
     has_km_separator = bool(re.search(r'\d[+\-]\d', text))  # digit + or - digit
 
     if not (has_dot or has_km_separator):
@@ -2662,8 +2655,7 @@ def score_name_token(tok: str, conf: float = 0.5, allow_numeric: bool = False, c
     score += 0.6 * conf
 
     if cls_name and cls_name in CLASS_ID_PATTERNS:
-        import re as _re
-        if _re.match(CLASS_ID_PATTERNS[cls_name], s, flags=_re.IGNORECASE):
+        if re.match(CLASS_ID_PATTERNS[cls_name], s, flags=re.IGNORECASE):
             score += 1.2
     return score
 

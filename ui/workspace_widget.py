@@ -397,6 +397,10 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self.track_overlay_items = []
         # Add missing detection overlay storage
         self.missing_detection_overlays = []
+
+        # Per-workspace layout config - captured when data is loaded
+        # This ensures each workspace remembers its profile even when another profile is loaded later
+        self._cached_layout_config = None
         #  NEW: Confidence visualization flag
         self.show_confidence_colors = False
         #  NEW: Error rows storage
@@ -433,13 +437,18 @@ class WorkspaceWidget(QtWidgets.QWidget):
             print(f"[STATUS ERROR] {message} ({e})")
 
     def _get_ui_config(self) -> UIConfig:
-        """Get UI configuration from the current layout profile.
+        """Get UI configuration from the layout profile for THIS workspace.
 
+        Uses cached layout config if available (set during load_data).
         Returns the profile-specific UI config (columns, editors) or DEFAULT_UI_CONFIG
         if no profile is loaded.
         """
         try:
-            # Access layout config through parent chain: workspace -> auditing -> main -> setup
+            # First, use cached config if available (per-workspace)
+            if self._cached_layout_config is not None:
+                return self._cached_layout_config.get_ui_config()
+
+            # Fall back to global config (for backwards compatibility)
             if (self.parent_auditing and
                 hasattr(self.parent_auditing, 'main_app_ref') and
                 self.parent_auditing.main_app_ref and
@@ -453,10 +462,19 @@ class WorkspaceWidget(QtWidgets.QWidget):
         return DEFAULT_UI_CONFIG
 
     def _get_layout_config(self):
-        """Get the current layout config from the profile.
+        """Get the layout config for THIS workspace.
+
+        Uses cached config if available (set during load_data).
+        This ensures each workspace remembers its profile even when
+        another profile is loaded later for a different workspace.
 
         Returns None if no profile is loaded.
         """
+        # First, use cached config if available (per-workspace)
+        if self._cached_layout_config is not None:
+            return self._cached_layout_config
+
+        # Fall back to global config (for backwards compatibility)
         try:
             if (self.parent_auditing and
                 hasattr(self.parent_auditing, 'main_app_ref') and
@@ -1240,6 +1258,22 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
         #  SET FLAG TO PREVENT STATE SAVING DURING LOAD
         self._is_loading_data = True
+
+        # CAPTURE LAYOUT CONFIG at load time - ensures each workspace remembers its profile
+        # even if another profile is loaded later for a different workspace
+        try:
+            if (self.parent_auditing and
+                hasattr(self.parent_auditing, 'main_app_ref') and
+                self.parent_auditing.main_app_ref and
+                hasattr(self.parent_auditing.main_app_ref, 'setup_window') and
+                self.parent_auditing.main_app_ref.setup_window and
+                hasattr(self.parent_auditing.main_app_ref.setup_window, 'layout_config') and
+                self.parent_auditing.main_app_ref.setup_window.layout_config):  # Check config is not None
+                self._cached_layout_config = self.parent_auditing.main_app_ref.setup_window.layout_config
+                profile_name = getattr(self._cached_layout_config, 'profile_name', 'unknown')
+                print(f"  Cached layout config: {profile_name}")
+        except Exception as e:
+            print(f"  Failed to cache layout config: {e}")
 
         # Store uncertain detections for validation dialog
         self.uncertain_detections = uncertain_detections or []
