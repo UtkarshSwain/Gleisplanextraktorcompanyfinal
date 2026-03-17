@@ -196,14 +196,24 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         left_box = QtWidgets.QGroupBox("Gleisplan 1 (Alt)")
         left_layout = QtWidgets.QVBoxLayout(left_box)
         self.pdf1_combo = QtWidgets.QComboBox()
+        self.pdf1_combo.currentIndexChanged.connect(self._update_profile_labels)
         left_layout.addWidget(self.pdf1_combo)
+        # Profile indicator label
+        self.profile1_label = QtWidgets.QLabel("")
+        self.profile1_label.setStyleSheet("color: gray; font-size: 11px;")
+        left_layout.addWidget(self.profile1_label)
         selector_layout.addWidget(left_box)
 
         # Right Gleisplan
         right_box = QtWidgets.QGroupBox("Gleisplan 2 (Neu)")
         right_layout = QtWidgets.QVBoxLayout(right_box)
         self.pdf2_combo = QtWidgets.QComboBox()
+        self.pdf2_combo.currentIndexChanged.connect(self._update_profile_labels)
         right_layout.addWidget(self.pdf2_combo)
+        # Profile indicator label
+        self.profile2_label = QtWidgets.QLabel("")
+        self.profile2_label.setStyleSheet("color: gray; font-size: 11px;")
+        right_layout.addWidget(self.profile2_label)
         selector_layout.addWidget(right_box)
         
         layout.addLayout(selector_layout)
@@ -457,15 +467,60 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         """Load list of open Gleispläne"""
         self.pdf1_combo.clear()
         self.pdf2_combo.clear()
-        
+
         for workspace in self.parent_window.workspaces.values():
             self.pdf1_combo.addItem(workspace.layout_name, workspace)
             self.pdf2_combo.addItem(workspace.layout_name, workspace)
-        
+
         # Auto-select first two if available
         if self.pdf1_combo.count() >= 2:
             self.pdf1_combo.setCurrentIndex(0)
             self.pdf2_combo.setCurrentIndex(1)
+
+        # Update profile labels after loading
+        self._update_profile_labels()
+
+    def _update_profile_labels(self):
+        """Update profile indicator labels based on selected workspaces"""
+        # Get profile for first combo
+        ws1 = self.pdf1_combo.currentData()
+        if ws1:
+            layout_config1 = ws1._get_layout_config() if hasattr(ws1, '_get_layout_config') else None
+            is_antwerp1 = layout_config1.is_antwerp_profile() if layout_config1 else False
+            profile1_name = "Antwerp" if is_antwerp1 else "Wien"
+            self.profile1_label.setText(f"Profil: {profile1_name}")
+        else:
+            self.profile1_label.setText("")
+
+        # Get profile for second combo
+        ws2 = self.pdf2_combo.currentData()
+        if ws2:
+            layout_config2 = ws2._get_layout_config() if hasattr(ws2, '_get_layout_config') else None
+            is_antwerp2 = layout_config2.is_antwerp_profile() if layout_config2 else False
+            profile2_name = "Antwerp" if is_antwerp2 else "Wien"
+            self.profile2_label.setText(f"Profil: {profile2_name}")
+        else:
+            self.profile2_label.setText("")
+
+        # Check for profile mismatch and show visual warning
+        if ws1 and ws2:
+            layout_config1 = ws1._get_layout_config() if hasattr(ws1, '_get_layout_config') else None
+            layout_config2 = ws2._get_layout_config() if hasattr(ws2, '_get_layout_config') else None
+            is_antwerp1 = layout_config1.is_antwerp_profile() if layout_config1 else False
+            is_antwerp2 = layout_config2.is_antwerp_profile() if layout_config2 else False
+
+            if is_antwerp1 != is_antwerp2:
+                # Profiles don't match - show warning style
+                self.profile1_label.setStyleSheet("color: red; font-size: 11px; font-weight: bold;")
+                self.profile2_label.setStyleSheet("color: red; font-size: 11px; font-weight: bold;")
+                self.profile1_label.setText(f"⚠ Profil: {'Antwerp' if is_antwerp1 else 'Wien'}")
+                self.profile2_label.setText(f"⚠ Profil: {'Antwerp' if is_antwerp2 else 'Wien'}")
+            else:
+                # Profiles match - show normal style with checkmark
+                self.profile1_label.setStyleSheet("color: green; font-size: 11px;")
+                self.profile2_label.setStyleSheet("color: green; font-size: 11px;")
+                self.profile1_label.setText(f"✓ Profil: {'Antwerp' if is_antwerp1 else 'Wien'}")
+                self.profile2_label.setText(f"✓ Profil: {'Antwerp' if is_antwerp2 else 'Wien'}")
 
     def on_compare(self):
         """Perform comparison using enhanced engine"""
@@ -529,7 +584,36 @@ class SimplePDFCompareDialog(QtWidgets.QDialog):
         #  NOW run comparison
         # Debug mode is controlled by DEBUG_COMPARISON in config.py
         try:
-            engine = LayoutComparisonEngine()
+            # Get profile info from BOTH workspaces to ensure they match
+            layout_config1 = ws1._get_layout_config() if hasattr(ws1, '_get_layout_config') else None
+            layout_config2 = ws2._get_layout_config() if hasattr(ws2, '_get_layout_config') else None
+
+            is_antwerp1 = layout_config1.is_antwerp_profile() if layout_config1 else False
+            is_antwerp2 = layout_config2.is_antwerp_profile() if layout_config2 else False
+
+            # Check if profiles match - comparing different profiles is not meaningful
+            if is_antwerp1 != is_antwerp2:
+                profile1_name = "Antwerp" if is_antwerp1 else "Wien"
+                profile2_name = "Antwerp" if is_antwerp2 else "Wien"
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Unterschiedliche Profile",
+                    f"Die ausgewählten Gleispläne verwenden unterschiedliche Profile:\n\n"
+                    f"  • {ws1.layout_name}: {profile1_name}\n"
+                    f"  • {ws2.layout_name}: {profile2_name}\n\n"
+                    f"Ein Vergleich zwischen verschiedenen Profilen ist nicht sinnvoll.\n"
+                    f"Bitte wählen Sie zwei Gleispläne mit dem gleichen Profil."
+                )
+                return
+
+            is_antwerp = is_antwerp1  # Both are the same
+
+            if is_antwerp:
+                print("[COMPARISON] Using Antwerp profile configuration")
+            else:
+                print("[COMPARISON] Using Wien/default profile configuration")
+
+            engine = LayoutComparisonEngine({'is_antwerp': is_antwerp})
             result = engine.compare(ws1.df_all, ws2.df_all)
 
             # Store results for export

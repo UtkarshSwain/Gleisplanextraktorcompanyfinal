@@ -759,29 +759,6 @@ def ocr_simple(det: dict, bgr_color: np.ndarray, pad: int = 4, preprocess_fn=Non
         except Exception:
             return ""
 
-    def run_ocr_with_color_variants(img):
-        """
-        Try OCR on both original color and preprocessed (min-channel) versions.
-        Returns the best result (longest text).
-        """
-        # Try original color
-        result_color = run_ocr(img)
-
-        # Skip color preprocessing if requested (for black text on white background)
-        if skip_color_preprocessing:
-            return result_color
-
-        # Try preprocessed (for colored text like orange/red)
-        img_processed = _preprocess_colored_text(img)
-        result_processed = run_ocr(img_processed)
-
-        # Pick longest result
-        if len(result_processed) > len(result_color):
-            if DEBUG_OCR:
-                print(f"[ocr_simple] color preprocessing helped: '{result_color}' -> '{result_processed}'")
-            return result_processed
-        return result_color
-
     def score_antwerp_coordinate(text: str) -> float:
         """
         Score OCR result for Antwerp coordinate format.
@@ -854,6 +831,33 @@ def ocr_simple(det: dict, bgr_color: np.ndarray, pad: int = 4, preprocess_fn=Non
         score -= garbage_chars * 0.5
 
         return score
+
+    def run_ocr_with_color_variants(img):
+        """
+        Try OCR on both original color and preprocessed (min-channel) versions.
+        Returns the best result based on coordinate score (not just length).
+        """
+        # Try original color
+        result_color = run_ocr(img)
+
+        # Skip color preprocessing if requested (for black text on white background)
+        if skip_color_preprocessing:
+            return result_color
+
+        # Try preprocessed (for colored text like orange/red)
+        img_processed = _preprocess_colored_text(img)
+        result_processed = run_ocr(img_processed)
+
+        # Use coordinate scoring instead of length to pick best result
+        # This prevents artifacts (like extra '2' characters) from winning
+        score_color = score_antwerp_coordinate(result_color)
+        score_processed = score_antwerp_coordinate(result_processed)
+
+        if score_processed > score_color:
+            if DEBUG_OCR:
+                print(f"[ocr_simple] color preprocessing helped: '{result_color}'({score_color:.1f}) -> '{result_processed}'({score_processed:.1f})")
+            return result_processed
+        return result_color
 
     try:
         if is_vertical:
@@ -1072,6 +1076,33 @@ def ocr_simple_text(det: dict, bgr_color: np.ndarray, config=None, debug_class: 
     # Remove spaces (PaddleOCR sometimes adds spurious spaces)
     result = result.replace("|", "")
     result = result.replace(" ", "")
+
+    # Fix common OCR errors for text_id
+    # $ is often misread 'S' - replace at start of identifier
+    if result.startswith("$"):
+        result = "S" + result[1:]
+        if DEBUG_OCR:
+            print(f"[ocr_simple_text] fixed $ -> S: '{result}'")
+
+    # Remove common prefixes that get captured from adjacent text
+    # IALU5, IALU, IAL, etc. - these are labels/legends not part of the text_id
+    prefix_pattern = r'^(?:IALU5?|IAL[0-9]*|[A-Z]{2,5}[0-9]*)(?=[ST])'
+    prefix_match = re.match(prefix_pattern, result)
+    if prefix_match:
+        old_result = result
+        result = result[prefix_match.end():]
+        if DEBUG_OCR:
+            print(f"[ocr_simple_text] removed prefix: '{old_result}' -> '{result}'")
+
+    # Extract valid text_id pattern if there's garbage around it
+    # Valid patterns: S followed by digits, T followed by digits, TCC followed by digits
+    text_id_pattern = r'(S\d+|TCC\d+|T\d+)'
+    text_id_match = re.search(text_id_pattern, result)
+    if text_id_match and text_id_match.group(0) != result:
+        old_result = result
+        result = text_id_match.group(0)
+        if DEBUG_OCR:
+            print(f"[ocr_simple_text] extracted text_id: '{old_result}' -> '{result}'")
 
     return result
 

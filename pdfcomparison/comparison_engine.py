@@ -166,6 +166,55 @@ class LayoutComparisonEngine:
                     'identifier': 'coord_text',
                     'tracked_fields': ['coord_value']
                 },
+
+                # ============================================
+                # ANTWERP CLASSES
+                # ============================================
+                # Antwerp Signal - gets name from linked text_id
+                'Signal': {
+                    'identifier': 'anchor_text',  # e.g., "S04301" from text_id
+                    'tracked_fields': ['coord_value', 'fahrtrichtung', 'durchrutschweg']
+                },
+                # Antwerp Coupling Coils - get name from linked text_id
+                'coupling_coil_active': {
+                    'identifier': 'anchor_text',  # e.g., "TCC02251" from text_id
+                    'tracked_fields': ['coord_value']
+                },
+                'coupling_coil_disabled': {
+                    'identifier': 'anchor_text',  # e.g., "TCC02252" from text_id
+                    'tracked_fields': ['coord_value']
+                },
+                # Antwerp bonds - use coord_text (default symbol matching)
+                's_bond': {
+                    'identifier': 'coord_text',
+                    'tracked_fields': ['coord_value']
+                },
+                'short_bond': {
+                    'identifier': 'coord_text',
+                    'tracked_fields': ['coord_value']
+                },
+                'insulation_joint': {
+                    'identifier': 'coord_text',
+                    'tracked_fields': ['coord_value']
+                },
+                'terminal_bond': {
+                    'identifier': 'coord_text',
+                    'tracked_fields': ['coord_value']
+                },
+                # Antwerp points - use coord_text (default symbol matching)
+                'mech_point': {
+                    'identifier': 'coord_text',
+                    'tracked_fields': ['coord_value']
+                },
+                'elec_point': {
+                    'identifier': 'coord_text',
+                    'tracked_fields': ['coord_value']
+                },
+                # Antwerp spie_loop - use coord_text (default symbol matching)
+                'spie_loop': {
+                    'identifier': 'coord_text',
+                    'tracked_fields': ['coord_value']
+                },
             }
         }
 
@@ -226,6 +275,17 @@ class LayoutComparisonEngine:
         dict_new = {
             k: v for k, v in dict_new.items()
             if v.get('cls') != 'weichen_block'
+        }
+
+        # Exclude text_id class (Antwerp reference class, like coordinate for Wien)
+        dict_old = {
+            k: v for k, v in dict_old.items()
+            if v.get('cls') != 'text_id'
+        }
+
+        dict_new = {
+            k: v for k, v in dict_new.items()
+            if v.get('cls') != 'text_id'
         }
 
         print(f"Old layout: {len(df_old)} elements")
@@ -555,16 +615,17 @@ class LayoutComparisonEngine:
         #   - Same name = same element, regardless of distance
         #   - Distance only affects score tiebreaking for duplicates
         #
-        # Non-OCR classes (sverbinder, gm_block, etc.): 100m hard cutoff
+        # Non-OCR classes (sverbinder, gm_block, etc.): 50m hard cutoff
         #   - These have AUTO-GENERATED names (not unique)
         #   - Must rely on coord_value for identity
-        #   - Elements >100m apart are considered different elements
+        #   - Elements >50m apart are considered different elements
         # ============================================================
 
         # OCR classes: Match by text + coordinate value
         # These classes have meaningful anchor_text that identifies them
-        # Future: could use config.get_class_by_name(cls).requires_ocr
-        if cls in {'signal', 'gks_festkodiert', 'gks_gesteuert'}:
+        # Wien: signal, gks_festkodiert, gks_gesteuert (from OCR)
+        # Antwerp: Signal, coupling_coil_active, coupling_coil_disabled (from linked text_id)
+        if cls in {'signal', 'gks_festkodiert', 'gks_gesteuert', 'Signal', 'coupling_coil_active', 'coupling_coil_disabled'}:
             return self._match_ocr_element(row1, row2)
 
         # Coordinate class: Match by coord_text (special class)
@@ -870,8 +931,8 @@ class LayoutComparisonEngine:
         val1 = row1.get('coord_value')
         val2 = row2.get('coord_value')
 
-        # Try numeric comparison first (with 0.1 km = ±50m tolerance for matching)
-        COORD_MATCH_TOLERANCE = 0.1  # ±50 meters (100m total range) - elements within this are same element
+        # Try numeric comparison first (with 0.05 km = ±50m tolerance for matching)
+        COORD_MATCH_TOLERANCE = 0.05  # ±50 meters - elements within 50m are same element
 
         # Check for valid coord_values (not None AND not NaN)
         val1_valid = val1 is not None and not (isinstance(val1, float) and math.isnan(val1))
@@ -880,22 +941,22 @@ class LayoutComparisonEngine:
         if val1_valid and val2_valid:
             try:
                 numeric_diff = abs(float(val1) - float(val2))
-                # Tiered scoring based on coordinate difference
+                # Tiered scoring based on coordinate difference (±50m tolerance)
                 # Closer matches get higher scores (Hungarian algorithm prefers these)
                 if numeric_diff < 0.001:  # < 1m = essentially same position
                     score += 0.85
-                elif numeric_diff < 0.01:  # < 10m = very close
+                elif numeric_diff < 0.005:  # < 5m = very close
                     score += 0.82
-                elif numeric_diff < 0.02:  # < 20m = close
+                elif numeric_diff < 0.01:  # < 10m = close
                     score += 0.78
-                elif numeric_diff < 0.04:  # < 40m = medium distance
+                elif numeric_diff < 0.02:  # < 20m = medium distance
                     score += 0.74
-                elif numeric_diff < 0.07:  # < 70m = far
+                elif numeric_diff < 0.035:  # < 35m = far
                     score += 0.72
-                elif numeric_diff < COORD_MATCH_TOLERANCE:  # < 100m = same element, moved more
+                elif numeric_diff < COORD_MATCH_TOLERANCE:  # < 50m = max tolerance
                     score += 0.70
                 else:
-                    # > 100m difference = different elements
+                    # > 50m difference = different elements
                     return 0.0
             except (ValueError, TypeError):
                 # Fallback to string comparison
@@ -1280,8 +1341,8 @@ class LayoutComparisonEngine:
                     'severity': 'MAJOR'
                 }
                 
-                # Component-level comparison
-                if cls in {'signal', 'gks_festkodiert', 'gks_gesteuert'}:
+                # Component-level comparison (OCR classes from Wien + Antwerp linked text_id classes)
+                if cls in {'signal', 'gks_festkodiert', 'gks_gesteuert', 'Signal', 'coupling_coil_active', 'coupling_coil_disabled'}:
                     component_changes = self._compare_ocr_components(old_identifier, new_identifier)
                     if component_changes:
                         field_changes[identifier_field]['component_changes'] = component_changes['component_changes']
