@@ -1281,9 +1281,36 @@ class WorkspaceWidget(QtWidgets.QWidget):
             self.df_all = self._ensure_hidden_column(df_all.copy())
 
             #  FIX: Ensure link_coord_row_id column exists in loaded data
+            # AND populate it using coord_text matching if missing or all None
+            needs_coord_fallback = False
             if 'link_coord_row_id' not in self.df_all.columns:
                 self.df_all['link_coord_row_id'] = None
                 print("   Added missing link_coord_row_id column to loaded data")
+                needs_coord_fallback = True
+            elif self.df_all['link_coord_row_id'].isna().all():
+                print("   link_coord_row_id column exists but is empty")
+                needs_coord_fallback = True
+
+            if needs_coord_fallback:
+                # FALLBACK: Populate link_coord_row_id using coord_text matching
+                self._populate_link_coord_row_id_fallback()
+
+            #  FIX: Ensure link_text_id_row_id column exists in loaded data
+            # AND populate it using proximity matching if missing or all None
+            needs_fallback = False
+            if 'link_text_id_row_id' not in self.df_all.columns:
+                self.df_all['link_text_id_row_id'] = None
+                print("   Added missing link_text_id_row_id column to loaded data")
+                needs_fallback = True
+            elif self.df_all['link_text_id_row_id'].isna().all():
+                # Column exists but all values are None - need fallback
+                print("   link_text_id_row_id column exists but is empty")
+                needs_fallback = True
+
+            if needs_fallback:
+                # FALLBACK: Populate link_text_id_row_id using proximity matching
+                # This handles data processed before text_id tracking was added
+                self._populate_link_text_id_row_id_fallback()
 
             #  FIX: Ensure OCR region columns exist in loaded data (for backward compatibility)
             ocr_columns = ['ocr_x1', 'ocr_y1', 'ocr_x2', 'ocr_y2', 'ocr_region_source']
@@ -1313,10 +1340,25 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         )
                     print(f"  Rebuilt page_dfs for {len(self.page_dfs)} pages")
 
-            #  FIX: Ensure link_coord_row_id column exists in page_dfs too
+            #  FIX: Sync link columns from df_all to page_dfs
+            # This is needed because fallbacks populate df_all BEFORE page_dfs is created
             for page_num, page_df in self.page_dfs.items():
+                # Ensure columns exist
                 if 'link_coord_row_id' not in page_df.columns:
                     page_df['link_coord_row_id'] = None
+                if 'link_text_id_row_id' not in page_df.columns:
+                    page_df['link_text_id_row_id'] = None
+
+                # Sync values from df_all to page_dfs (in case fallbacks populated them)
+                page_rows = self.df_all[self.df_all['page'] == page_num]
+                for idx in page_df.index:
+                    row_id = page_df.loc[idx, 'row_id']
+                    df_all_row = page_rows[page_rows['row_id'] == row_id]
+                    if not df_all_row.empty:
+                        if 'link_coord_row_id' in df_all_row.columns:
+                            page_df.loc[idx, 'link_coord_row_id'] = df_all_row.iloc[0]['link_coord_row_id']
+                        if 'link_text_id_row_id' in df_all_row.columns:
+                            page_df.loc[idx, 'link_text_id_row_id'] = df_all_row.iloc[0]['link_text_id_row_id']
 
                 #  FIX: Ensure OCR region columns exist in page_dfs too
                 for col in ocr_columns:
@@ -3637,7 +3679,14 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 linked_anchors = self.df_all[self.df_all['link_coord_row_id'] == row_id]
                 if not linked_anchors.empty:
                     affected_row_ids.extend(linked_anchors['row_id'].tolist())
-                    print(f" Found {len(linked_anchors)} linked anchors that will be affected")
+                    print(f" Found {len(linked_anchors)} linked anchors (coord) that will be affected")
+
+            # If this is a text_id, also include all linked signals/coupling_coils
+            if cls == 'text_id' and 'link_text_id_row_id' in self.df_all.columns:
+                linked_anchors = self.df_all[self.df_all['link_text_id_row_id'] == row_id]
+                if not linked_anchors.empty:
+                    affected_row_ids.extend(linked_anchors['row_id'].tolist())
+                    print(f" Found {len(linked_anchors)} linked anchors (text_id) that will be affected")
 
             # Save state for undo/redo
             self._save_state("Bbox geändert", affected_row_ids)
@@ -4016,6 +4065,66 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     self.df_all.loc[row_idx, 'anchor_text'] = new_text
                     if page in self.page_dfs and page_mask.any():
                         self.page_dfs[page].loc[page_idx, 'anchor_text'] = new_text
+
+                    #  Propagate text_id changes to linked signals/anchors
+                    if cls == 'text_id' and 'link_text_id_row_id' in self.df_all.columns:
+                        print(f"Propagating text_id change to linked anchors...")
+                        linked_anchors = self.df_all[self.df_all['link_text_id_row_id'] == row_id]
+                        if not linked_anchors.empty:
+                            print(f" Found {len(linked_anchors)} anchors linked to this text_id")
+                            for linked_idx in linked_anchors.index:
+                                linked_row_id = self.df_all.loc[linked_idx, 'row_id']
+                                linked_page = int(self.df_all.loc[linked_idx, 'page'])
+                                linked_cls = self.df_all.loc[linked_idx, 'cls']
+
+                                print(f"→ Updating linked {linked_cls} row_id={linked_row_id} anchor_text")
+
+                                # Update anchor_text in dataframe
+                                self.df_all.loc[linked_idx, 'anchor_text'] = new_text
+
+                                # Update in page_dfs
+                                if linked_page in self.page_dfs:
+                                    page_row_mask = self.page_dfs[linked_page]['row_id'] == linked_row_id
+                                    if page_row_mask.any():
+                                        page_row_idx = self.page_dfs[linked_page][page_row_mask].index[0]
+                                        self.page_dfs[linked_page].loc[page_row_idx, 'anchor_text'] = new_text
+
+                                # Update tree item
+                                linked_tree_item = self.row_id_to_tree_item.get(linked_row_id)
+                                if linked_tree_item:
+                                    self.tree.blockSignals(True)
+                                    linked_tree_item.setText(0, new_text)  # anchor_text in column 0
+                                    self.tree.blockSignals(False)
+                                    print(f" Updated tree item column 0: '{new_text}'")
+
+                                # Update graphics label (only if on current page)
+                                if linked_page == self.current_page:
+                                    linked_items = self.current_row_items.get(linked_row_id)
+                                    if linked_items:
+                                        linked_row = self.df_all.loc[linked_idx]
+                                        linked_label = f"{linked_row['cls']} {linked_row.get('conf', '')}"
+                                        if pd.notna(linked_row.get('anchor_text')) and linked_row['anchor_text']:
+                                            linked_label += f" | {linked_row['anchor_text']}"
+                                        if pd.notna(linked_row.get('coord_text')) and linked_row['coord_text']:
+                                            linked_label += f" | {linked_row['coord_text']}"
+                                        if pd.notna(linked_row.get('angle')):
+                                            try:
+                                                linked_label += f" θ={float(linked_row['angle']):.1f}°"
+                                            except Exception:
+                                                pass
+
+                                        for linked_it in linked_items:
+                                            if isinstance(linked_it, QtWidgets.QGraphicsSimpleTextItem):
+                                                linked_it.setText(linked_label)
+                                                print(f" Updated graphics label: '{linked_label}'")
+                                                break
+
+                                        # Update linked anchor spec for persistence
+                                        linked_specs = self.all_page_row_specs.get(linked_page, {})
+                                        if linked_row_id in linked_specs:
+                                            linked_specs[linked_row_id]['label'] = linked_label
+                        else:
+                            print(f" No linked anchors found for this text_id")
 
             # SIGNAL MERGE + FAHRTRICHTUNG: Trigger when signal name changes via bbox resize OCR
             if cls == 'signal':
@@ -7323,7 +7432,132 @@ class WorkspaceWidget(QtWidgets.QWidget):
         else:
             df['_hidden'] = df['_hidden'].fillna(False)
         return df
-    
+
+    def _populate_link_text_id_row_id_fallback(self):
+        """
+        Fallback method to populate link_text_id_row_id using proximity matching.
+        Called when loading data processed before text_id tracking was added.
+        Links signals AND coupling coils to their respective text_ids.
+        """
+        if self.df_all.empty:
+            return
+
+        # Get all text_ids
+        text_ids = self.df_all[self.df_all['cls'] == 'text_id']
+        if text_ids.empty:
+            print("   No text_ids found for link_text_id_row_id fallback")
+            return
+
+        # Classes that can be linked to text_ids
+        linkable_classes = ['signal', 'coupling_coil_active', 'coupling_coil_disabled']
+        linkable_mask = self.df_all['cls'].str.lower().isin(linkable_classes)
+        linkable_rows = self.df_all[linkable_mask]
+
+        if linkable_rows.empty:
+            print("   No linkable rows (signals/coupling_coils) found for fallback")
+            return
+
+        print(f"   FALLBACK: Matching {len(linkable_rows)} anchors to {len(text_ids)} text_ids by proximity")
+
+        # For each linkable row, find the nearest text_id (vertically close, horizontally aligned)
+        max_dx = 300  # Max horizontal distance (increased for coupling coils)
+        max_dy = 400  # Max vertical distance
+        link_count = 0
+
+        for row_idx in linkable_rows.index:
+            row = self.df_all.loc[row_idx]
+            row_cx = (row['ax1'] + row['ax2']) / 2
+            row_cy = (row['ay1'] + row['ay2']) / 2
+            row_page = row['page']
+            row_cls = row['cls'].lower()
+
+            # Find text_ids on same page within distance
+            page_text_ids = text_ids[text_ids['page'] == row_page]
+
+            best_tid_row_id = None
+            best_distance = float('inf')
+
+            for tid_idx in page_text_ids.index:
+                tid_row = self.df_all.loc[tid_idx]
+                tid_cx = (tid_row['ax1'] + tid_row['ax2']) / 2
+                tid_cy = (tid_row['ay1'] + tid_row['ay2']) / 2
+                tid_text = str(tid_row.get('anchor_text', '')).upper()
+
+                dx = abs(tid_cx - row_cx)
+                dy = abs(tid_cy - row_cy)
+
+                # Must be within proximity limits
+                if dx > max_dx or dy > max_dy:
+                    continue
+
+                # For coupling coils, prefer TCC-prefixed text_ids
+                # For signals, prefer S-prefixed text_ids
+                prefix_bonus = 0
+                if 'coupling_coil' in row_cls and tid_text.startswith('TCC'):
+                    prefix_bonus = -100  # Strong preference
+                elif row_cls == 'signal' and tid_text.startswith('S') and not tid_text.startswith('TCC'):
+                    prefix_bonus = -100  # Strong preference
+
+                # Prefer vertically close, horizontally aligned text_ids
+                distance = dy + (dx * 0.5) + prefix_bonus
+
+                if distance < best_distance:
+                    best_distance = distance
+                    best_tid_row_id = tid_row['row_id']
+
+            if best_tid_row_id is not None:
+                self.df_all.at[row_idx, 'link_text_id_row_id'] = best_tid_row_id
+                link_count += 1
+
+        print(f"   FALLBACK: Added {link_count} link_text_id_row_id references")
+
+    def _populate_link_coord_row_id_fallback(self):
+        """
+        Fallback method to populate link_coord_row_id using coord_text matching.
+        Called when loading data processed before coordinate tracking was properly set up.
+        """
+        if self.df_all.empty:
+            return
+
+        # Get all coordinates and anchors with coord_text
+        coordinates = self.df_all[self.df_all['cls'] == 'coordinate']
+        if coordinates.empty:
+            print("   No coordinates found for link_coord_row_id fallback")
+            return
+
+        # Find anchors that have coord_text (they were linked to coordinates)
+        anchors_with_coords = self.df_all[
+            (self.df_all['cls'] != 'coordinate') &
+            (self.df_all['coord_text'].notna()) &
+            (self.df_all['coord_text'] != '')
+        ]
+
+        if anchors_with_coords.empty:
+            print("   No anchors with coord_text found for link_coord_row_id fallback")
+            return
+
+        print(f"   FALLBACK: Matching {len(anchors_with_coords)} anchors to {len(coordinates)} coordinates by coord_text")
+
+        link_count = 0
+        for anchor_idx in anchors_with_coords.index:
+            anchor_row = self.df_all.loc[anchor_idx]
+            anchor_coord_text = str(anchor_row['coord_text']).strip()
+            anchor_page = anchor_row['page']
+
+            # Find coordinate on same page with matching coord_text
+            page_coords = coordinates[coordinates['page'] == anchor_page]
+
+            for coord_idx in page_coords.index:
+                coord_row = self.df_all.loc[coord_idx]
+                coord_text = str(coord_row.get('coord_text', '')).strip()
+
+                if coord_text == anchor_coord_text:
+                    self.df_all.at[anchor_idx, 'link_coord_row_id'] = coord_row['row_id']
+                    link_count += 1
+                    break
+
+        print(f"   FALLBACK: Added {link_count} link_coord_row_id references")
+
     def _create_single_overlay_from_bbox(self, row_id: int, bbox: dict, pen, text_brush):
         """
         Create a single overlay from a bbox dictionary (for merged signals).

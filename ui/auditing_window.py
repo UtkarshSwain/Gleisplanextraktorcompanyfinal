@@ -2,7 +2,7 @@
 # RailDoc Studio - Bearbeitungsmodul
 # Entwickelt von: Utkarsh Swain
 # Siemens Mobility GmbH
-# © 2025
+# © 2026
 # ============================================================================
 """
 AuditingWindow - Hauptfenster fuer Bearbeitung und Korrektur
@@ -1754,7 +1754,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
         <div style="text-align: center;">
             <h2> RailDoc Studio</h2>
             <h3>Datenprüfung und Korrektur</h3>
-            <p><b>Version:</b> 1.0</p>
+            <p><b>Version:</b> 2.0 (Modular)</p>
         </div>
 
         <hr>
@@ -1776,7 +1776,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
         <p style="text-align: center;">
         <b>Entwickelt von:</b> Utkarsh Swain<br>
         <b>Siemens Mobility GmbH</b><br>
-        <i>© 2025 Siemens Mobility GmbH</i>
+        <i>© 2026 Siemens Mobility GmbH</i>
         </p>
         """
 

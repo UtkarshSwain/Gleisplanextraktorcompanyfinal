@@ -2,7 +2,7 @@
 # RailDoc Studio - Setup & Analyse Modul
 # Entwickelt von: Utkarsh Swain
 # Siemens Mobility GmbH
-# © 2025
+# © 2026
 # ============================================================================
 """
 SetupAndRunWindow - Startfenster fuer Analyse-Konfiguration
@@ -702,7 +702,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         title.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(title)
 
-        subtitle = QtWidgets.QLabel("Gleisplan-Modul v1.0")
+        subtitle = QtWidgets.QLabel("Gleisplan-Modul v2.0 (Modular)")
         subtitle.setStyleSheet("font-size: 11pt; color: gray; font-style: italic;")
         subtitle.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(subtitle)
@@ -743,7 +743,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         <hr>
         <p style="text-align: center; font-size: 9pt; color: gray;">
         <b>Entwickelt von:</b> Utkarsh Swain<br>
-        Siemens Mobility GmbH | © 2025
+        Siemens Mobility GmbH | © 2026
         </p>
 
         <p><i>Hinweis: Die erste Analyse kann einige Minuten dauern. Danach werden die Ergebnisse gespeichert und sind beim nächsten Öffnen sofort verfügbar.</i></p>
@@ -1778,7 +1778,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         <div style="text-align: center;">
             <h2>RailDoc Studio</h2>
             <h3>Gleisplan-Modul</h3>
-            <p><b>Version:</b> 1.0</p>
+            <p><b>Version:</b> 2.0 (Modular)</p>
         </div>
 
         <hr>
@@ -1800,7 +1800,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
         <p style="text-align: center;">
         <b>Entwickelt von:</b> Utkarsh Swain<br>
         <b>Organisation:</b> Siemens Mobility GmbH<br>
-        <i>© 2025 - Siemens Mobility GmbH</i>
+        <i>© 2026 - Siemens Mobility GmbH</i>
         </p>
 
         <p style="text-align: center; font-size: 9pt; color: gray;">

@@ -1066,6 +1066,12 @@ class PipelineWorker(QtCore.QThread):
                                         text_id_text = linked_text_id.get("anchor_text", linked_text_id.get("text", ""))
                                         a["anchor_text"] = text_id_text
 
+                                        # Store text_id bbox for link_text_id_row_id tracking later
+                                        a["text_id_x1"] = linked_text_id.get("x1")
+                                        a["text_id_y1"] = linked_text_id.get("y1")
+                                        a["text_id_x2"] = linked_text_id.get("x2")
+                                        a["text_id_y2"] = linked_text_id.get("y2")
+
                                         # Store vertical direction in anchor (used for Phase 2/3 coordinate search)
                                         # For 'above'/'below' directions, use directly
                                         # For 'left'/'right' directions, calculate Y relationship
@@ -2042,6 +2048,137 @@ class PipelineWorker(QtCore.QThread):
 
                     # Rebuild page_dfs to include link_coord_row_id
                     print(f" Updating page_dfs with link_coord_row_id...")
+                for page_num in df_all['page'].unique():
+                    page_num_int = int(page_num)
+                    page_dfs[page_num_int] = df_all[df_all['page'] == page_num].copy()
+
+                if DEBUG_LINKING:
+                    print(f"{'='*70}\n")
+
+            #  ADD link_text_id_row_id TRACKING (for Antwerp text_id → signal links)
+            # Match signals to text_ids using stored bbox coordinates OR proximity fallback
+            text_id_cols = ['text_id_x1', 'text_id_y1', 'text_id_x2', 'text_id_y2']
+            has_text_id_cols = all(col in df_all.columns for col in text_id_cols)
+
+            if self.run_analysis and not df_all.empty:
+                if DEBUG_LINKING:
+                    print(f"\n{'='*70}")
+                    print(f" ADDING link_text_id_row_id TRACKING")
+                    print(f"{'='*70}")
+
+                # Create link_text_id_row_id column
+                if 'link_text_id_row_id' not in df_all.columns:
+                    df_all['link_text_id_row_id'] = None
+
+                link_count = 0
+
+                if has_text_id_cols:
+                    # METHOD 1: Use stored text_id bbox coordinates (preferred)
+                    if DEBUG_LINKING:
+                        print(f"Using stored text_id bbox coordinates for matching")
+
+                    # Find all anchors that have text_id bbox stored (they were linked to text_ids)
+                    linked_anchors = df_all[
+                        (df_all['cls'] != 'text_id') &  # Not a text_id itself
+                        (df_all['text_id_x1'].notna())  # Has text_id bbox
+                    ]
+
+                    if DEBUG_LINKING:
+                        print(f"Found {len(linked_anchors)} anchors with linked text_ids")
+
+                    for idx in linked_anchors.index:
+                        anchor_row = df_all.loc[idx]
+                        tid_x1 = anchor_row['text_id_x1']
+                        tid_y1 = anchor_row['text_id_y1']
+                        tid_x2 = anchor_row['text_id_x2']
+                        tid_y2 = anchor_row['text_id_y2']
+                        anchor_page = anchor_row['page']
+
+                        # Find the text_id with matching bbox on same page
+                        matching_text_ids = df_all[
+                            (df_all['cls'] == 'text_id') &
+                            (df_all['page'] == anchor_page) &
+                            (abs(df_all['ax1'] - tid_x1) < 5) &
+                            (abs(df_all['ay1'] - tid_y1) < 5) &
+                            (abs(df_all['ax2'] - tid_x2) < 5) &
+                            (abs(df_all['ay2'] - tid_y2) < 5)
+                        ]
+
+                        if not matching_text_ids.empty:
+                            text_id_row_id = matching_text_ids.iloc[0]['row_id']
+                            df_all.at[idx, 'link_text_id_row_id'] = text_id_row_id
+                            link_count += 1
+                else:
+                    # METHOD 2: Fallback - match by proximity (for data processed before text_id columns were added)
+                    if DEBUG_LINKING:
+                        print(f"FALLBACK: Using proximity matching (text_id columns not found)")
+
+                    # Get all text_ids
+                    text_ids = df_all[df_all['cls'] == 'text_id']
+
+                    # Classes that can be linked to text_ids (signals AND coupling coils)
+                    linkable_classes = ['signal', 'coupling_coil_active', 'coupling_coil_disabled']
+                    linkable_mask = df_all['cls'].str.lower().isin(linkable_classes)
+                    linkable_rows = df_all[linkable_mask]
+
+                    if DEBUG_LINKING:
+                        print(f"Found {len(text_ids)} text_ids and {len(linkable_rows)} linkable rows")
+
+                    # For each linkable row, find the nearest text_id (vertically close, horizontally aligned)
+                    max_dx = 300  # Max horizontal distance (increased for coupling coils)
+                    max_dy = 400  # Max vertical distance
+
+                    for row_idx in linkable_rows.index:
+                        row = df_all.loc[row_idx]
+                        row_cx = (row['ax1'] + row['ax2']) / 2
+                        row_cy = (row['ay1'] + row['ay2']) / 2
+                        row_page = row['page']
+                        row_cls = row['cls'].lower()
+
+                        # Find text_ids on same page within distance
+                        page_text_ids = text_ids[text_ids['page'] == row_page]
+
+                        best_tid_row_id = None
+                        best_distance = float('inf')
+
+                        for tid_idx in page_text_ids.index:
+                            tid_row = df_all.loc[tid_idx]
+                            tid_cx = (tid_row['ax1'] + tid_row['ax2']) / 2
+                            tid_cy = (tid_row['ay1'] + tid_row['ay2']) / 2
+                            tid_text = str(tid_row.get('anchor_text', '')).upper()
+
+                            dx = abs(tid_cx - row_cx)
+                            dy = abs(tid_cy - row_cy)
+
+                            # Must be within proximity limits
+                            if dx > max_dx or dy > max_dy:
+                                continue
+
+                            # For coupling coils, prefer TCC-prefixed text_ids
+                            # For signals, prefer S-prefixed text_ids
+                            prefix_bonus = 0
+                            if 'coupling_coil' in row_cls and tid_text.startswith('TCC'):
+                                prefix_bonus = -100  # Strong preference
+                            elif row_cls == 'signal' and tid_text.startswith('S') and not tid_text.startswith('TCC'):
+                                prefix_bonus = -100  # Strong preference
+
+                            # Prefer vertically close, horizontally aligned text_ids
+                            distance = dy + (dx * 0.5) + prefix_bonus
+
+                            if distance < best_distance:
+                                best_distance = distance
+                                best_tid_row_id = tid_row['row_id']
+
+                        if best_tid_row_id is not None:
+                            df_all.at[row_idx, 'link_text_id_row_id'] = best_tid_row_id
+                            link_count += 1
+                            if DEBUG_LINKING:
+                                print(f"  {row_cls} {row.get('anchor_text', 'N/A')} → text_id row_id={best_tid_row_id}")
+
+                if DEBUG_LINKING:
+                    print(f"Added {link_count} link_text_id_row_id references")
+
+                # Rebuild page_dfs to include link_text_id_row_id
                 for page_num in df_all['page'].unique():
                     page_num_int = int(page_num)
                     page_dfs[page_num_int] = df_all[df_all['page'] == page_num].copy()

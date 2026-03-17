@@ -4,15 +4,15 @@
 # This profile contains all parameters optimized for standard railway
 # layout plans scanned at 500 DPI.
 #
-# Version: 1.0
-# Last updated: 2024
+# Version: 2.0
+# Last updated: 2026
 # Compatible with: YOLO v8 OBB model (t4datasetv31)
 #
 # Siemens Mobility GmbH
 # =============================================================================
 
 profile_name: "wien_track_plans"
-profile_version: "1.0"
+profile_version: "2.0"
 description: "Wien Gleispläne (A0, 500 DPI)"
 
 # Model configuration (optional - can be overridden at runtime)

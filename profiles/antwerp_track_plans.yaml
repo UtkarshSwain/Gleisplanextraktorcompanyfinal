@@ -4,7 +4,7 @@
 # This profile contains parameters optimized for Antwerp railway schematic plans
 # scanned at 800 DPI with 4-sided cropping for header/footer/margin removal.
 #
-# Version: 1.0 (DRAFT - Requires OCR testing)
+# Version: 2.0 (DRAFT - Requires OCR testing)
 # Last updated: 2026-03-05
 # Compatible with: YOLO v8 OBB model (Antwerp-trained)
 #
@@ -18,7 +18,7 @@
 # =============================================================================
 
 profile_name: "antwerp_track_plans"
-profile_version: "1.0-draft"
+profile_version: "2.0-draft"
 description: "Antwerp Railway Schematics (800 DPI, 1024 tiles, 4-sided crop)"
 
 # Model configuration (set at runtime or specify Antwerp-specific model)

@@ -1434,22 +1434,39 @@ def _clean_coordinate_overlap(text: str) -> str:
         
         return result
     
-    # Pattern 2: Simple number (no brackets)
+    # Pattern 2a: Antwerp format (kilometer+meter like "0+216.5", "1+444.5", "0-100.5")
+    # Format: digit(s) + or - digit(s) optionally followed by decimal
+    antwerp_pattern = r'\d+[+\-]\d+(?:\.\d+)?'
+    antwerp_match = re.search(antwerp_pattern, text)
+
+    if antwerp_match:
+        result = antwerp_match.group(0)
+
+        #  Clean trailing alphabet
+        result = re.sub(r'\s*[a-zA-Z]\s*$', '', result)
+        result = re.sub(r'\s*[|/\\]\s*$', '', result)
+
+        if DEBUG_ANGLE_ROUTING:
+            print(f"[clean_overlap] Pattern 2a (Antwerp km+m): '{original_text}' → '{result}'")
+
+        return result
+
+    # Pattern 2b: Simple number (no brackets) - Wien format
     simple_pattern = r'-?\d+[.,]\d+(?=\s|$|[^0-9.,])'
     simple_match = re.search(simple_pattern, text)
-    
+
     if simple_match:
         result = simple_match.group(0).replace(DECIMAL_SEP_INPUT, DECIMAL_SEP_OUTPUT)
-        
+
         #  Clean trailing alphabet for simple coordinates too
         result = re.sub(r'\s*[a-zA-Z]\s*$', '', result)
         result = re.sub(r'\s*[|/\\]\s*$', '', result)
-        
+
         if DEBUG_ANGLE_ROUTING:
-            print(f"[clean_overlap] Pattern 2 (simple number): '{original_text}' → '{result}'")
-        
+            print(f"[clean_overlap] Pattern 2b (simple number): '{original_text}' → '{result}'")
+
         return result
-    
+
     # No valid coordinate pattern found
     if DEBUG_ANGLE_ROUTING:
         print(f"[clean_overlap] NO VALID PATTERN in: '{text}'")
@@ -1484,13 +1501,17 @@ def _score_coord_text(txt: str) -> float:
                 print(f"[score]  Malformed bracket: '{txt}'")
             return 0.5  # Malformed
         
-        # Score main coordinate part (e.g., "0.0734")
+        # Score main coordinate part (e.g., "0.0734" or "0+216.5")
+        import re
         main_digits = sum(c.isdigit() for c in main_part)
         main_has_dot = '.' in main_part
-        
+        main_has_km_sep = bool(re.search(r'\d[+\-]\d', main_part))  # Antwerp format
+
         main_score = 0.0
-        if main_digits >= 1 and main_has_dot:
+        if main_digits >= 1 and (main_has_dot or main_has_km_sep):
             main_score = 1.0 + (main_digits * 0.1)
+            if main_has_km_sep:
+                main_score += 0.3  # Extra for Antwerp format
         
         # Score bracket part (e.g., "Gl.112")
         bracket_score = 0.0
@@ -1506,25 +1527,30 @@ def _score_coord_text(txt: str) -> float:
         
         return total_score
     
-    #  SIMPLE COORDINATE (no brackets) - ORIGINAL LOGIC
+    #  SIMPLE COORDINATE (no brackets) - supports Wien and Antwerp formats
+    import re
     digit_count = sum(c.isdigit() for c in txt)
     has_dot = '.' in txt
     has_comma = ',' in txt
-    
+    has_km_separator = bool(re.search(r'\d[+\-]\d', txt))  # Antwerp format: "0+216.5"
+
     if digit_count < 1:
         if DEBUG_ANGLE_ROUTING:
             print(f"[score] No digits: '{txt}'")
         return 0.0
-    
+
     score = 1.0
     score += digit_count * 0.1
-    
+
+    # Bonus for valid coordinate format
     if has_dot or has_comma:
         score += 0.3
-    
+    if has_km_separator:
+        score += 0.5  # Strong bonus for Antwerp km+m format
+
     if DEBUG_ANGLE_ROUTING:
-        print(f"[score] Simple: '{txt}' → {score:.2f}")
-    
+        print(f"[score] Simple: '{txt}' → {score:.2f} (km_sep={has_km_separator})")
+
     return max(0.0, score)
 
 
@@ -1561,33 +1587,45 @@ def _fix_coordinate_brackets(text: str) -> str:
 def _looks_like_coordinate(text: str) -> bool:
     """
     Quick check if text looks like a valid coordinate.
-    Examples: "0.0734", "0.0734(Gl.112)", "10.5"
+    Examples:
+        Wien: "0.0734", "0.0734(Gl.112)", "10.5"
+        Antwerp: "0+216.5", "1+444.5", "0-100"
     """
     if not text:
         return False
-    
+
     # Must start with a digit or minus sign
     if not (text[0].isdigit() or text[0] == '-'):
         if DEBUG_ANGLE_ROUTING:
             print(f"[looks_like] Doesn't start with digit/minus: '{text}'")
         return False
-    
-    # Must contain at least one digit and one dot
+
+    # Must contain at least one digit
     has_digit = any(c.isdigit() for c in text)
-    has_dot = '.' in text
-    
-    if not (has_digit and has_dot):
+    if not has_digit:
         if DEBUG_ANGLE_ROUTING:
-            print(f"[looks_like] Missing digit or dot: '{text}' (has_digit={has_digit}, has_dot={has_dot})")
+            print(f"[looks_like] No digits: '{text}'")
         return False
-    
+
+    # Check for valid coordinate formats:
+    # - Wien format: has dot (e.g., "0.0734")
+    # - Antwerp format: has + or - followed by digit (e.g., "0+216.5")
+    has_dot = '.' in text
+    import re
+    has_km_separator = bool(re.search(r'\d[+\-]\d', text))  # digit + or - digit
+
+    if not (has_dot or has_km_separator):
+        if DEBUG_ANGLE_ROUTING:
+            print(f"[looks_like] No dot or km separator: '{text}'")
+        return False
+
     # If it has brackets, they must be paired
     if '(' in text or ')' in text:
         if not ('(' in text and ')' in text):
             if DEBUG_ANGLE_ROUTING:
                 print(f"[looks_like] Unpaired brackets: '{text}'")
             return False
-    
+
     if DEBUG_ANGLE_ROUTING:
         print(f"[looks_like] Valid: '{text}'")
     

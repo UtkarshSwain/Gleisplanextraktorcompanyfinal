@@ -1,10 +1,10 @@
 # ============================================================================
 # RailDoc Studio - Intelligente Eisenbahndokument-Analyse
-# Gleisplan-Modul v1.0
+# Gleisplan-Modul v2.0 (Modular)
 #
-# Entwickelt von: Utkarsh Swain 
+# Entwickelt von: Utkarsh Swain
 # Siemens Mobility GmbH
-# © 2025
+# © 2026
 # ============================================================================
 # PIL CONFIGURATION - MUST BE BEFORE OTHER IMPORTS
 # ============================================================================
