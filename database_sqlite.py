@@ -104,6 +104,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS workspaces (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         layout_id INTEGER UNIQUE NOT NULL REFERENCES track_layouts(id) ON DELETE CASCADE,
+        profile_name TEXT,
         edited_data_json TEXT NOT NULL,
         track_skeleton TEXT,
         image_dimensions TEXT,
@@ -204,6 +205,13 @@ def init_db():
                 except sqlite3.OperationalError:
                     pass  # Column already exists
 
+            if 'profile_name' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE workspaces ADD COLUMN profile_name TEXT;")
+                    print("  Added profile_name column")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+
             print("Database tables are ready.")
     except Exception as e:
         print(f"Error initializing database: {e}")
@@ -290,18 +298,18 @@ def decompress_track_skeleton(compressed_str: str) -> Optional[np.ndarray]:
         return None
 
 
-def get_workspace_data(layout_name: str) -> Optional[Tuple[List[Dict], Optional[np.ndarray], Optional[Dict], Optional[Dict], Optional[List]]]:
+def get_workspace_data(layout_name: str) -> Optional[Tuple[List[Dict], Optional[np.ndarray], Optional[Dict], Optional[Dict], Optional[List], Optional[str]]]:
     """
     Retrieves the saved workspace JSON data, track skeleton, image dimensions, and metadata.
 
     Returns:
-        Tuple of (data_list, track_skeleton, image_dimensions, learned_patterns, uncertain_detections) or None if not found
+        Tuple of (data_list, track_skeleton, image_dimensions, learned_patterns, uncertain_detections, profile_name) or None if not found
     """
     print(f"Checking database for workspace: {layout_name}")
 
     sql_query = """
     SELECT w.edited_data_json, w.track_skeleton, w.image_dimensions,
-           w.learned_patterns_json, w.uncertain_detections_json
+           w.learned_patterns_json, w.uncertain_detections_json, w.profile_name
     FROM workspaces w
     JOIN track_layouts t ON w.layout_id = t.id
     WHERE t.layout_name = ?;
@@ -367,7 +375,12 @@ def get_workspace_data(layout_name: str) -> Optional[Tuple[List[Dict], Optional[
                     print(f"  Could not parse uncertain_detections: {e}")
                     uncertain_detections = None
 
-            return workspace_data, track_skeleton, image_dimensions, learned_patterns, uncertain_detections
+            # Get profile_name
+            profile_name = result.get('profile_name')
+            if profile_name:
+                print(f"  Loaded profile: {profile_name}")
+
+            return workspace_data, track_skeleton, image_dimensions, learned_patterns, uncertain_detections, profile_name
         else:
             print(f"No saved data found for {layout_name}.")
             return None
@@ -377,7 +390,8 @@ def save_workspace_data(layout_name: str, workspace_data: List[Dict],
                        track_skeleton: Optional[np.ndarray] = None,
                        image_dimensions: Optional[dict] = None,
                        learned_patterns: Optional[dict] = None,
-                       uncertain_detections: Optional[list] = None):
+                       uncertain_detections: Optional[list] = None,
+                       profile_name: Optional[str] = None):
     """
     Saves (Inserts or Updates) the workspace data, track skeleton, image dimensions,
     and workspace-level metadata.
@@ -389,6 +403,7 @@ def save_workspace_data(layout_name: str, workspace_data: List[Dict],
         image_dimensions: Optional dict of {page_num: {'width': w, 'height': h}}
         learned_patterns: Optional dict of OCR learning patterns
         uncertain_detections: Optional list of low-confidence detections
+        profile_name: Optional profile name (e.g., 'wien_track_plans', 'antwerp_track_plans')
     """
     sql_insert_layout = """
     INSERT OR IGNORE INTO track_layouts (layout_name)
@@ -398,11 +413,12 @@ def save_workspace_data(layout_name: str, workspace_data: List[Dict],
     sql_get_layout_id = "SELECT id FROM track_layouts WHERE layout_name = ?;"
 
     sql_upsert_workspace = """
-    INSERT INTO workspaces (layout_id, edited_data_json, track_skeleton, image_dimensions,
+    INSERT INTO workspaces (layout_id, profile_name, edited_data_json, track_skeleton, image_dimensions,
                            learned_patterns_json, uncertain_detections_json, last_modified)
-    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT (layout_id)
     DO UPDATE SET
+        profile_name = excluded.profile_name,
         edited_data_json = excluded.edited_data_json,
         track_skeleton = excluded.track_skeleton,
         image_dimensions = excluded.image_dimensions,
@@ -485,6 +501,7 @@ def save_workspace_data(layout_name: str, workspace_data: List[Dict],
         # Upsert workspace data + track skeleton + image dimensions + metadata
         cursor.execute(sql_upsert_workspace, (
             layout_id,
+            profile_name,
             data_as_json_string,
             track_skeleton_compressed,
             image_dimensions_json,
@@ -492,7 +509,7 @@ def save_workspace_data(layout_name: str, workspace_data: List[Dict],
             uncertain_detections_json
         ))
 
-    print(f"Saved workspace for {layout_name} (track: {track_skeleton is not None}, dims: {image_dimensions is not None}, patterns: {learned_patterns is not None}).")
+    print(f"Saved workspace for {layout_name} (profile: {profile_name}, track: {track_skeleton is not None}, dims: {image_dimensions is not None}, patterns: {learned_patterns is not None}).")
 
 
 def delete_workspace_data(layout_name: str) -> bool:

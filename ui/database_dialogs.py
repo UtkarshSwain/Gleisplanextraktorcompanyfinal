@@ -60,9 +60,9 @@ class SavedWorkspacesDialog(QDialog):
 
         # Table for workspaces
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
+        self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels([
-            "Layout Name", "Letzte Änderung", "Erkennungen", "Status"
+            "Layout Name", "Profil", "Letzte Änderung", "Erkennungen", "Status"
         ])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -122,7 +122,8 @@ class SavedWorkspacesDialog(QDialog):
                     SELECT t.layout_name, w.last_modified,
                            LENGTH(w.edited_data_json) as data_size,
                            w.edited_data_json,
-                           CASE WHEN w.track_skeleton IS NOT NULL THEN 1 ELSE 0 END as has_skeleton
+                           CASE WHEN w.track_skeleton IS NOT NULL THEN 1 ELSE 0 END as has_skeleton,
+                           w.profile_name
                     FROM workspaces w
                     JOIN track_layouts t ON w.layout_id = t.id
                     ORDER BY w.last_modified DESC
@@ -144,11 +145,17 @@ class SavedWorkspacesDialog(QDialog):
                 name_item.setData(Qt.UserRole, row['layout_name'])
                 self.table.setItem(i, 0, name_item)
 
+                # Profile name
+                profile_name = row.get('profile_name') or "-"
+                # Shorten profile name for display (remove "_track_plans" suffix)
+                display_profile = profile_name.replace("_track_plans", "") if profile_name != "-" else "-"
+                self.table.setItem(i, 1, QTableWidgetItem(display_profile))
+
                 # Last modified
                 last_mod = row['last_modified'] or "Unbekannt"
                 if isinstance(last_mod, str) and len(last_mod) > 16:
                     last_mod = last_mod[:16]  # Trim to date + time
-                self.table.setItem(i, 1, QTableWidgetItem(last_mod))
+                self.table.setItem(i, 2, QTableWidgetItem(last_mod))
 
                 # Detection count
                 try:
@@ -157,7 +164,7 @@ class SavedWorkspacesDialog(QDialog):
                 except (json.JSONDecodeError, TypeError, KeyError) as e:
                     pass  # Silent fail for malformed JSON
                     count = 0
-                self.table.setItem(i, 2, QTableWidgetItem(str(count)))
+                self.table.setItem(i, 3, QTableWidgetItem(str(count)))
 
                 # Status
                 status_parts = []
@@ -166,7 +173,7 @@ class SavedWorkspacesDialog(QDialog):
                 if count > 0:
                     status_parts.append(f"{count} Obj.")
                 status = ", ".join(status_parts) if status_parts else "-"
-                self.table.setItem(i, 3, QTableWidgetItem(status))
+                self.table.setItem(i, 4, QTableWidgetItem(status))
 
             self.info_label.setText(f"{len(rows)} gespeicherte Arbeitsbereiche gefunden.")
 
@@ -860,11 +867,13 @@ class DatabaseManagerDialog(QDialog):
 
             result = get_workspace_data(layout_name)
             if result:
-                # Handle both old format (3 values) and new format (5 values)
+                # Handle old format (3 values), 5 values, and new format (6 values with profile_name)
                 if len(result) == 3:
                     data, skeleton, dimensions = result
-                else:
+                elif len(result) == 5:
                     data, skeleton, dimensions, _, _ = result
+                else:
+                    data, skeleton, dimensions, _, _, _ = result  # 6 values includes profile_name
 
                 export_data = {
                     'layout_name': layout_name,

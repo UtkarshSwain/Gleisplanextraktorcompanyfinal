@@ -208,6 +208,7 @@ class PipelineWorker(QtCore.QThread):
         if hasattr(config, 'detection'):
             det = config.detection
             DPI = det.dpi
+            print(f"DEBUG: Using DPI={DPI} from profile config")
             TILE_SIZE = det.tile_size
             OVERLAP_PCT = det.overlap_pct
             EXCLUDE_LEGEND_STRIP = det.exclude_legend_strip
@@ -395,7 +396,7 @@ class PipelineWorker(QtCore.QThread):
                 print(f"Page {pidx}: Original image size {bgr_color.shape[1]}x{bgr_color.shape[0]}")
 
                 # Auto-rotate to landscape if enabled (Antwerp feature)
-                if self.config.detection.auto_landscape:
+                if self.config and self.config.detection.auto_landscape:
                     bgr_color, was_rotated = ensure_landscape(
                         bgr_color,
                         rotation_direction=self.config.detection.landscape_rotation_direction
@@ -403,8 +404,19 @@ class PipelineWorker(QtCore.QThread):
                     if was_rotated:
                         print(f"Page {pidx}: Rotated to landscape -> {bgr_color.shape[1]}x{bgr_color.shape[0]}")
 
-                # Apply 4-sided cropping if configured
-                if (self.config.detection.crop_top or self.config.detection.crop_bottom or
+                # Store FULL image for display (before any cropping)
+                # Coordinates will be stored in full image space for consistent save/load
+                full_bgr_color = bgr_color.copy()
+
+                # Initialize crop offsets (used to convert detection coords to full image space)
+                crop_t = crop_l = 0
+
+                # DEBUG: Track full image dimensions for verification
+                full_h, full_w = full_bgr_color.shape[:2]
+                print(f"DEBUG: Page {pidx} - Full image size: {full_w}x{full_h}")
+
+                # Apply 4-sided cropping if configured (for detection only)
+                if self.config and (self.config.detection.crop_top or self.config.detection.crop_bottom or
                     self.config.detection.crop_left or self.config.detection.crop_right):
                     h, w = bgr_color.shape[:2]
                     crop_t = self.config.detection.crop_top
@@ -419,10 +431,13 @@ class PipelineWorker(QtCore.QThread):
                     # Only crop if we have at least 100px remaining in each dimension
                     if remaining_h >= 100 and remaining_w >= 100:
                         bgr_color = bgr_color[crop_t:h-crop_b, crop_l:w-crop_r]
-                        print(f"Cropped image: {w}x{h} -> {bgr_color.shape[1]}x{bgr_color.shape[0]}")
+                        print(f"Cropped for detection: {w}x{h} -> {bgr_color.shape[1]}x{bgr_color.shape[0]}")
+                        print(f"DEBUG: Crop offsets that will be applied: crop_l={crop_l}, crop_t={crop_t}")
                     else:
                         print(f"Warning: Crop values too large for image ({w}x{h}), "
                               f"remaining would be {remaining_w}x{remaining_h}, skipping crop")
+                        # Reset offsets since we didn't crop
+                        crop_t = crop_l = 0
 
                 df_page = pd.DataFrame()
 
@@ -1250,7 +1265,12 @@ class PipelineWorker(QtCore.QThread):
                                 'anchor_text': haltepunkt_name,
                                 'coord_text': coord_txt
                             }
-                            
+
+                            # Add crop offsets to convert detection coords to full image space
+                            # DEBUG: Log first detection's coordinate transformation
+                            if len(all_rows) == 0:
+                                print(f"DEBUG DETECT: First detection raw coords: x1={a['x1']}, y1={a['y1']}, x2={a['x2']}, y2={a['y2']}")
+                                print(f"DEBUG DETECT: After offset (crop_l={crop_l}, crop_t={crop_t}): ax1={a['x1']+crop_l}, ay1={a['y1']+crop_t}")
                             all_rows.append(dict(
                                 detection_id=make_uuid(element_for_uuid),
                                 row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
@@ -1259,20 +1279,30 @@ class PipelineWorker(QtCore.QThread):
                                 coord_text=coord_txt,
                                 coord_value=coord_val,
                                 gi_gl=gi,
-                                ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
-                                cx1=cbbox[0], cy1=cbbox[1], cx2=cbbox[2], cy2=cbbox[3],
+                                ax1=a["x1"] + crop_l, ay1=a["y1"] + crop_t, ax2=a["x2"] + crop_l, ay2=a["y2"] + crop_t,
+                                cx1=cbbox[0] + crop_l if cbbox[0] is not None else None,
+                                cy1=cbbox[1] + crop_t if cbbox[1] is not None else None,
+                                cx2=cbbox[2] + crop_l if cbbox[2] is not None else None,
+                                cy2=cbbox[3] + crop_t if cbbox[3] is not None else None,
                                 angle=a.get("angle"), angle_raw=a.get("angle_raw"),
-                                obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
+                                obb_cx=(a.get("obb_cx") + crop_l) if a.get("obb_cx") is not None else None,
+                                obb_cy=(a.get("obb_cy") + crop_t) if a.get("obb_cy") is not None else None,
                                 obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
-                                poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
-                                ocr_x1=ocr_bbox[0] if ocr_bbox else None,
-                                ocr_y1=ocr_bbox[1] if ocr_bbox else None,
-                                ocr_x2=ocr_bbox[2] if ocr_bbox else None,
-                                ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                                poly=[(p[0] + crop_l, p[1] + crop_t) for p in (a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly"))] if a.get("poly") is not None else None,
+                                ocr_x1=(ocr_bbox[0] + crop_l) if ocr_bbox else None,
+                                ocr_y1=(ocr_bbox[1] + crop_t) if ocr_bbox else None,
+                                ocr_x2=(ocr_bbox[2] + crop_l) if ocr_bbox else None,
+                                ocr_y2=(ocr_bbox[3] + crop_t) if ocr_bbox else None,
                                 ocr_region_source=a.get("ocr_region_source", ocr_position),
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=None,
-                                _fahrtrichtung_source='none'  #  CHANGE 3
+                                _fahrtrichtung_source='none',  #  CHANGE 3
+                                # Antwerp-specific fields for persistence
+                                text_id_x1=(a.get("text_id_x1") + crop_l) if a.get("text_id_x1") is not None else None,
+                                text_id_y1=(a.get("text_id_y1") + crop_t) if a.get("text_id_y1") is not None else None,
+                                text_id_x2=(a.get("text_id_x2") + crop_l) if a.get("text_id_x2") is not None else None,
+                                text_id_y2=(a.get("text_id_y2") + crop_t) if a.get("text_id_y2") is not None else None,
+                                linked_coordinate=a.get("linked_coordinate")
                             ))
                             # Debug: Verify OCR coords were stored
                             if ocr_bbox and DEBUG_LINKING:
@@ -1292,22 +1322,31 @@ class PipelineWorker(QtCore.QThread):
                                 'coord_text': coord_text_combined
                             }
                             
+                            # Add crop offsets to convert detection coords to full image space
                             all_rows.append(dict(
                                 detection_id=make_uuid(element_for_uuid),
                                 row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
                                 anchor_text=name_txt, anchor_conf=ocr_conf, coord_text=coord_text_combined, coord_value=None, gi_gl=None,
-                                ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
+                                ax1=a["x1"] + crop_l, ay1=a["y1"] + crop_t, ax2=a["x2"] + crop_l, ay2=a["y2"] + crop_t,
                                 cx1=None, cy1=None, cx2=None, cy2=None, angle=a.get("angle"), angle_raw=a.get("angle_raw"),
-                                obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"), obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
-                                poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
-                                ocr_x1=ocr_bbox[0] if ocr_bbox else None,
-                                ocr_y1=ocr_bbox[1] if ocr_bbox else None,
-                                ocr_x2=ocr_bbox[2] if ocr_bbox else None,
-                                ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                                obb_cx=(a.get("obb_cx") + crop_l) if a.get("obb_cx") is not None else None,
+                                obb_cy=(a.get("obb_cy") + crop_t) if a.get("obb_cy") is not None else None,
+                                obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
+                                poly=[(p[0] + crop_l, p[1] + crop_t) for p in (a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly"))] if a.get("poly") is not None else None,
+                                ocr_x1=(ocr_bbox[0] + crop_l) if ocr_bbox else None,
+                                ocr_y1=(ocr_bbox[1] + crop_t) if ocr_bbox else None,
+                                ocr_x2=(ocr_bbox[2] + crop_l) if ocr_bbox else None,
+                                ocr_y2=(ocr_bbox[3] + crop_t) if ocr_bbox else None,
                                 ocr_region_source=a.get("ocr_region_source", ocr_position),
                                 notes="", weichen_coordinates=weichen_coords,
                                 fahrtrichtung=None,
-                                _fahrtrichtung_source='none'  #  CHANGE 3
+                                _fahrtrichtung_source='none',  #  CHANGE 3
+                                # Antwerp-specific fields for persistence
+                                text_id_x1=(a.get("text_id_x1") + crop_l) if a.get("text_id_x1") is not None else None,
+                                text_id_y1=(a.get("text_id_y1") + crop_t) if a.get("text_id_y1") is not None else None,
+                                text_id_x2=(a.get("text_id_x2") + crop_l) if a.get("text_id_x2") is not None else None,
+                                text_id_y2=(a.get("text_id_y2") + crop_t) if a.get("text_id_y2") is not None else None,
+                                linked_coordinate=a.get("linked_coordinate")
                             ))
                             continue
                         
@@ -1364,30 +1403,41 @@ class PipelineWorker(QtCore.QThread):
                                 'coord_text': coord_txt
                             }
                             
+                            # Add crop offsets to convert detection coords to full image space
                             all_rows.append(dict(
                                 detection_id=make_uuid(element_for_uuid),
                                 row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
                                 anchor_text=name_txt, anchor_conf=ocr_conf, coord_text=coord_txt, coord_value=coord_val, gi_gl=gi,
-                                ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
-                                cx1=cbbox[0], cy1=cbbox[1], cx2=cbbox[2], cy2=cbbox[3],
+                                ax1=a["x1"] + crop_l, ay1=a["y1"] + crop_t, ax2=a["x2"] + crop_l, ay2=a["y2"] + crop_t,
+                                cx1=cbbox[0] + crop_l if cbbox[0] is not None else None,
+                                cy1=cbbox[1] + crop_t if cbbox[1] is not None else None,
+                                cx2=cbbox[2] + crop_l if cbbox[2] is not None else None,
+                                cy2=cbbox[3] + crop_t if cbbox[3] is not None else None,
                                 angle=a.get("angle"), angle_raw=a.get("angle_raw"),
-                                obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
+                                obb_cx=(a.get("obb_cx") + crop_l) if a.get("obb_cx") is not None else None,
+                                obb_cy=(a.get("obb_cy") + crop_t) if a.get("obb_cy") is not None else None,
                                 obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
-                                poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
-                                ocr_x1=ocr_bbox[0] if ocr_bbox else None,
-                                ocr_y1=ocr_bbox[1] if ocr_bbox else None,
-                                ocr_x2=ocr_bbox[2] if ocr_bbox else None,
-                                ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                                poly=[(p[0] + crop_l, p[1] + crop_t) for p in (a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly"))] if a.get("poly") is not None else None,
+                                ocr_x1=(ocr_bbox[0] + crop_l) if ocr_bbox else None,
+                                ocr_y1=(ocr_bbox[1] + crop_t) if ocr_bbox else None,
+                                ocr_x2=(ocr_bbox[2] + crop_l) if ocr_bbox else None,
+                                ocr_y2=(ocr_bbox[3] + crop_t) if ocr_bbox else None,
                                 ocr_region_source=a.get("ocr_region_source", ocr_position),
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=None,
-                                _fahrtrichtung_source='none'  #  CHANGE 3
+                                _fahrtrichtung_source='none',  #  CHANGE 3
+                                # Antwerp-specific fields for persistence
+                                text_id_x1=(a.get("text_id_x1") + crop_l) if a.get("text_id_x1") is not None else None,
+                                text_id_y1=(a.get("text_id_y1") + crop_t) if a.get("text_id_y1") is not None else None,
+                                text_id_x2=(a.get("text_id_x2") + crop_l) if a.get("text_id_x2") is not None else None,
+                                text_id_y2=(a.get("text_id_y2") + crop_t) if a.get("text_id_y2") is not None else None,
+                                linked_coordinate=a.get("linked_coordinate")
                             ))
                             # Debug: Verify OCR coords were stored
                             if ocr_bbox and DEBUG_LINKING:
                                 print(f" Stored OCR coords for row {row_id}: ocr_x1={ocr_bbox[0]:.0f}, ocr_y1={ocr_bbox[1]:.0f}, ocr_x2={ocr_bbox[2]:.0f}, ocr_y2={ocr_bbox[3]:.0f}")
                             continue
-                        
+
                         #  SPECIAL HANDLING FOR SVERBINDER (use pre-linked coordinate)
                         if a["name"] == "sverbinder":
                             # Retrieve the already-linked coordinate from STEP 1B
@@ -1416,27 +1466,38 @@ class PipelineWorker(QtCore.QThread):
                                 'coord_text': coord_txt
                             }
                             
+                            # Add crop offsets to convert detection coords to full image space
                             all_rows.append(dict(
                                 detection_id=make_uuid(element_for_uuid),
                                 row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
                                 anchor_text=name_txt, anchor_conf=ocr_conf, coord_text=coord_txt, coord_value=coord_val, gi_gl=gi,
-                                ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
-                                cx1=cbbox[0], cy1=cbbox[1], cx2=cbbox[2], cy2=cbbox[3],
+                                ax1=a["x1"] + crop_l, ay1=a["y1"] + crop_t, ax2=a["x2"] + crop_l, ay2=a["y2"] + crop_t,
+                                cx1=cbbox[0] + crop_l if cbbox[0] is not None else None,
+                                cy1=cbbox[1] + crop_t if cbbox[1] is not None else None,
+                                cx2=cbbox[2] + crop_l if cbbox[2] is not None else None,
+                                cy2=cbbox[3] + crop_t if cbbox[3] is not None else None,
                                 angle=a.get("angle"), angle_raw=a.get("angle_raw"),
-                                obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
+                                obb_cx=(a.get("obb_cx") + crop_l) if a.get("obb_cx") is not None else None,
+                                obb_cy=(a.get("obb_cy") + crop_t) if a.get("obb_cy") is not None else None,
                                 obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
-                                poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
-                                ocr_x1=ocr_bbox[0] if ocr_bbox else None,
-                                ocr_y1=ocr_bbox[1] if ocr_bbox else None,
-                                ocr_x2=ocr_bbox[2] if ocr_bbox else None,
-                                ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                                poly=[(p[0] + crop_l, p[1] + crop_t) for p in (a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly"))] if a.get("poly") is not None else None,
+                                ocr_x1=(ocr_bbox[0] + crop_l) if ocr_bbox else None,
+                                ocr_y1=(ocr_bbox[1] + crop_t) if ocr_bbox else None,
+                                ocr_x2=(ocr_bbox[2] + crop_l) if ocr_bbox else None,
+                                ocr_y2=(ocr_bbox[3] + crop_t) if ocr_bbox else None,
                                 ocr_region_source=a.get("ocr_region_source", ocr_position),
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=fahrtrichtung,
-                                _fahrtrichtung_source=fahrtrichtung_source  #  CHANGE 3
+                                _fahrtrichtung_source=fahrtrichtung_source,  #  CHANGE 3
+                                # Antwerp-specific fields for persistence
+                                text_id_x1=(a.get("text_id_x1") + crop_l) if a.get("text_id_x1") is not None else None,
+                                text_id_y1=(a.get("text_id_y1") + crop_t) if a.get("text_id_y1") is not None else None,
+                                text_id_x2=(a.get("text_id_x2") + crop_l) if a.get("text_id_x2") is not None else None,
+                                text_id_y2=(a.get("text_id_y2") + crop_t) if a.get("text_id_y2") is not None else None,
+                                linked_coordinate=a.get("linked_coordinate")
                             ))
                             continue
-                        
+
                         #  SKIP GKS (already processed in STEP 1)
                         if a["name"] in ["gks_festkodiert", "gks_gesteuert"]:
                             # Retrieve the already-linked coordinate
@@ -1463,27 +1524,38 @@ class PipelineWorker(QtCore.QThread):
                                 'coord_text': coord_txt
                             }
                             
+                            # Add crop offsets to convert detection coords to full image space
                             all_rows.append(dict(
                                 detection_id=make_uuid(element_for_uuid),
                                 row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
                                 anchor_text=name_txt, anchor_conf=ocr_conf, coord_text=coord_txt, coord_value=coord_val, gi_gl=gi,
-                                ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
-                                cx1=cbbox[0], cy1=cbbox[1], cx2=cbbox[2], cy2=cbbox[3],
+                                ax1=a["x1"] + crop_l, ay1=a["y1"] + crop_t, ax2=a["x2"] + crop_l, ay2=a["y2"] + crop_t,
+                                cx1=cbbox[0] + crop_l if cbbox[0] is not None else None,
+                                cy1=cbbox[1] + crop_t if cbbox[1] is not None else None,
+                                cx2=cbbox[2] + crop_l if cbbox[2] is not None else None,
+                                cy2=cbbox[3] + crop_t if cbbox[3] is not None else None,
                                 angle=a.get("angle"), angle_raw=a.get("angle_raw"),
-                                obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
+                                obb_cx=(a.get("obb_cx") + crop_l) if a.get("obb_cx") is not None else None,
+                                obb_cy=(a.get("obb_cy") + crop_t) if a.get("obb_cy") is not None else None,
                                 obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
-                                poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
-                                ocr_x1=ocr_bbox[0] if ocr_bbox else None,
-                                ocr_y1=ocr_bbox[1] if ocr_bbox else None,
-                                ocr_x2=ocr_bbox[2] if ocr_bbox else None,
-                                ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                                poly=[(p[0] + crop_l, p[1] + crop_t) for p in (a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly"))] if a.get("poly") is not None else None,
+                                ocr_x1=(ocr_bbox[0] + crop_l) if ocr_bbox else None,
+                                ocr_y1=(ocr_bbox[1] + crop_t) if ocr_bbox else None,
+                                ocr_x2=(ocr_bbox[2] + crop_l) if ocr_bbox else None,
+                                ocr_y2=(ocr_bbox[3] + crop_t) if ocr_bbox else None,
                                 ocr_region_source=a.get("ocr_region_source", ocr_position),
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=fahrtrichtung,
-                                _fahrtrichtung_source=fahrtrichtung_source  #  CHANGE 3
+                                _fahrtrichtung_source=fahrtrichtung_source,  #  CHANGE 3
+                                # Antwerp-specific fields for persistence
+                                text_id_x1=(a.get("text_id_x1") + crop_l) if a.get("text_id_x1") is not None else None,
+                                text_id_y1=(a.get("text_id_y1") + crop_t) if a.get("text_id_y1") is not None else None,
+                                text_id_x2=(a.get("text_id_x2") + crop_l) if a.get("text_id_x2") is not None else None,
+                                text_id_y2=(a.get("text_id_y2") + crop_t) if a.get("text_id_y2") is not None else None,
+                                linked_coordinate=a.get("linked_coordinate")
                             ))
                             continue
-                        
+
                         #  SPECIAL HANDLING FOR ISOLIERSTOSS (with fallback)
                         if a["name"] == "isolierstoß":
                             # First: Try normal linking (mode="above")
@@ -1533,24 +1605,35 @@ class PipelineWorker(QtCore.QThread):
                                 'coord_text': coord_txt
                             }
 
+                            # Add crop offsets to convert detection coords to full image space
                             all_rows.append(dict(
                                 detection_id=make_uuid(element_for_uuid),
                                 row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
                                 anchor_text=name_txt, anchor_conf=ocr_conf, coord_text=coord_txt, coord_value=coord_val, gi_gl=gi,
-                                ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
-                                cx1=cbbox[0], cy1=cbbox[1], cx2=cbbox[2], cy2=cbbox[3],
+                                ax1=a["x1"] + crop_l, ay1=a["y1"] + crop_t, ax2=a["x2"] + crop_l, ay2=a["y2"] + crop_t,
+                                cx1=cbbox[0] + crop_l if cbbox[0] is not None else None,
+                                cy1=cbbox[1] + crop_t if cbbox[1] is not None else None,
+                                cx2=cbbox[2] + crop_l if cbbox[2] is not None else None,
+                                cy2=cbbox[3] + crop_t if cbbox[3] is not None else None,
                                 angle=a.get("angle"), angle_raw=a.get("angle_raw"),
-                                obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
+                                obb_cx=(a.get("obb_cx") + crop_l) if a.get("obb_cx") is not None else None,
+                                obb_cy=(a.get("obb_cy") + crop_t) if a.get("obb_cy") is not None else None,
                                 obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
-                                poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
-                                ocr_x1=ocr_bbox[0] if ocr_bbox else None,
-                                ocr_y1=ocr_bbox[1] if ocr_bbox else None,
-                                ocr_x2=ocr_bbox[2] if ocr_bbox else None,
-                                ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                                poly=[(p[0] + crop_l, p[1] + crop_t) for p in (a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly"))] if a.get("poly") is not None else None,
+                                ocr_x1=(ocr_bbox[0] + crop_l) if ocr_bbox else None,
+                                ocr_y1=(ocr_bbox[1] + crop_t) if ocr_bbox else None,
+                                ocr_x2=(ocr_bbox[2] + crop_l) if ocr_bbox else None,
+                                ocr_y2=(ocr_bbox[3] + crop_t) if ocr_bbox else None,
                                 ocr_region_source=a.get("ocr_region_source", ocr_position),
                                 notes="", weichen_coordinates=[],
                                 fahrtrichtung=fahrtrichtung,
-                                _fahrtrichtung_source=fahrtrichtung_source
+                                _fahrtrichtung_source=fahrtrichtung_source,
+                                # Antwerp-specific fields for persistence
+                                text_id_x1=(a.get("text_id_x1") + crop_l) if a.get("text_id_x1") is not None else None,
+                                text_id_y1=(a.get("text_id_y1") + crop_t) if a.get("text_id_y1") is not None else None,
+                                text_id_x2=(a.get("text_id_x2") + crop_l) if a.get("text_id_x2") is not None else None,
+                                text_id_y2=(a.get("text_id_y2") + crop_t) if a.get("text_id_y2") is not None else None,
+                                linked_coordinate=a.get("linked_coordinate")
                             ))
                             continue
 
@@ -1609,24 +1692,35 @@ class PipelineWorker(QtCore.QThread):
                             'coord_text': coord_txt
                         }
                         
+                        # Add crop offsets to convert detection coords to full image space
                         all_rows.append(dict(
                             detection_id=make_uuid(element_for_uuid),
                             row_id=row_id, page=pidx, cls=a["name"], conf=round(a["conf"], 3), color=a_color,
                             anchor_text=name_txt, anchor_conf=ocr_conf, coord_text=coord_txt, coord_value=coord_val, gi_gl=gi,
-                            ax1=a["x1"], ay1=a["y1"], ax2=a["x2"], ay2=a["y2"],
-                            cx1=cbbox[0], cy1=cbbox[1], cx2=cbbox[2], cy2=cbbox[3],
+                            ax1=a["x1"] + crop_l, ay1=a["y1"] + crop_t, ax2=a["x2"] + crop_l, ay2=a["y2"] + crop_t,
+                            cx1=cbbox[0] + crop_l if cbbox[0] is not None else None,
+                            cy1=cbbox[1] + crop_t if cbbox[1] is not None else None,
+                            cx2=cbbox[2] + crop_l if cbbox[2] is not None else None,
+                            cy2=cbbox[3] + crop_t if cbbox[3] is not None else None,
                             angle=a.get("angle"), angle_raw=a.get("angle_raw"),
-                            obb_cx=a.get("obb_cx"), obb_cy=a.get("obb_cy"),
+                            obb_cx=(a.get("obb_cx") + crop_l) if a.get("obb_cx") is not None else None,
+                            obb_cy=(a.get("obb_cy") + crop_t) if a.get("obb_cy") is not None else None,
                             obb_w=a.get("obb_w"), obb_h=a.get("obb_h"),
-                            poly=(a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly")),
-                            ocr_x1=ocr_bbox[0] if ocr_bbox else None,
-                            ocr_y1=ocr_bbox[1] if ocr_bbox else None,
-                            ocr_x2=ocr_bbox[2] if ocr_bbox else None,
-                            ocr_y2=ocr_bbox[3] if ocr_bbox else None,
+                            poly=[(p[0] + crop_l, p[1] + crop_t) for p in (a.get("poly").tolist() if isinstance(a.get("poly"), np.ndarray) else a.get("poly"))] if a.get("poly") is not None else None,
+                            ocr_x1=(ocr_bbox[0] + crop_l) if ocr_bbox else None,
+                            ocr_y1=(ocr_bbox[1] + crop_t) if ocr_bbox else None,
+                            ocr_x2=(ocr_bbox[2] + crop_l) if ocr_bbox else None,
+                            ocr_y2=(ocr_bbox[3] + crop_t) if ocr_bbox else None,
                             ocr_region_source=a.get("ocr_region_source", ocr_position),  # Prefer text_id direction for signals
                             notes="", weichen_coordinates=[],
                             fahrtrichtung=fahrtrichtung,
-                            _fahrtrichtung_source=fahrtrichtung_source  #  CHANGE 3
+                            _fahrtrichtung_source=fahrtrichtung_source,  #  CHANGE 3
+                            # Antwerp-specific fields for persistence
+                            text_id_x1=(a.get("text_id_x1") + crop_l) if a.get("text_id_x1") is not None else None,
+                            text_id_y1=(a.get("text_id_y1") + crop_t) if a.get("text_id_y1") is not None else None,
+                            text_id_x2=(a.get("text_id_x2") + crop_l) if a.get("text_id_x2") is not None else None,
+                            text_id_y2=(a.get("text_id_y2") + crop_t) if a.get("text_id_y2") is not None else None,
+                            linked_coordinate=a.get("linked_coordinate")
                         ))
 
                     for c in coords:
@@ -1643,28 +1737,36 @@ class PipelineWorker(QtCore.QThread):
                             'coord_text': meta.get("text")
                         }
                         
+                        # Add crop offsets to convert detection coords to full image space
                         all_rows.append(dict(
                             detection_id=make_uuid(element_for_uuid),
                             row_id=row_id, page=pidx, cls="coordinate", conf=round(c["conf"], 3), color=meta.get("color", "none"),
                             anchor_text="", coord_text=meta.get("text"), coord_value=meta.get("value"), gi_gl=meta.get("gi"),
                             ax1=None, ay1=None, ax2=None, ay2=None,
-                            cx1=c["x1"], cy1=c["y1"], cx2=c["x2"], cy2=c["y2"],
+                            cx1=c["x1"] + crop_l, cy1=c["y1"] + crop_t, cx2=c["x2"] + crop_l, cy2=c["y2"] + crop_t,
                             angle=c.get("angle"), angle_raw=c.get("angle_raw"),
-                            obb_cx=c.get("obb_cx"), obb_cy=c.get("obb_cy"),
+                            obb_cx=(c.get("obb_cx") + crop_l) if c.get("obb_cx") is not None else None,
+                            obb_cy=(c.get("obb_cy") + crop_t) if c.get("obb_cy") is not None else None,
                             obb_w=c.get("obb_w"), obb_h=c.get("obb_h"),
-                            poly=(c.get("poly").tolist() if isinstance(c.get("poly"), np.ndarray) else c.get("poly")),
+                            poly=[(p[0] + crop_l, p[1] + crop_t) for p in (c.get("poly").tolist() if isinstance(c.get("poly"), np.ndarray) else c.get("poly"))] if c.get("poly") is not None else None,
                             ocr_x1=None, ocr_y1=None, ocr_x2=None, ocr_y2=None,
                             ocr_region_source=None,
                             notes="", weichen_coordinates=[],
                             fahrtrichtung=None,
-                            _fahrtrichtung_source='none'  #  CHANGE 3
+                            _fahrtrichtung_source='none',  #  CHANGE 3
+                            # Antwerp-specific fields for persistence (None for coordinates)
+                            text_id_x1=None,
+                            text_id_y1=None,
+                            text_id_x2=None,
+                            text_id_y2=None,
+                            linked_coordinate=None
                         ))
-                        
+
                     self.status.emit("Symbolzuordnung abgeschlossen")
                     emit_progress(pidx - 1, W['raster'] + W['prep'] + W['det'] + W['ocr_c'] + W['ocr_a'] + W['link'])
 
-                    # NOTE: Coordinates stay in cropped-image space since visualization
-                    # uses bgr_color (the cropped image). No offset adjustment needed.
+                    # NOTE: Coordinates are now in FULL image space (crop offsets added above)
+                    # Visualization uses full_bgr_color to match these coordinates.
 
                     df_page = pd.DataFrame([r for r in all_rows if r["page"] == pidx])
                 
@@ -1672,14 +1774,15 @@ class PipelineWorker(QtCore.QThread):
                     self.status.emit("Bild wird extrahiert...")
                     emit_progress(pidx - 1, 1.0)
 
-                page_bgr_arrays[pidx] = bgr_color
+                # Store and emit FULL image (coordinates are in full image space)
+                page_bgr_arrays[pidx] = full_bgr_color
                 page_dfs[pidx] = df_page
-                
-                self.page_processed.emit(pidx, bgr_color, df_page)
-                
+
+                self.page_processed.emit(pidx, full_bgr_color, df_page)
+
                 self.status.emit("Seite abgeschlossen")
 
-                del pil, bgr_color
+                del pil, bgr_color, full_bgr_color
                 if self.run_analysis:
                     del mask_red, mask_yel, coords, anchors, coord_meta, dets
                 gc.collect()

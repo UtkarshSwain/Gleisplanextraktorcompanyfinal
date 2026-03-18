@@ -1354,6 +1354,18 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     self.df_all[col] = None
                 print(f"   Added missing OCR columns to loaded data: {missing_ocr_cols}")
 
+            # FIX: Deserialize _signal_positions from JSON string (saved as string, needs to be dict)
+            if '_signal_positions' in self.df_all.columns:
+                def deserialize_signal_positions(x):
+                    if isinstance(x, str):
+                        try:
+                            return json.loads(x)
+                        except (json.JSONDecodeError, TypeError):
+                            return None
+                    return x
+                self.df_all['_signal_positions'] = self.df_all['_signal_positions'].apply(deserialize_signal_positions)
+                print("   Deserialized _signal_positions from JSON strings")
+
             # MEMORY OPTIMIZATION: Use references for read-only data
             # - QPixmaps are read-only in workspace, no copy needed
             # - BGR arrays are read-only (used for OCR cropping), no copy needed
@@ -1400,6 +1412,19 @@ class WorkspaceWidget(QtWidgets.QWidget):
                         page_df[col] = None
 
             print(f"  Loaded into workspace: {len(self.df_all)} rows")
+
+            # DEBUG: Print sample coordinate values loaded
+            if not self.df_all.empty:
+                sample = self.df_all.iloc[0]
+                print(f"DEBUG LOAD: First row coords - ax1={sample.get('ax1')}, ay1={sample.get('ay1')}, ax2={sample.get('ax2')}, ay2={sample.get('ay2')}")
+                if sample.get('poly') is not None:
+                    poly = sample['poly']
+                    print(f"DEBUG LOAD: First row poly[0]={poly[0] if isinstance(poly, (list, tuple)) and poly else poly}")
+
+            # DEBUG: Print image dimensions
+            if self.page_base_pix:
+                for page_num, pix in self.page_base_pix.items():
+                    print(f"DEBUG LOAD: Page {page_num} image size: {pix.width()}x{pix.height()}")
 
             #  ADD DEBUG: Check _hidden column
             if '_hidden' in self.df_all.columns:
@@ -1620,6 +1645,14 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 )
 
             data_list = df_cleaned.to_dict("records")
+
+            # DEBUG: Print sample coordinate values being saved
+            if data_list:
+                sample = data_list[0]
+                print(f"DEBUG SAVE: First row coords - ax1={sample.get('ax1')}, ay1={sample.get('ay1')}, ax2={sample.get('ax2')}, ay2={sample.get('ay2')}")
+                if sample.get('poly'):
+                    print(f"DEBUG SAVE: First row poly[0]={sample['poly'][0] if sample['poly'] else None}")
+
             #  Collect image dimensions (ensure they're Python ints, not numpy)
             image_dimensions = {}
             for page_num, pix in self.page_base_pix.items():
@@ -1629,16 +1662,23 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 }
             
             from database_sqlite import save_workspace_data
+
+            # Get profile_name from cached layout config
+            profile_name = None
+            if hasattr(self, '_cached_layout_config') and self._cached_layout_config:
+                profile_name = getattr(self._cached_layout_config, 'profile_name', None)
+
             save_workspace_data(
                 self.layout_name,
                 data_list,
                 self.track_skeleton,
                 image_dimensions,
                 learned_patterns=getattr(self, 'learned_patterns', None),
-                uncertain_detections=getattr(self, 'uncertain_detections', None)
+                uncertain_detections=getattr(self, 'uncertain_detections', None),
+                profile_name=profile_name
             )
 
-            print(f"Saved {self.layout_name} with dimensions: {image_dimensions}")
+            print(f"Saved {self.layout_name} with dimensions: {image_dimensions}, profile: {profile_name}")
             
         except Exception as e:
             print(f"Save failed: {e}")

@@ -976,11 +976,57 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                     # Loading from database - no model needed
                     self.on_status(f"Gespeicherte Daten gefunden, rendere Seiten...")
                     # Store workspace data for loading after pages are rendered
+                    # Handle old format (3), mid format (5), and new format (6 with profile_name)
                     if len(result) == 3:
                         workspace_data, track_skeleton, image_dimensions = result
-                        learned_patterns, uncertain_detections = None, []
-                    else:
+                        learned_patterns, uncertain_detections, saved_profile_name = None, [], None
+                    elif len(result) == 5:
                         workspace_data, track_skeleton, image_dimensions, learned_patterns, uncertain_detections = result
+                        saved_profile_name = None
+                    else:
+                        workspace_data, track_skeleton, image_dimensions, learned_patterns, uncertain_detections, saved_profile_name = result
+
+                    # Auto-load correct profile for DPI if needed
+                    current_profile = getattr(self.layout_config, 'profile_name', None) if self.layout_config else None
+
+                    # If saved profile is different or not loaded, try to auto-load it
+                    if saved_profile_name and saved_profile_name != current_profile:
+                        try:
+                            profile_path = f"profiles/{saved_profile_name}.yaml"
+                            if os.path.exists(profile_path):
+                                self.layout_config = ProfileManager.load_profile(profile_path)
+                                self.on_status(f"Profil '{saved_profile_name}' automatisch geladen für korrekte DPI.")
+                                print(f"DEBUG: Auto-loaded profile '{saved_profile_name}' for correct DPI rendering")
+                            else:
+                                # Profile file doesn't exist - warn user
+                                reply = QtWidgets.QMessageBox.warning(
+                                    self,
+                                    "Profil-Warnung",
+                                    f"Der gespeicherte Arbeitsbereich wurde mit Profil '{saved_profile_name}' erstellt,\n"
+                                    f"aber das Profil-Datei konnte nicht gefunden werden.\n"
+                                    f"Aktuelles Profil: '{current_profile or 'Keins'}'\n\n"
+                                    "Die Bounding-Boxes könnten verschoben sein.\n"
+                                    "Möchten Sie trotzdem fortfahren?",
+                                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                                    QtWidgets.QMessageBox.No
+                                )
+                                if reply != QtWidgets.QMessageBox.Yes:
+                                    return
+                        except Exception as e:
+                            print(f"Warning: Could not auto-load profile '{saved_profile_name}': {e}")
+                            # Show warning but continue
+                            reply = QtWidgets.QMessageBox.warning(
+                                self,
+                                "Profil-Warnung",
+                                f"Der gespeicherte Arbeitsbereich wurde mit Profil '{saved_profile_name}' erstellt,\n"
+                                f"aber das Profil konnte nicht geladen werden: {e}\n\n"
+                                "Die Bounding-Boxes könnten verschoben sein.\n"
+                                "Möchten Sie trotzdem fortfahren?",
+                                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                                QtWidgets.QMessageBox.No
+                            )
+                            if reply != QtWidgets.QMessageBox.Yes:
+                                return
 
                     self._pending_workspace_data = {
                         'layout_name': layout_name,
@@ -988,7 +1034,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                         'track_skeleton': track_skeleton,
                         'image_dimensions': image_dimensions,
                         'learned_patterns': learned_patterns,
-                        'uncertain_detections': uncertain_detections or []
+                        'uncertain_detections': uncertain_detections or [],
+                        'saved_profile_name': saved_profile_name
                     }
                     # Render pages without running analysis
                     self._run_page_rendering_only()
@@ -1109,7 +1156,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             self.model_path or "",  # Model not needed for rendering only
             self.ocr_engine,
             run_analysis=False,  # Key: don't run YOLO
-            detect_tracks=False
+            detect_tracks=False,
+            config=self.layout_config  # Pass config for DPI and other settings
         )
 
         self.worker.progress.connect(self.progress.setValue)
@@ -1290,6 +1338,21 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             # Convert saved data to DataFrame
             import pandas as pd
             saved_df = pd.DataFrame(pending['data'])
+
+            # DEBUG: Print sample coordinate values from database
+            if not saved_df.empty:
+                sample = saved_df.iloc[0]
+                print(f"DEBUG DB LOAD: First row coords - ax1={sample.get('ax1')}, ay1={sample.get('ay1')}, ax2={sample.get('ax2')}, ay2={sample.get('ay2')}")
+
+            # DEBUG: Print image dimensions from re-rendered pages vs saved dimensions
+            saved_dims = pending.get('image_dimensions', {})
+            for page_num, pix in self._page_base_pix.items():
+                re_rendered_w, re_rendered_h = pix.width(), pix.height()
+                saved_w = saved_dims.get(page_num, {}).get('width', 'N/A')
+                saved_h = saved_dims.get(page_num, {}).get('height', 'N/A')
+                print(f"DEBUG DB LOAD: Page {page_num} - Re-rendered: {re_rendered_w}x{re_rendered_h}, Saved: {saved_w}x{saved_h}")
+                if saved_w != 'N/A' and (re_rendered_w != saved_w or re_rendered_h != saved_h):
+                    print(f"  WARNING: DIMENSION MISMATCH! This will cause bbox displacement!")
 
             self.on_status(f"Arbeitsbereich '{pending['layout_name']}' mit {len(saved_df)} Erkennungen geladen!")
 
@@ -2009,59 +2072,86 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                 )
                 return
 
-            # Handle both old format (3 values) and new format (5 values)
+            # Handle old format (3 values), mid format (5 values), and new format (6 with profile_name)
             if len(result) == 3:
                 workspace_data, track_skeleton, image_dimensions = result
-                learned_patterns, uncertain_detections = None, []
-            else:
+                learned_patterns, uncertain_detections, saved_profile_name = None, [], None
+            elif len(result) == 5:
                 workspace_data, track_skeleton, image_dimensions, learned_patterns, uncertain_detections = result
                 uncertain_detections = uncertain_detections or []
+                saved_profile_name = None
+            else:
+                workspace_data, track_skeleton, image_dimensions, learned_patterns, uncertain_detections, saved_profile_name = result
+                uncertain_detections = uncertain_detections or []
 
-            # Emit signal to open in AuditingWindow with saved data
-            self.on_status(f"Öffne Arbeitsbereich mit {len(workspace_data)} Erkennungen...")
+            # Check for profile mismatch and auto-load correct profile for DPI
+            current_profile = getattr(self.layout_config, 'profile_name', None) if self.layout_config else None
 
-            # Convert to DataFrame
-            import pandas as pd
-            df_all = pd.DataFrame(workspace_data)
+            # If saved profile is different or not loaded, try to load the correct profile
+            if saved_profile_name and saved_profile_name != current_profile:
+                try:
+                    profile_path = f"profiles/{saved_profile_name}.yaml"
+                    if os.path.exists(profile_path):
+                        self.layout_config = ProfileManager.load_profile(profile_path)
+                        self.on_status(f"Profil '{saved_profile_name}' automatisch geladen für korrekte DPI.")
+                        print(f"DEBUG: Auto-loaded profile '{saved_profile_name}' for correct DPI rendering")
+                    else:
+                        # Show warning only if profile file doesn't exist
+                        reply = QtWidgets.QMessageBox.warning(
+                            self,
+                            "Profil-Warnung",
+                            f"Der Arbeitsbereich wurde mit Profil '{saved_profile_name}' erstellt,\n"
+                            f"aber das Profil konnte nicht geladen werden.\n"
+                            f"Aktuelles Profil: '{current_profile or 'Keins'}'\n\n"
+                            "Die Bounding-Boxes könnten verschoben sein.\n"
+                            "Möchten Sie trotzdem fortfahren?",
+                            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                            QtWidgets.QMessageBox.No
+                        )
+                        if reply != QtWidgets.QMessageBox.Yes:
+                            return
+                except Exception as e:
+                    print(f"Warning: Could not auto-load profile '{saved_profile_name}': {e}")
+                    # Show warning about potential mismatch
+                    reply = QtWidgets.QMessageBox.warning(
+                        self,
+                        "Profil-Warnung",
+                        f"Der Arbeitsbereich wurde mit Profil '{saved_profile_name}' erstellt,\n"
+                        f"aber das Profil konnte nicht geladen werden: {e}\n\n"
+                        "Die Bounding-Boxes könnten verschoben sein.\n"
+                        "Möchten Sie trotzdem fortfahren?",
+                        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                        QtWidgets.QMessageBox.No
+                    )
+                    if reply != QtWidgets.QMessageBox.Yes:
+                        return
 
-            # We need page images - check if we have them
-            if not self._page_base_pix:
+            # ALWAYS store pending data and re-render to ensure correct cropping
+            # This is necessary because existing pages may have been rendered
+            # with a different profile's crop settings
+            self._pending_workspace_data = {
+                'layout_name': layout_name,
+                'data': workspace_data,
+                'track_skeleton': track_skeleton,
+                'image_dimensions': image_dimensions,
+                'learned_patterns': learned_patterns,
+                'uncertain_detections': uncertain_detections,
+                'saved_profile_name': saved_profile_name
+            }
+
+            # Check if the correct PDF is already loaded
+            if not self.pdf_path or os.path.basename(self.pdf_path) != layout_name:
                 QtWidgets.QMessageBox.information(
                     self,
                     "PDF erforderlich",
                     f"Bitte laden Sie zuerst die zugehörige PDF-Datei:\n\n{layout_name}\n\n"
                     "Die gespeicherten Daten werden dann automatisch geladen."
                 )
-                # Store for later use when PDF is loaded
-                self._pending_workspace_data = {
-                    'layout_name': layout_name,
-                    'data': workspace_data,
-                    'track_skeleton': track_skeleton,
-                    'image_dimensions': image_dimensions,
-                    'learned_patterns': learned_patterns,
-                    'uncertain_detections': uncertain_detections
-                }
                 return
 
-            # Copy arrays to prevent reference sharing between workspaces
-            page_base_pix_copy = dict(self._page_base_pix) if self._page_base_pix else {}
-            page_bgr_arrays_copy = {k: v.copy() if hasattr(v, 'copy') else v
-                                    for k, v in (self._page_bgr_arrays.items() if hasattr(self, '_page_bgr_arrays') and self._page_bgr_arrays else [])}
-
-            # Emit the processing_done signal to transition to AuditingWindow
-            self.processing_done.emit(
-                df_all,
-                page_base_pix_copy,
-                self._page_dfs if hasattr(self, '_page_dfs') else {},
-                page_bgr_arrays_copy,
-                track_skeleton,
-                None,  # No exception
-                True,  # from_database=True
-                uncertain_detections,
-                learned_patterns
-            )
-
-            self.on_status(f"Arbeitsbereich '{layout_name}' erfolgreich geladen!")
+            # Re-render pages to ensure correct cropping is applied
+            self.on_status("Rendere Seiten mit korrektem Zuschnitt...")
+            self._run_page_rendering_only()
 
         except Exception as e:
             import traceback
