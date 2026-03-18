@@ -1092,9 +1092,10 @@ def ocr_simple_text(det: dict, bgr_color: np.ndarray, config=None, debug_class: 
             print(f"[ocr_simple_text] removed prefix: '{old_result}' -> '{result}'")
 
     # Extract valid text_id pattern if there's garbage around it
-    # Valid patterns: S followed by digits, T followed by digits, TCC followed by digits
+    # Valid patterns: S followed by digits, T followed by digits/alphanumeric, TCC followed by digits/alphanumeric
+    # Note: Antwerp plans use mixed alphanumeric like T02A972, T06B972, TCC01A061
     # Use case-insensitive matching and convert to uppercase for consistency
-    text_id_pattern = r'(S\d+|TCC\d+|T\d+)'
+    text_id_pattern = r'(S\d+|TCC\d+[A-Z0-9]*|T\d+[A-Z0-9]*)'
     text_id_match = re.search(text_id_pattern, result, re.IGNORECASE)
     if text_id_match:
         extracted = text_id_match.group(0).upper()  # Normalize to uppercase
