@@ -67,6 +67,7 @@ DEBUG_TRACK = False
 DEBUG_CUSTOM_SYMBOLS = False
 DEBUG_LINKING = False
 DEBUG_OCR = False
+DEBUG_DATABASE = False
 MAX_OCR_WORKERS = 8
 DPI = 500
 TILE_SIZE = 2048
@@ -188,7 +189,7 @@ class PipelineWorker(QtCore.QThread):
     def _configure_from_config(self, config: 'LayoutConfig') -> None:
         """Configure module-level variables from LayoutConfig."""
         global POPPLER_PATH, DEBUG_ANGLE_ROUTING, DEBUG_YOLO, DEBUG_TRACK
-        global DEBUG_CUSTOM_SYMBOLS, DEBUG_LINKING, DEBUG_OCR, MAX_OCR_WORKERS
+        global DEBUG_CUSTOM_SYMBOLS, DEBUG_LINKING, DEBUG_OCR, DEBUG_DATABASE, MAX_OCR_WORKERS
         global DPI, TILE_SIZE, EXCLUDE_LEGEND_STRIP, LEGEND_STRIP_WIDTH_PERCENT
         global LEGEND_STRIP_MAX_PIXELS, CLASS_THRESH, CLASSES, LINK_RULES, ALIASES, OVERLAP_PCT
 
@@ -199,6 +200,7 @@ class PipelineWorker(QtCore.QThread):
         DEBUG_CUSTOM_SYMBOLS = config.debug_custom_symbols
         DEBUG_LINKING = config.debug_linking
         DEBUG_OCR = config.debug_ocr
+        DEBUG_DATABASE = config.debug_database if hasattr(config, 'debug_database') else False
 
         # Paths
         if config.poppler_path:
@@ -208,7 +210,8 @@ class PipelineWorker(QtCore.QThread):
         if hasattr(config, 'detection'):
             det = config.detection
             DPI = det.dpi
-            print(f"DEBUG: Using DPI={DPI} from profile config")
+            if DEBUG_DATABASE:
+                print(f"DEBUG: Using DPI={DPI} from profile config")
             TILE_SIZE = det.tile_size
             OVERLAP_PCT = det.overlap_pct
             EXCLUDE_LEGEND_STRIP = det.exclude_legend_strip
@@ -413,7 +416,8 @@ class PipelineWorker(QtCore.QThread):
 
                 # DEBUG: Track full image dimensions for verification
                 full_h, full_w = full_bgr_color.shape[:2]
-                print(f"DEBUG: Page {pidx} - Full image size: {full_w}x{full_h}")
+                if DEBUG_DATABASE:
+                    print(f"DEBUG: Page {pidx} - Full image size: {full_w}x{full_h}")
 
                 # Apply 4-sided cropping if configured (for detection only)
                 if self.config and (self.config.detection.crop_top or self.config.detection.crop_bottom or
@@ -432,7 +436,8 @@ class PipelineWorker(QtCore.QThread):
                     if remaining_h >= 100 and remaining_w >= 100:
                         bgr_color = bgr_color[crop_t:h-crop_b, crop_l:w-crop_r]
                         print(f"Cropped for detection: {w}x{h} -> {bgr_color.shape[1]}x{bgr_color.shape[0]}")
-                        print(f"DEBUG: Crop offsets that will be applied: crop_l={crop_l}, crop_t={crop_t}")
+                        if DEBUG_DATABASE:
+                            print(f"DEBUG: Crop offsets that will be applied: crop_l={crop_l}, crop_t={crop_t}")
                     else:
                         print(f"Warning: Crop values too large for image ({w}x{h}), "
                               f"remaining would be {remaining_w}x{remaining_h}, skipping crop")
@@ -1268,7 +1273,7 @@ class PipelineWorker(QtCore.QThread):
 
                             # Add crop offsets to convert detection coords to full image space
                             # DEBUG: Log first detection's coordinate transformation
-                            if len(all_rows) == 0:
+                            if DEBUG_DATABASE and len(all_rows) == 0:
                                 print(f"DEBUG DETECT: First detection raw coords: x1={a['x1']}, y1={a['y1']}, x2={a['x2']}, y2={a['y2']}")
                                 print(f"DEBUG DETECT: After offset (crop_l={crop_l}, crop_t={crop_t}): ax1={a['x1']+crop_l}, ay1={a['y1']+crop_t}")
                             all_rows.append(dict(

@@ -664,155 +664,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
         layout.addLayout(top_layout)
 
-        # ====================================================================
-        # RISK COUNTER BAR - Matching Erkennungsqualität criteria
-        # ====================================================================
-        self.problem_counter_bar = QtWidgets.QFrame()
-        self.problem_counter_bar.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.problem_counter_bar.setStyleSheet("""
-            QFrame {
-                background-color: #2b2b2b;
-                border: 1px solid #3d3d3d;
-                border-radius: 6px;
-            }
-        """)
-
-        counter_layout = QtWidgets.QHBoxLayout(self.problem_counter_bar)
-        counter_layout.setContentsMargins(scale_value(10), scale_value(6), scale_value(10), scale_value(6))
-        counter_layout.setSpacing(scale_value(12))
-
-        # High risk (red) - "Sofort prüfen" - dark theme
-        self.high_risk_btn = QtWidgets.QPushButton("0 Sofort prüfen")
-        self.high_risk_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #5c1a1a;
-                color: #ff6b6b;
-                border: 2px solid #ff6b6b;
-                border-radius: 4px;
-                padding: 6px 14px;
-                font-size: 10pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #7a2020;
-                border-color: #ff8585;
-            }
-            QPushButton:checked {
-                background-color: #ff6b6b;
-                color: #1a1a1a;
-            }
-        """)
-        self.high_risk_btn.setCheckable(True)
-        self.high_risk_btn.setToolTip("Elemente mit hohem Risiko (>20%)\nTexterkennung unsicher oder Daten fehlen")
-        self.high_risk_btn.clicked.connect(lambda: self._filter_by_risk('high_risk'))
-        counter_layout.addWidget(self.high_risk_btn)
-
-        # Medium risk (yellow) - "Bald prüfen" - dark theme
-        self.medium_risk_btn = QtWidgets.QPushButton("0 Bald prüfen")
-        self.medium_risk_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4a4020;
-                color: #ffd93d;
-                border: 2px solid #ffd93d;
-                border-radius: 4px;
-                padding: 6px 14px;
-                font-size: 10pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #5a5030;
-                border-color: #ffe066;
-            }
-            QPushButton:checked {
-                background-color: #ffd93d;
-                color: #1a1a1a;
-            }
-        """)
-        self.medium_risk_btn.setCheckable(True)
-        self.medium_risk_btn.setToolTip("Elemente mit mittlerem Risiko (10-20%)\nBei Gelegenheit kontrollieren")
-        self.medium_risk_btn.clicked.connect(lambda: self._filter_by_risk('medium_risk'))
-        counter_layout.addWidget(self.medium_risk_btn)
-
-        # Low risk (green) - "Gut erkannt" - dark theme
-        self.low_risk_btn = QtWidgets.QPushButton("0 Gut erkannt")
-        self.low_risk_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1a4a1a;
-                color: #6bcf6b;
-                border: 2px solid #6bcf6b;
-                border-radius: 4px;
-                padding: 6px 14px;
-                font-size: 10pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2a5a2a;
-                border-color: #85e085;
-            }
-            QPushButton:checked {
-                background-color: #6bcf6b;
-                color: #1a1a1a;
-            }
-        """)
-        self.low_risk_btn.setCheckable(True)
-        self.low_risk_btn.setToolTip("Elemente mit niedrigem Risiko (<10%)\nHohe Qualität - normalerweise OK")
-        self.low_risk_btn.clicked.connect(lambda: self._filter_by_risk('low_risk'))
-        counter_layout.addWidget(self.low_risk_btn)
-
-        counter_layout.addStretch(1)
-
-        # Show all button - dark theme
-        self.show_all_btn = QtWidgets.QPushButton("Alle anzeigen")
-        self.show_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3d3d3d;
-                color: #cccccc;
-                border: 1px solid #555555;
-                border-radius: 4px;
-                padding: 6px 14px;
-                font-size: 10pt;
-            }
-            QPushButton:hover {
-                background-color: #4a4a4a;
-                color: white;
-            }
-        """)
-        self.show_all_btn.setToolTip("Alle Elemente anzeigen (Filter zurücksetzen)")
-        self.show_all_btn.clicked.connect(self._clear_risk_filter)
-        counter_layout.addWidget(self.show_all_btn)
-
-        # Next problem button - dark theme
-        self.next_problem_btn = QtWidgets.QPushButton("→ Nächstes")
-        self.next_problem_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #8b0000;
-                color: #ff6b6b;
-                border: 2px solid #ff6b6b;
-                border-radius: 4px;
-                padding: 6px 14px;
-                font-size: 10pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #a52a2a;
-                color: white;
-            }
-            QPushButton:disabled {
-                background-color: #3d3d3d;
-                color: #666666;
-                border-color: #555555;
-            }
-        """)
-        self.next_problem_btn.setToolTip("Springt zum nächsten Element mit hohem Risiko")
-        self.next_problem_btn.clicked.connect(self._jump_to_next_risk_item)
-        counter_layout.addWidget(self.next_problem_btn)
-
-        layout.addWidget(self.problem_counter_bar)
-
-        # Track current risk filter
-        self._current_risk_filter = None
-
-        # Warning banner removed for cleaner UI
+        # Risk counter bar removed - buttons no longer needed
 
         # Confidence controls
         conf = QtWidgets.QHBoxLayout()
@@ -1414,7 +1266,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
             print(f"  Loaded into workspace: {len(self.df_all)} rows")
 
             # DEBUG: Print sample coordinate values loaded
-            if not self.df_all.empty:
+            debug_db = getattr(self._cached_layout_config, 'debug_database', False) if self._cached_layout_config else False
+            if debug_db and not self.df_all.empty:
                 sample = self.df_all.iloc[0]
                 print(f"DEBUG LOAD: First row coords - ax1={sample.get('ax1')}, ay1={sample.get('ay1')}, ax2={sample.get('ax2')}, ay2={sample.get('ay2')}")
                 if sample.get('poly') is not None:
@@ -1422,7 +1275,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     print(f"DEBUG LOAD: First row poly[0]={poly[0] if isinstance(poly, (list, tuple)) and poly else poly}")
 
             # DEBUG: Print image dimensions
-            if self.page_base_pix:
+            if debug_db and self.page_base_pix:
                 for page_num, pix in self.page_base_pix.items():
                     print(f"DEBUG LOAD: Page {page_num} image size: {pix.width()}x{pix.height()}")
 
@@ -1647,7 +1500,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
             data_list = df_cleaned.to_dict("records")
 
             # DEBUG: Print sample coordinate values being saved
-            if data_list:
+            debug_db = getattr(self._cached_layout_config, 'debug_database', False) if self._cached_layout_config else False
+            if debug_db and data_list:
                 sample = data_list[0]
                 print(f"DEBUG SAVE: First row coords - ax1={sample.get('ax1')}, ay1={sample.get('ay1')}, ax2={sample.get('ax2')}, ay2={sample.get('ay2')}")
                 if sample.get('poly'):
@@ -1974,86 +1828,16 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self.clear_hover_highlight()
 
     # ========================================================================
-    # RISK FILTERING AND COUNTER METHODS - Matching Erkennungsqualität
+    # RISK FILTERING - Buttons removed, methods kept as no-ops for safety
     # ========================================================================
 
     def _filter_by_risk(self, level: str):
-        """
-        Filter tree items by risk level (matching Erkennungsqualität criteria).
-
-        Args:
-            level: 'high_risk' (>20%), 'medium_risk' (10-20%), or 'low_risk' (<10%)
-        """
-        # Toggle behavior - if same filter clicked, clear it
-        if self._current_risk_filter == level:
-            self._clear_risk_filter()
-            return
-
-        # Uncheck other buttons
-        self.high_risk_btn.setChecked(level == 'high_risk')
-        self.medium_risk_btn.setChecked(level == 'medium_risk')
-        self.low_risk_btn.setChecked(level == 'low_risk')
-
-        self._current_risk_filter = level
-
-        # Apply filter to tree
-        self.tree.blockSignals(True)
-
-        for i in range(self.tree.topLevelItemCount()):
-            parent_item = self.tree.topLevelItem(i)
-            visible_child_count = 0
-
-            for j in range(parent_item.childCount()):
-                child_item = parent_item.child(j)
-                row_id = child_item.data(0, QtCore.Qt.UserRole)
-
-                if row_id is None:
-                    child_item.setHidden(True)
-                    continue
-
-                # Get row from dataframe
-                row_data = self.df_all[self.df_all['row_id'] == row_id]
-                if row_data.empty:
-                    child_item.setHidden(True)
-                    continue
-
-                row = row_data.iloc[0]
-                risk_score, _ = calculate_row_risk_score(row)
-
-                # Determine visibility based on risk level
-                show = False
-                if level == 'high_risk' and risk_score > 0.20:
-                    show = True
-                elif level == 'medium_risk' and 0.10 <= risk_score <= 0.20:
-                    show = True
-                elif level == 'low_risk' and risk_score < 0.10:
-                    show = True
-
-                child_item.setHidden(not show)
-                if show:
-                    visible_child_count += 1
-
-            parent_item.setHidden(visible_child_count == 0)
-
-        self.tree.blockSignals(False)
-
-        level_labels = {
-            'high_risk': 'Sofort prüfen',
-            'medium_risk': 'Bald prüfen',
-            'low_risk': 'Gut erkannt'
-        }
-        self._set_status(f"Filter: {level_labels.get(level, level)} - {self._count_visible_items()} Elemente")
+        """Risk filter buttons removed - method is now a no-op."""
+        pass
 
     def _clear_risk_filter(self):
-        """Clear risk filter and show all items."""
-        self._current_risk_filter = None
-        self.high_risk_btn.setChecked(False)
-        self.medium_risk_btn.setChecked(False)
-        self.low_risk_btn.setChecked(False)
-
-        # Re-apply standard filters (class/text)
-        self._apply_all_filters()
-        self._set_status("Filter zurückgesetzt - Alle Elemente angezeigt")
+        """Risk filter buttons removed - method is now a no-op."""
+        pass
 
     def _count_visible_items(self) -> int:
         """Count currently visible tree items."""
@@ -2067,74 +1851,12 @@ class WorkspaceWidget(QtWidgets.QWidget):
         return count
 
     def _jump_to_next_risk_item(self):
-        """Jump to the next high-risk item (risk > 20%)."""
-        if self.df_all is None or self.df_all.empty:
-            return
-
-        # Get current selection
-        selected = self.tree.selectedItems()
-        current_row_id = None
-        if selected:
-            current_row_id = selected[0].data(0, QtCore.Qt.UserRole)
-
-        # Find high-risk items
-        high_risk_row_ids = []
-        for _, row in self.df_all.iterrows():
-            # Skip coordinate and weichen_block (same as Erkennungsqualität)
-            if row.get('cls') in ['coordinate', 'weichen_block']:
-                continue
-            risk_score, _ = calculate_row_risk_score(row)
-            if risk_score > 0.20:
-                high_risk_row_ids.append(row['row_id'])
-
-        if not high_risk_row_ids:
-            self._set_status("Keine Elemente zum Prüfen gefunden!")
-            return
-
-        # Sort for consistent ordering
-        high_risk_row_ids.sort()
-
-        # Find next problem after current selection
-        next_row_id = None
-        if current_row_id is not None and current_row_id in high_risk_row_ids:
-            idx = high_risk_row_ids.index(current_row_id)
-            if idx + 1 < len(high_risk_row_ids):
-                next_row_id = high_risk_row_ids[idx + 1]
-            else:
-                next_row_id = high_risk_row_ids[0]  # Wrap to first
-        else:
-            next_row_id = high_risk_row_ids[0]  # Start from first
-
-        # Select the item in tree
-        if next_row_id in self.row_id_to_tree_item:
-            tree_item = self.row_id_to_tree_item[next_row_id]
-
-            # Clear filter first if item is hidden
-            if tree_item.isHidden():
-                self._clear_risk_filter()
-
-            self.tree.clearSelection()
-            tree_item.setSelected(True)
-            self.tree.scrollToItem(tree_item)
-            self._set_status(f"Prüfen: {high_risk_row_ids.index(next_row_id) + 1}/{len(high_risk_row_ids)}")
+        """Next problem button removed - method is now a no-op."""
+        pass
 
     def _update_problem_counts(self):
-        """Update the risk counter bar with current counts using Erkennungsqualität criteria."""
-        if self.df_all is None or self.df_all.empty:
-            self.high_risk_btn.setText("0 Sofort prüfen")
-            self.medium_risk_btn.setText("0 Bald prüfen")
-            self.low_risk_btn.setText("0 Gut erkannt")
-            self.next_problem_btn.setEnabled(False)
-            return
-
-        counts = count_risk_categories(self.df_all)
-
-        self.high_risk_btn.setText(f"{counts['high_risk']} Sofort prüfen")
-        self.medium_risk_btn.setText(f"{counts['medium_risk']} Bald prüfen")
-        self.low_risk_btn.setText(f"{counts['low_risk']} Gut erkannt")
-
-        # Enable/disable next problem button
-        self.next_problem_btn.setEnabled(counts['high_risk'] > 0)
+        """Risk counter bar removed - this method is now a no-op."""
+        pass
 
     # Quick Correction Panel removed - edit directly in tree
 

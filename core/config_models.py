@@ -462,6 +462,7 @@ class LayoutConfig:
     debug_ui_bbox: bool = False
     debug_comparison: bool = False
     debug_crops: bool = False  # Save OCR crops to debug_crops/ folder
+    debug_database: bool = False  # Debug database save/load and coordinate transformations
 
     # System settings
     poppler_path: Optional[str] = None

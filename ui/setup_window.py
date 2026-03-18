@@ -996,7 +996,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                             if os.path.exists(profile_path):
                                 self.layout_config = ProfileManager.load_profile(profile_path)
                                 self.on_status(f"Profil '{saved_profile_name}' automatisch geladen für korrekte DPI.")
-                                print(f"DEBUG: Auto-loaded profile '{saved_profile_name}' for correct DPI rendering")
+                                if getattr(self.layout_config, 'debug_database', False):
+                                    print(f"DEBUG: Auto-loaded profile '{saved_profile_name}' for correct DPI rendering")
                             else:
                                 # Profile file doesn't exist - warn user
                                 reply = QtWidgets.QMessageBox.warning(
@@ -1340,19 +1341,21 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             saved_df = pd.DataFrame(pending['data'])
 
             # DEBUG: Print sample coordinate values from database
-            if not saved_df.empty:
+            debug_db = getattr(self.layout_config, 'debug_database', False)
+            if debug_db and not saved_df.empty:
                 sample = saved_df.iloc[0]
                 print(f"DEBUG DB LOAD: First row coords - ax1={sample.get('ax1')}, ay1={sample.get('ay1')}, ax2={sample.get('ax2')}, ay2={sample.get('ay2')}")
 
             # DEBUG: Print image dimensions from re-rendered pages vs saved dimensions
-            saved_dims = pending.get('image_dimensions', {})
-            for page_num, pix in self._page_base_pix.items():
-                re_rendered_w, re_rendered_h = pix.width(), pix.height()
-                saved_w = saved_dims.get(page_num, {}).get('width', 'N/A')
-                saved_h = saved_dims.get(page_num, {}).get('height', 'N/A')
-                print(f"DEBUG DB LOAD: Page {page_num} - Re-rendered: {re_rendered_w}x{re_rendered_h}, Saved: {saved_w}x{saved_h}")
-                if saved_w != 'N/A' and (re_rendered_w != saved_w or re_rendered_h != saved_h):
-                    print(f"  WARNING: DIMENSION MISMATCH! This will cause bbox displacement!")
+            if debug_db:
+                saved_dims = pending.get('image_dimensions', {})
+                for page_num, pix in self._page_base_pix.items():
+                    re_rendered_w, re_rendered_h = pix.width(), pix.height()
+                    saved_w = saved_dims.get(page_num, {}).get('width', 'N/A')
+                    saved_h = saved_dims.get(page_num, {}).get('height', 'N/A')
+                    print(f"DEBUG DB LOAD: Page {page_num} - Re-rendered: {re_rendered_w}x{re_rendered_h}, Saved: {saved_w}x{saved_h}")
+                    if saved_w != 'N/A' and (re_rendered_w != saved_w or re_rendered_h != saved_h):
+                        print(f"  WARNING: DIMENSION MISMATCH! This will cause bbox displacement!")
 
             self.on_status(f"Arbeitsbereich '{pending['layout_name']}' mit {len(saved_df)} Erkennungen geladen!")
 
@@ -2094,7 +2097,8 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                     if os.path.exists(profile_path):
                         self.layout_config = ProfileManager.load_profile(profile_path)
                         self.on_status(f"Profil '{saved_profile_name}' automatisch geladen für korrekte DPI.")
-                        print(f"DEBUG: Auto-loaded profile '{saved_profile_name}' for correct DPI rendering")
+                        if getattr(self.layout_config, 'debug_database', False):
+                            print(f"DEBUG: Auto-loaded profile '{saved_profile_name}' for correct DPI rendering")
                     else:
                         # Show warning only if profile file doesn't exist
                         reply = QtWidgets.QMessageBox.warning(

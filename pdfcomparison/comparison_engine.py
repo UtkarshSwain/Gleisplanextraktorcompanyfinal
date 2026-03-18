@@ -86,7 +86,10 @@ class LayoutComparisonEngine:
     DEBUG = DEBUG_COMPARISON
 
     def __init__(self, config: Optional[Dict] = None):
-        self.config = config or self._default_config()
+        # Merge passed config with defaults (so critical_fields etc. are always present)
+        self.config = self._default_config()
+        if config:
+            self.config.update(config)
         # Use DEBUG_COMPARISON from config.py (can be overridden by config dict)
         LayoutComparisonEngine.DEBUG = self.config.get('debug', DEBUG_COMPARISON)
 
