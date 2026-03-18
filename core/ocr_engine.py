@@ -1576,6 +1576,21 @@ def _score_coord_text(txt: str) -> float:
     if has_km_separator:
         score += 0.5  # Strong bonus for Antwerp km+m format
 
+        # Antwerp format validation: X+YYY where X is small (km), YYY is larger (meters)
+        # "1+713" is valid (1km + 713m), "171+3" is invalid (171km + 3m)
+        km_match = re.search(r'^(\d+)[+\-](\d+)', txt)
+        if km_match:
+            km_part = km_match.group(1)  # Before +
+            m_part = km_match.group(2)   # After +
+            km_digits = len(km_part)
+            m_digits = len(m_part)
+
+            # Valid Antwerp: km part should be 1-2 digits, meter part should be 3+ digits
+            if km_digits <= 2 and m_digits >= 3:
+                score += 1.0  # Strong bonus for valid km+m format
+            elif km_digits > 2 and m_digits < 3:
+                score -= 0.5  # Penalty for inverted format like "171+3"
+
     if DEBUG_ANGLE_ROUTING:
         print(f"[score] Simple: '{txt}' → {score:.2f} (km_sep={has_km_separator})")
 
