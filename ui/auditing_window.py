@@ -244,10 +244,6 @@ class AuditingWindow(QtWidgets.QMainWindow):
 
         edit_menu.addSeparator()
 
-        act_bulk = edit_menu.addAction(" Massenbearbeitung")
-        act_bulk.setToolTip("Bearbeitet mehrere Zeilen gleichzeitig")
-        act_bulk.triggered.connect(self.on_bulk_edit)
-
         # Data Menu - Sort and filter
         data_menu = mb.addMenu("Daten")
 
@@ -382,12 +378,6 @@ class AuditingWindow(QtWidgets.QMainWindow):
         toolbar.addAction(act_json)
 
         toolbar.addSeparator()
-
-        # Bulk edit
-        act_bulk = QtWidgets.QAction("Mehrere ändern", self)
-        act_bulk.setToolTip("Mehrere Einträge gleichzeitig bearbeiten")
-        act_bulk.triggered.connect(self.on_bulk_edit)
-        toolbar.addAction(act_bulk)
 
         act_compare = QtWidgets.QAction("Pläne vergleichen", self)
         act_compare.setToolTip("Zwei Gleispläne nebeneinander vergleichen")
@@ -1817,14 +1807,7 @@ class AuditingWindow(QtWidgets.QMainWindow):
         if tree:
             tree.paste_from_clipboard()
             self._set_status("Eingefügt")
-    
-    
-    # Bulk operations
-    def on_bulk_edit(self):
-        tree = self._get_current_tree()
-        if tree:
-            tree.bulk_edit()
-    
+
     def on_clear_cells(self):
         tree = self._get_current_tree()
         if tree:

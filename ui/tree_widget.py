@@ -9,16 +9,15 @@ if TYPE_CHECKING:
     from ui.workspace_widget import WorkspaceWidget
 
 from table_editor import (
-    TableEditorDelegate, 
-    HeaderEditDialog, 
-    ColumnManagerDialog, 
+    TableEditorDelegate,
+    HeaderEditDialog,
+    ColumnManagerDialog,
     FindReplaceDialog,
     AddRowDialog,
     AddColumnDialog,
     SortDialog,
     FilterDialog,
-    StatisticsDialog,
-    BulkEditDialog
+    StatisticsDialog
 )
 
 class AuditingTreeWidget(QtWidgets.QTreeWidget):
@@ -94,13 +93,7 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
         act_paste.triggered.connect(self.paste_from_clipboard)
         
         edit_menu.addSeparator()
-        
-        act_bulk = edit_menu.addAction("Massenbearbeitung...")
-        act_bulk.setEnabled(has_selection)
-        act_bulk.triggered.connect(self.bulk_edit)
-        
-        edit_menu.addSeparator()
-        
+
         act_find = edit_menu.addAction("Suchen und Ersetzen... (Ctrl+F)")
         act_find.triggered.connect(self.find_replace)
         
@@ -383,36 +376,7 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
         """Cut selected cells"""
         self.copy_selection()
         self.clear_cells()
-    
-    def bulk_edit(self):
-        """Bulk edit selected cells"""
-        selected = self.selectedItems()
-        if not selected:
-            return
-        
-        # Filter child items only
-        child_items = [item for item in selected if item.childCount() == 0]
-        if not child_items:
-            return
-        
-        dialog = BulkEditDialog(len(child_items), self)
-        
-        if dialog.exec_() == QtWidgets.QDialog.Accepted:
-            operation, value = dialog.get_operation()
-            current_col = self.currentColumn()
-            
-            for item in child_items:
-                current_text = item.text(current_col)
-                
-                if operation == 'set':
-                    item.setText(current_col, value)
-                elif operation == 'append':
-                    item.setText(current_col, current_text + value)
-                elif operation == 'prepend':
-                    item.setText(current_col, value + current_text)
-                elif operation == 'clear':
-                    item.setText(current_col, "")
-    
+
     # ============================================================================
     # COLUMN OPERATIONS
     # ============================================================================
