@@ -83,3 +83,10 @@ docker-compose.yml
 config/
 custom_symbol_templates/
 custom_symbols.json/
+
+# Distribution archives
+*.zip
+
+# Portable distribution folder
+RailDocStudio_v1/
+RailDocStudio_Portable/
