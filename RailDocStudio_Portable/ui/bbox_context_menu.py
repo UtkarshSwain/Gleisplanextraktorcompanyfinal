@@ -191,7 +191,7 @@ class BBoxContextMenu:
         this method also persists the OCR result to df_all and page_dfs.
         """
         from core.ocr_engine import (
-            ocr_coordinate_horizontal, ocr_signal_name,
+            ocr_coordinate_unified, ocr_signal_name,
             ocr_numeric_cardinal_box, ocr_generic_name, NUMERIC_OK
         )
 
@@ -212,7 +212,9 @@ class BBoxContextMenu:
 
             if new_class == "coordinate":
                 is_coord = True
-                new_text = ocr_coordinate_horizontal(det, self.workspace.current_page_bgr_array, "paddleocr", debug_class="coordinate")
+                # Use ocr_coordinate_unified to properly handle both Wien and Antwerp formats
+                layout_config = self.workspace._get_layout_config()
+                new_text = ocr_coordinate_unified(det, self.workspace.current_page_bgr_array, "paddleocr", config=layout_config, debug_class="coordinate")
             elif new_class == "signal":
                 new_text = ocr_signal_name(det, self.workspace.current_page_bgr_array, "paddleocr", debug_class="signal")
             elif new_class in {"gks_gesteuert", "gks_festkodiert"}:
