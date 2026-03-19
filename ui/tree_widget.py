@@ -992,8 +992,8 @@ class AuditingTreeWidget(QtWidgets.QTreeWidget):
             count += category_item.childCount()
         
         return count
-    
-        # ============================================================================
+
+    # ============================================================================
     # HIGHLIGHT METHODS (for comparison dialog integration)
     # ============================================================================
 

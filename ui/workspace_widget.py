@@ -3502,6 +3502,8 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 self.df_all.loc[row_idx, 'ay2'] = y2
 
             # Update page_dfs
+            page_mask = None
+            page_idx = None
             if page in self.page_dfs:
                 page_mask = self.page_dfs[page]['row_id'] == row_id
                 if page_mask.any():
@@ -3561,7 +3563,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                 #  CRITICAL: Save the new poly back to dataframe for undo/redo!
                 self.df_all.at[row_idx, 'poly'] = poly_array
-                if page in self.page_dfs and page_mask.any():
+                if page_mask is not None and page_mask.any() and page_idx is not None:
                     self.page_dfs[page].at[page_idx, 'poly'] = poly_array
                 print(f"Saved new poly to dataframe for undo/redo")
 
@@ -3696,7 +3698,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             if cls == 'coordinate':
                 print(f"This is a COORDINATE - updating coord_text and checking for linked anchors")
                 self.df_all.loc[row_idx, 'coord_text'] = new_text
-                if page in self.page_dfs and page_mask.any():
+                if page_mask is not None and page_mask.any() and page_idx is not None:
                     self.page_dfs[page].loc[page_idx, 'coord_text'] = new_text
 
                 # Update all linked anchors with the new coordinate text
@@ -3835,17 +3837,17 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
                     #  Set anchor_text to ONLY the block ID (not full OCR text)
                     self.df_all.loc[row_idx, 'anchor_text'] = weichen_block_id
-                    if page in self.page_dfs and page_mask.any():
+                    if page_mask is not None and page_mask.any() and page_idx is not None:
                         self.page_dfs[page].loc[page_idx, 'anchor_text'] = weichen_block_id
 
                     # Update coord_text in dataframes
                     self.df_all.loc[row_idx, 'coord_text'] = coord_text_combined
-                    if page in self.page_dfs and page_mask.any():
+                    if page_mask is not None and page_mask.any() and page_idx is not None:
                         self.page_dfs[page].loc[page_idx, 'coord_text'] = coord_text_combined
 
                     # Update weichen_coordinates field (use .at for list values)
                     self.df_all.at[row_idx, 'weichen_coordinates'] = weichen_coords
-                    if page in self.page_dfs and page_mask.any():
+                    if page_mask is not None and page_mask.any() and page_idx is not None:
                         self.page_dfs[page].at[page_idx, 'weichen_coordinates'] = weichen_coords
                 #  NEW: Template symbols use 'text' field, not 'anchor_text'
                 elif row.get('is_new_symbol', False):
@@ -3853,13 +3855,13 @@ class WorkspaceWidget(QtWidgets.QWidget):
                     # Template symbols store text in 'text' field
                     text_field = 'text' if 'text' in self.df_all.columns else 'anchor_text'
                     self.df_all.loc[row_idx, text_field] = new_text
-                    if page in self.page_dfs and page_mask.any():
+                    if page_mask is not None and page_mask.any() and page_idx is not None:
                         self.page_dfs[page].loc[page_idx, text_field] = new_text
                     print(f" Updated {text_field} to '{new_text}'")
                 else:
                     # Other non-coordinate classes: update anchor_text normally
                     self.df_all.loc[row_idx, 'anchor_text'] = new_text
-                    if page in self.page_dfs and page_mask.any():
+                    if page_mask is not None and page_mask.any() and page_idx is not None:
                         self.page_dfs[page].loc[page_idx, 'anchor_text'] = new_text
 
                     #  Propagate text_id changes to linked signals/anchors
