@@ -30,7 +30,7 @@ import cv2
 from PIL import Image
 import math
 import re
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui
 from utils.helpers import _dist_to_cardinal
 
 # Type hint for LayoutConfig without circular import

@@ -35,7 +35,7 @@ import math
 if TYPE_CHECKING:
     from core.config_models import LayoutConfig
 from PyQt5 import QtCore, QtGui, QtWidgets
-from PIL import Image, ImageFile
+from PIL import Image
 from core.image_processing import _normalize_xywhr,obb_xywhr_to_polygon,polygon_to_aabb_xyxy
 from utils.helpers import (_is_near, _norm_angle, get_params_for_angle, _debug_angle,
                            iou, nms, color_masks, box_color,

@@ -22,7 +22,6 @@ Factory:
 
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
-from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 

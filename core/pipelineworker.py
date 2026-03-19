@@ -30,7 +30,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import pandas as pd
 import time
 import os
-from PIL import Image, ImageFile
+from PIL import Image
 import cv2
 import re
 from typing import TYPE_CHECKING

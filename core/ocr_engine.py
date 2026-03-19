@@ -2545,7 +2545,6 @@ def get_easyocr_reader():
         _easy_reader = easyocr.Reader(['de', 'en'], gpu=False)
     return _easy_reader
 
-import threading
 _EASYOCR_LOCK = threading.Lock()
 
 def easyocr_readtext(arr, *, detail=1, paragraph=False, rotation_info=None, allowlist=None, **kwargs):

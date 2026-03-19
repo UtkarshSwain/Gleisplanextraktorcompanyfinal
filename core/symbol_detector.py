@@ -14,7 +14,7 @@ For Masterarbeit: Demonstrates system adaptability without retraining.
 import cv2
 import numpy as np
 from typing import List, Dict, Tuple, Optional, Any
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 import json
 import math
