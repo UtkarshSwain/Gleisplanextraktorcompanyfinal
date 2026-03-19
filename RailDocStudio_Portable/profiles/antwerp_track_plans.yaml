@@ -1,0 +1,545 @@
+# =============================================================================
+# Antwerp Railway Schematics Profile
+# =============================================================================
+# This profile contains parameters optimized for Antwerp railway schematic plans
+# scanned at 800 DPI with 4-sided cropping for header/footer/margin removal.
+#
+# Version: 2.0 (DRAFT - Requires OCR testing)
+# Last updated: 2026-03-05
+# Compatible with: YOLO v8 OBB model (Antwerp-trained)
+#
+# TODO before production:
+# - Test OCR on coordinate text to determine actual format
+# - Test OCR on text_id to verify generic text extraction
+# - Tune confidence thresholds based on detection results
+# - Adjust spatial parameters based on actual layout spacing
+#
+# Note: Signal is symbol-only (no OCR needed)
+# =============================================================================
+
+profile_name: "antwerp_track_plans"
+profile_version: "2.0-draft"
+description: "Antwerp Railway Schematics (800 DPI, 1024 tiles, 4-sided crop)"
+
+# Model configuration (set at runtime or specify Antwerp-specific model)
+model_path: null
+
+# Debug flags (enable during testing, disable for production)
+debug_signals: false
+debug_angle_routing: false
+debug_ocr: true  # Enable to see OCR results during testing
+debug_linking: true  # Enable to see name linking messages
+debug_track: false
+debug_custom_symbols: false
+debug_yolo: false
+debug_ui_bbox: false
+debug_comparison: false
+debug_crops: false  # Set to true to save OCR crops for inspection
+
+# System settings
+poppler_path: null
+zoom_size: 2048
+
+# =============================================================================
+# CLASS DEFINITIONS (12 Antwerp Symbol Types)
+# =============================================================================
+# Based on detection notebook analysis:
+# - Signal (capitalized, auto-normalized to "signal")
+# - coordinate
+# - text_id (new class - general text labels)
+# - mech_point, elec_point (mechanical/electrical points)
+# - insulation_joint, s_bond, short_bond, terminal_bond
+# - coupling_coil_active, coupling_coil_disabled, spie_loop
+# =============================================================================
+
+classes:
+  - name: "Signal"  # Will be normalized to "signal" automatically via canon_name()
+    class_id: 0
+    confidence_threshold: 0.25  # Lowered from 0.30 for halo expansion compatibility
+    nms_threshold: 0.35
+    requires_ocr: false  # Signal is symbol-only, no OCR needed
+    requires_coordinate: true
+    linking_rule:
+      mode: "below"
+    name_search_rule:
+      inside: false
+      left: false
+      right: false
+      below: true   # text_id below signal
+      above: true   # text_id above signal
+
+  - name: "coordinate"
+    class_id: 1
+    confidence_threshold: 0.35
+    nms_threshold: 0.30
+    requires_ocr: true
+    # Coordinates don't link to other coordinates
+    requires_coordinate: false
+
+  - name: "text_id"
+    class_id: 11
+    confidence_threshold: 0.35
+    nms_threshold: 0.30
+    requires_ocr: true
+    requires_coordinate: false  # Standalone text labels
+    numeric_ok: true
+    linking_rule:
+      mode: "either"
+    name_search_rule:
+      inside: true
+      left: true
+      right: true
+
+  - name: "mech_point"
+    class_id: 2
+    confidence_threshold: 0.25
+    nms_threshold: 0.35
+    requires_ocr: false
+    requires_coordinate: true
+    linking_rule:
+      mode: "either"
+    name_search_rule:
+      inside: false
+      left: false
+      right: false
+      below: true   # text_id below point
+      above: true   # text_id above point
+
+  - name: "elec_point"
+    class_id: 3
+    confidence_threshold: 0.20
+    nms_threshold: 0.35
+    requires_ocr: false
+    requires_coordinate: true
+    linking_rule:
+      mode: "either"
+    name_search_rule:
+      inside: false
+      left: false
+      right: false
+      below: true   # text_id below point
+      above: true   # text_id above point
+
+  - name: "insulation_joint"
+    class_id: 4
+    confidence_threshold: 0.30
+    nms_threshold: 0.35
+    requires_ocr: false
+    requires_coordinate: true
+    linking_rule:
+      mode: "above"
+      tilted_ok: true
+
+  - name: "s_bond"
+    class_id: 5
+    confidence_threshold: 0.75
+    nms_threshold: 0.35
+    requires_ocr: false
+    requires_coordinate: true
+    linking_rule:
+      mode: "above"
+
+  - name: "short_bond"
+    class_id: 6
+    confidence_threshold: 0.20  # Lowered from 0.30 for halo expansion compatibility
+    nms_threshold: 0.35
+    requires_ocr: false
+    requires_coordinate: true
+    linking_rule:
+      mode: "above"
+
+  - name: "terminal_bond"
+    class_id: 7
+    confidence_threshold: 0.40
+    nms_threshold: 0.35
+    requires_ocr: false
+    requires_coordinate: true
+    linking_rule:
+      mode: "above"
+
+  - name: "coupling_coil_active"
+    class_id: 8
+    confidence_threshold: 0.35
+    nms_threshold: 0.35
+    requires_ocr: false
+    requires_coordinate: true
+    linking_rule:
+      mode: "either"
+    name_search_rule:
+      inside: false
+      left: true    # Search left (includes below-left diagonal)
+      right: true   # Search right (includes above-right diagonal)
+      below: true   # Search below
+      above: true   # Search above (distance range search)
+
+  - name: "coupling_coil_disabled"
+    class_id: 9
+    confidence_threshold: 0.45
+    nms_threshold: 0.30  # Stricter - had false positives in notebook
+    requires_ocr: false
+    requires_coordinate: true
+    linking_rule:
+      mode: "either"
+    name_search_rule:
+      inside: false
+      left: true    # Search left (includes below-left diagonal)
+      right: true   # Search right (includes above-right diagonal)
+      below: true   # Search below
+      above: true   # Search above (distance range search)
+
+  - name: "spie_loop"
+    class_id: 10
+    confidence_threshold: 0.45
+    nms_threshold: 0.30  # Stricter - had false positives in notebook
+    requires_ocr: false
+    requires_coordinate: true
+    linking_rule:
+      mode: "either"
+    name_search_rule:
+      inside: false
+      left: false
+      right: false
+      below: true   # text_id below loop
+      above: true   # text_id above loop
+
+# =============================================================================
+# DETECTION CONFIGURATION (YOLO)
+# =============================================================================
+# Antwerp parameters from detection notebook:
+# - 800 DPI (vs Wien's 500 DPI)
+# - 1024 tile size (vs Wien's 2048)
+# - 60% overlap (vs Wien's 40%)
+# - 4-sided cropping: top=2000, bottom=2500, left=1000, right=1000
+# =============================================================================
+
+detection:
+  tile_size: 1024
+  overlap_pct: 60  # Higher overlap for smaller tiles
+  dpi: 800  # Higher DPI = better OCR quality
+  pred_imgsz: 1024
+  tile_halo: 100
+  obb_only: true
+
+  # 4-sided cropping (NEW FEATURE - removes headers/footers/margins)
+  crop_top: 2000
+  crop_bottom: 2500
+  crop_left: 1000
+  crop_right: 1000
+
+  # Legacy legend strip exclusion (disable when using 4-sided crop)
+  exclude_legend_strip: false
+  legend_strip_width_percent: 0
+  legend_strip_max_pixels: 0
+
+  # Title block margins (not used with 4-sided cropping)
+  title_block_margin_height: 0
+  title_block_margin_height_default: 0
+  title_block_margin_width_default: 0
+
+  # Test-time augmentation
+  use_tta: true
+  tta_scales: [1.0]
+  tta_flips: [0, 1]
+  tta_min_votes: 1
+
+  # Uncertain detection thresholds
+  uncertain_thresh_multiplier: 0.5
+  min_uncertain_thresh_default: 0.10
+  min_uncertain_thresh:
+    coordinate: 0.01
+    insulation_joint: 0.01
+
+  # Antwerp-specific detection features
+  global_conf_threshold: 0.05  # Higher than Wien's 0.01
+  use_ink_filter: true
+  ink_threshold: 0.012  # 1.2% minimum ink
+  use_centroid_halo: true
+  halo_ratio: 0.12  # 12% from edges
+  halo_conf_boost: 0.50
+  filter_contained_boxes: false
+  contained_box_threshold: 0.80
+  prefer_larger_nms: true
+
+  # Batch inference (disabled for now - needs testing)
+  # Use -1 for auto-detect, or explicit values
+  # Set to 1/0 for sequential mode (safest)
+  batch_size: 1  # Sequential mode (batch mode needs testing)
+  yolo_workers: 0  # Disabled
+
+  # Polygon handling - Antwerp uses native YOLO polygons (fixes rotation issues)
+  use_native_obb_polygons: true
+
+  # Halo expansion - enables complete bboxes by adding 100px context around tiles (9.8% ratio, reduced to prevent detection loss)
+  use_halo_expansion: true
+
+  # Automatic landscape orientation (rotate portrait pages before cropping)
+  # DISABLED - users must rotate PDFs to landscape manually before upload
+  # (PDF rotation metadata causes pdf2image to auto-rotate, defeating auto-detection)
+  auto_landscape: false
+  landscape_rotation_direction: "cw"  # Clockwise (90° right)
+
+# =============================================================================
+# OCR CONFIGURATION (PaddleOCR)
+# =============================================================================
+# OCR needed for: coordinate, text_id (2 classes out of 12)
+# Signal is symbol-only (no OCR)
+# Higher DPI (800) should improve OCR quality vs Wien (500)
+# =============================================================================
+
+ocr:
+  engine: "paddleocr"
+  max_workers: 6  # Parallel OCR threads
+  tesseract_path: null
+
+  # Signal-specific parameters (scaled for 800 DPI - 1.6x Wien's values)
+  sig_one_window: true
+  sig_pad: 22  # 14 * 1.6 for 800 DPI
+  sig_expand_x: 0.20  # Slightly more expansion for larger images
+  sig_expand_y: 0.25
+  sig_use_tighten: false
+  sig_score_min: 1.3
+  sig_line_thick: 8  # Scaled for 800 DPI (5 * 1.6)
+  signal_text_height_hint: null
+
+  # Left bias expansion (if text is left-aligned)
+  left_bias_expansion_classes: ["text_id", "signal"]
+  left_bias_ratio_h: 0.8
+
+  # Angle detection threshold
+  angle_tol: 15.0  # Wider tolerance for angular text
+
+  # PaddleOCR preprocessing (adjust based on scan quality)
+  denoise_strength: 3  # Less aggressive for high-quality 800 DPI scans
+  sharpen_amount: 1.5  # More sharpening for higher DPI
+  use_preprocessing: true
+  use_adaptive_threshold: true
+  use_morph_operations: true
+
+  # Simple OCR mode - skips heavy preprocessing for high-DPI scans
+  # PaddleOCR works better on raw 800 DPI images without binarization
+  use_simple_ocr: true
+
+  # Simple OCR padding per class (pixels around crop box)
+  # Tune based on 800 DPI scan characteristics
+  # Higher padding for coordinates to capture full "0+033.5" format (especially the "0+" prefix)
+  simple_ocr_padding:
+    coordinate: 12  # More padding to capture full coordinate including "0+" prefix
+    text_id: 8      # Increased for text labels (was 4 - too small)
+    signal: 12      # For signal text (if any)
+    default: 8      # Fallback for other classes (increased from 4)
+
+  # Per-class OCR confidence thresholds (tune based on testing)
+  confidence_thresholds:
+    coordinate: 0.70  # Very high for coordinates
+    text_id: 0.40  # Lower for general labels
+    default: 0.45
+
+  # Cardinal (horizontal/vertical) text parameters
+  # Scaled for 800 DPI (1.6x Wien's 500 DPI values)
+  cardinal_detection_padding:
+    coordinate: 6  # Scaled from Wien's 4
+    signal: 6      # Scaled from Wien's 4
+    text_id: 6     # Scaled for 800 DPI
+
+  cardinal_expansion_factor:
+    coordinate: [1.0, 1.0]
+    signal: [1.0, 1.0]
+    text_id: [1.0, 1.0]
+
+  # Angular (rotated) text parameters
+  angular_detection_padding:
+    coordinate: 6  # Scaled for rotated
+    signal: 12     # Scaled from Wien's 8
+    text_id: 6
+
+  angular_expansion_factor:
+    coordinate: [1.0, 1.0]
+    signal: [1.0, 1.1]  # Slight vertical expansion for signals
+    text_id: [1.1, 1.1]
+
+# =============================================================================
+# SPATIAL RELATIONSHIP CONFIGURATION
+# =============================================================================
+# TODO: Tune these parameters based on actual Antwerp layout spacing
+# Starting values based on Wien profile, may need adjustment
+# =============================================================================
+
+spatial:
+  # Track detection control (Antwerp doesn't need track/Gleis detection)
+  enable_track_detection: false
+
+  # Name window search multipliers
+  signal_dy_multiplier: 2.0
+  signal_dx_multiplier: 2.0
+  default_dy_multiplier: 1.5
+  default_dx_multiplier: 1.0
+  signal_extended_dx_ratio: 5.0
+
+  # Progressive text_id search steps (stepwise radius expansion)
+  text_id_search_steps: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]  # Try these multipliers progressively
+
+  # Coordinate linking for Phase 1 elements (s_bond, short_bond, terminal_bond, insulation_joint, spie_loop)
+  coord_search_steps: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0]  # Progressive vertical distance multipliers
+  coord_dx_steps: [5, 10, 15, 20, 25, 30, 40, 50, 60]  # Progressive horizontal tolerance steps - for each dx, all dy steps are tried
+  coord_dy_min: 30            # Minimum vertical distance
+  coord_dy_base: 300          # Base vertical distance (multiplied by steps) - max 2100px at step 7.0
+  terminal_bond_pair_dy_max: 300  # Max vertical distance to consider terminal_bonds as paired
+  coord_phase1_classes: ["s_bond", "short_bond", "terminal_bond", "insulation_joint", "spie_loop"]
+  coord_phase2_classes: ["signal"]  # Phase 2: directional search based on text position (above/below)
+  signal_coord_dx_steps: [50, 100, 150, 200, 250]  # Larger dx steps for signals (text/coord further from symbol)
+  coord_phase3_classes: ["coupling_coil_active", "coupling_coil_disabled"]  # Phase 3: vertical search first, signal fallback second
+  coupling_coil_dx_steps: [5, 10, 15, 20, 25, 30, 40, 50, 60, 70]  # dx steps for vertical search (increased for edge cases)
+  coupling_coil_dy_steps: [1.0, 1.5, 2.0]  # Fewer dy multipliers for tight search (first try)
+  coupling_coil_signal_dx_max: 300  # For signal fallback (actual: 236-257px)
+  coupling_coil_signal_dy_max: 100  # For signal fallback (actual dy=84 for TCC01061)
+
+  # Durchrutschweg calculation parameters
+  durchrutschweg_bond_classes: ["s_bond", "short_bond", "insulation_joint"]
+  durchrutschweg_y_tolerance: 30        # pixels tolerance for "same Y" (bonds on same row)
+  durchrutschweg_first_bond_dy_max: 300  # max vertical distance from signal to first bond
+  durchrutschweg_first_bond_dx_max: 150  # starting horizontal tolerance (expands in 50px steps up to 700)
+
+  # Search window dimensions
+  inside_padding_ratio: 0.10
+  right_window_width_ratio: 2.5
+  right_window_height_ratio: 0.6
+  left_window_width_ratio: 4.0
+  left_window_height_ratio: 0.6
+  sverbinder_window_width_ratio: 0.9
+  sverbinder_window_height_ratio: 0.3
+
+  # Coordinate linking distances
+  dy_max_base_multiplier: 1.6
+  dx_base_multiplier: 0.6
+  dx_tight_multiplier: 0.45
+  dx_minimum_threshold: 30
+  left_search_bonus: 1.3
+
+  # Haltetafel-GKS linking (Antwerp may not have these classes)
+  haltetafel_gks_max_distance: 250
+  haltetafel_gks_dy_tolerance: 100
+  haltetafel_gks_dx_tolerance: 300
+
+  # Signal-GKS linking (Antwerp may not have GKS classes)
+  signal_gks_max_distance: 250
+  signal_gks_dy_min: 30
+  signal_gks_dy_max: 200
+  signal_gks_dx_tolerance_left: 120
+  signal_gks_dx_tolerance_right: 120
+  signal_gks_angle_tolerance: 20.0
+
+  # Signal-GKS linking - Relaxed mode
+  signal_gks_relaxed_dx_tolerance: 200
+  signal_gks_relaxed_dy_max: 600
+  signal_gks_relaxed_angle_tolerance: 25.0
+
+  # Signal-GKS linking - Nearest mode
+  signal_gks_nearest_max_distance: 800
+  signal_gks_nearest_angle_tolerance: 30.0
+
+  # Track perpendicular detection
+  track_perpendicular_max_distance: 1500
+  track_window_size: 25
+  track_search_radius: 500
+  track_sample_distance: 200
+
+  # Haltepunkt clustering (Antwerp may not have this class)
+  haltepunkt_cluster_max_distance: 250
+  haltepunkt_signal_dy_min: 30
+  haltepunkt_signal_dy_max: 200
+  haltepunkt_coord_dy_min: 20
+  haltepunkt_coord_dy_max: 150
+  haltepunkt_dx_tolerance: 100
+  haltepunkt_angle_tolerance: 20.0
+
+  # Isolierstoß fallback linking
+  isolierstoss_fallback_radius: 300
+
+  # Adaptive pattern learning
+  adaptive_search_dx_multiplier: 3.0
+  adaptive_search_dx_minimum: 150
+  adaptive_search_dy_multiplier: 3.0
+  adaptive_search_dy_minimum: 80
+
+  # Signal group clustering
+  spatial_threshold_single_section: 1000
+  spatial_threshold_gap_multiplier: 3.0
+  spatial_threshold_section_gap_min: 1000
+  spatial_threshold_section_gap_max: 2500
+
+# =============================================================================
+# VALIDATION CONFIGURATION
+# =============================================================================
+# TODO: Update these patterns after testing OCR on actual Antwerp PDFs
+# Current patterns are placeholders
+# =============================================================================
+
+validation:
+  # Coordinate format: "km+meters.decimal" or "km-meters.decimal"
+  # Accept both + and - (OCR sometimes misreads plus as minus)
+  # Examples: "0+033.5", "1+444.5", "0-100.5"
+  coordinate_pattern: '^\s*(\d+[+\-]\d+(?:\.\d+)?)\s*$'
+
+  # Per-class ID patterns - TODO: Test actual formats
+  class_id_patterns:
+    text_id: "^.+$"  # Accept any text for text_id
+
+  # Classes allowing numeric characters in OCR (includes text_id and coordinate)
+  numeric_ok_classes:
+    - "text_id"
+    - "coordinate"
+    - "mech_point"
+    - "elec_point"
+
+  # Decimal separator configuration
+  # TODO: Verify based on actual coordinate format
+  decimal_separator_input: "."  # Assuming dot decimal (update if comma)
+  decimal_separator_output: "."
+
+# =============================================================================
+# COMPONENT SELECTION (for interfaces.py)
+# =============================================================================
+
+components:
+  detector: "yolo"
+  linker: "rule_based"
+  ocr_engine: "paddleocr"
+  validator: "rule_based"
+  storage: ["local_file"]
+
+component_config:
+  detector_args:
+    model_path: null  # Set at runtime or specify Antwerp-specific model
+  storage_args:
+    local_file:
+      output_dir: "output/"
+
+# =============================================================================
+# UI CONFIGURATION (Modular Table Columns)
+# =============================================================================
+# Defines the table columns shown in the auditing UI.
+# Each profile can have different columns based on its data model.
+# =============================================================================
+
+ui:
+  table_columns:
+    - name: "Text/Name"
+      field: "anchor_text"
+      editor_type: "text"
+    - name: "Koordinate"
+      field: "coord_text"
+      editor_type: "text"
+    - name: "Fahrtrichtung"
+      field: "fahrtrichtung"
+      editor_type: "combo"
+      combo_values: ["", "A", "B"]
+      show_for_classes: ["Signal"]
+    - name: "Durchrutschweg"
+      field: "durchrutschweg"
+      editor_type: "text"
+      show_for_classes: ["Signal"]
+    - name: "Seite"
+      field: "page"
+      editor_type: "spin"
+      spin_min: 1
+      spin_max: 9999

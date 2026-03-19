@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell:*)",
+      "Bash(\"c:\\\\Users\\\\z0054cxa\\\\Documents\\\\Masterarbeit\\\\Gleisplanextraktorv3\\\\venv\\\\Scripts\\\\python.exe\" -m py_compile utils/helpers.py pdfcomparison/comparison_engine.py)"
+    ]
+  }
+}
