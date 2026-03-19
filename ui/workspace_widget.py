@@ -45,7 +45,7 @@ from core.pipelineworker import NO_OCR_CLASSES
 from core.config_models import UIConfig, DEFAULT_UI_CONFIG
 import math
 import re
-from core.ocr_engine import manual_angular_ocr, ocr_coordinate_horizontal, ocr_coordinate_angular, ocr_signal_name
+from core.ocr_engine import manual_angular_ocr, ocr_coordinate_unified, ocr_signal_name
 import cv2
 from ui.graphics_view import InteractiveGraphicsView
 from ui.resizable_bbox import ResizableBBoxItem, ResizablePolygonBBoxItem
@@ -3388,10 +3388,9 @@ class WorkspaceWidget(QtWidgets.QWidget):
             
             if cls == "coordinate":
                 is_coord = True
-                if ocr_type == 'horizontal':
-                    new_text = ocr_coordinate_horizontal(det, self.current_page_bgr_array, "paddleocr")
-                else:
-                    new_text = ocr_coordinate_angular(det, self.current_page_bgr_array, "paddleocr", debug_class="coordinate")
+                # Use ocr_coordinate_unified to properly handle both Wien and Antwerp formats
+                layout_config = self._get_layout_config()
+                new_text = ocr_coordinate_unified(det, self.current_page_bgr_array, "paddleocr", config=layout_config, debug_class="coordinate")
             elif cls == "signal":
                 new_text = ocr_signal_name(det, self.current_page_bgr_array, "paddleocr", debug_class="signal")
             elif cls in {"gks_gesteuert", "gks_festkodiert"}:
@@ -3592,7 +3591,7 @@ class WorkspaceWidget(QtWidgets.QWidget):
             # Use class-specific OCR functions (same as Re-OCR feature)
             # These functions handle their own cropping and preprocessing
             from core.ocr_engine import (
-                ocr_coordinate_horizontal, ocr_coordinate_angular,
+                ocr_coordinate_unified,
                 ocr_signal_name, ocr_numeric_cardinal_box, ocr_numeric_tilted_box,
                 ocr_weichen_block, ocr_generic_name
             )
@@ -3601,12 +3600,11 @@ class WorkspaceWidget(QtWidgets.QWidget):
 
             # Use the same logic as on_rerun_ocr for consistency
             if cls == "coordinate":
-                if ocr_mode == 'horizontal':
-                    new_text = ocr_coordinate_horizontal(det, bgr_array, "paddleocr", debug_class="coordinate")
-                    print(f" Coordinate horizontal OCR: '{new_text}'")
-                else:
-                    new_text = ocr_coordinate_angular(det, bgr_array, "paddleocr", debug_class="coordinate")
-                    print(f" Coordinate angular OCR: '{new_text}'")
+                # Use ocr_coordinate_unified to properly handle both Wien and Antwerp formats
+                # This respects use_simple_ocr=True for Antwerp coordinates (handles decimals correctly)
+                layout_config = self._get_layout_config()
+                new_text = ocr_coordinate_unified(det, bgr_array, "paddleocr", config=layout_config, debug_class="coordinate")
+                print(f" Coordinate unified OCR: '{new_text}'")
             elif cls == "signal":
                 new_text = ocr_signal_name(det, bgr_array, "paddleocr", debug_class="signal")
                 print(f" Signal OCR: '{new_text}'")
