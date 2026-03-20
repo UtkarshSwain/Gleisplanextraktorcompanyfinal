@@ -994,6 +994,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
                     # If saved profile is different or not loaded, try to auto-load it
                     if saved_profile_name and saved_profile_name != current_profile:
                         try:
+                            from paths import get_profile_path
                             profile_path = str(get_profile_path(f"{saved_profile_name}.yaml"))
                             if os.path.exists(profile_path):
                                 self.layout_config = ProfileManager.load_profile(profile_path)
@@ -2095,6 +2096,7 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
             # If saved profile is different or not loaded, try to load the correct profile
             if saved_profile_name and saved_profile_name != current_profile:
                 try:
+                    from paths import get_profile_path
                     profile_path = str(get_profile_path(f"{saved_profile_name}.yaml"))
                     if os.path.exists(profile_path):
                         self.layout_config = ProfileManager.load_profile(profile_path)

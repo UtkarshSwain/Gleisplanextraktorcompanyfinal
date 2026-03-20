@@ -7,8 +7,12 @@
 :: Change to script directory
 cd /d "%~dp0"
 
-:: Set Python path (for portable distribution)
-set PATH=%~dp0python\Scripts;%~dp0python;%PATH%
+:: Use ONLY portable Python - ignore any system Python
+:: This ensures it works the same way on any computer
+set PATH=%~dp0python;%~dp0python\Scripts;%SystemRoot%\System32;%SystemRoot%
+
+:: Add PyTorch DLLs to PATH (prevents DLL load errors)
+set PATH=%~dp0python\Lib\site-packages\torch\lib;%PATH%
 
 :: Set Tesseract data path
 set TESSDATA_PREFIX=%~dp0tesseract

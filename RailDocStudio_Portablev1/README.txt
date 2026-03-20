@@ -9,6 +9,9 @@ INSTALLATION
 
 2. Doppelklicken Sie auf "Start_RailDocStudio.bat" um die Anwendung zu starten
 
+HINWEIS: Es ist KEINE Python-Installation erforderlich!
+         Alles Notwendige ist bereits im Ordner enthalten.
+
 
 ERSTER START
 ------------
