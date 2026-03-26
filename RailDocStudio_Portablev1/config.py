@@ -177,16 +177,9 @@ def set_classes_from_model(model):
     IDX = {n: i for i, n in enumerate(CLASSES)}
 
 
-def _alias_name(n: str) -> str:
-    """Apply class name aliases."""
-    return ALIASES.get(n, n)
-
-CLASS_REMAP = {}
-
 def canon_name(n: str) -> str:
-    """Get canonical class name after aliasing and remapping."""
-    n0 = _alias_name(n)
-    return CLASS_REMAP.get(n0, n0)
+    """Get canonical class name after aliasing."""
+    return ALIASES.get(n, n)
 
 # ============================================================================
 # VALIDATION PATTERNS
@@ -229,50 +222,6 @@ CLASS_THRESH = {
     
     # Alias
     "weichenende": 0.7,
-}
-
-# ============================================================================
-# UNCERTAIN DETECTION THRESHOLDS - FOR LOW-CONFIDENCE REVIEW
-# ============================================================================
-# Detections between UNCERTAIN threshold and CLASS_THRESH are shown for user review
-# This catches symbols YOLO detected but wasn't confident about
-
-UNCERTAIN_THRESH_MULTIPLIER = 0.5  # Uncertain if conf >= CLASS_THRESH * 0.5
-
-# Per-class minimum uncertain thresholds (lower = catch more uncertain detections)
-MIN_UNCERTAIN_THRESH = {
-    "coordinate": 0.01,   # Very low - catch almost all coordinate detections
-    "isolierstoß": 0.01,  # Very low - catch almost all isolierstoß detections
-}
-MIN_UNCERTAIN_THRESH_DEFAULT = 0.10  # Default for all other classes
-
-# ============================================================================
-# NMS THRESHOLDS - STRICTER FOR CPU (MAXIMUM PRECISION)
-# ============================================================================
-
-NMS_THRESHOLDS = {
-    "coordinate": 0.25,          # ↓ Very strict - many false positives
-    "weichen_block": 0.30,       # ↓ Stricter
-    "signal": 0.32,              # ↓ Stricter
-    "haltetafel": 0.35,          # ↓ Stricter
-    "gks_gesteuert": 0.30,       # ↓ Was 0.38 (h100_color_v1 model is more confident)
-    "gks_festkodiert": 0.30,     # ↓ Was 0.38 (h100_color_v1 model is more confident)
-    "default": 0.40              # ↓ Much tighter than 0.5
-}
-
-# ============================================================================
-# YOLO PREDICTION PARAMETERS - CPU OPTIMIZED
-# ============================================================================
-
-YOLO_PREDICT_PARAMS = {
-    "imgsz": 1024,               # Match training resolution
-    "conf": 0.005,               # ↓ Very low (we have strict class thresholds)
-    "iou": 0.35,                 # ↓ Tighter NMS for maximum precision
-    "max_det": 1500,             # ↑ Allow more detections (CPU has memory)
-    "agnostic_nms": False,       # Keep class-specific NMS
-    "verbose": False,
-    "half": False,               # ← CRITICAL: CPU doesn't support FP16
-    "augment": False,            # Handled separately via TTA
 }
 
 # ============================================================================
@@ -360,25 +309,6 @@ SIGNAL_TEXT_HEIGHT_HINT: Optional[int] = None
 
 
 # ============================================================================
-# PADDLEOCR PARAMETERS - MAXIMUM ACCURACY
-# ============================================================================
-
-PADDLEOCR_PARAMS = {
-    "denoise_strength": 4,       # ↑ More denoising
-    "sharpen_amount": 1.3,       # ↑ More sharpening
-    "confidence_threshold": {
-        "signal": 0.50,          # ↓ More lenient
-        "gks_gesteuert": 0.40,   # ↓ More lenient
-        "gks_festkodiert": 0.40, # ↓ More lenient
-        "coordinate": 0.65,      # ↑ Stricter (many FPs)
-        "default": 0.45          # ↓ More lenient
-    },
-    "use_preprocessing": True,
-    "use_adaptive_threshold": True,
-    "use_morph_operations": True,
-}
-
-# ============================================================================
 # VALIDATION
 # ============================================================================
 
@@ -393,11 +323,7 @@ def validate_config():
     for cls in CLASS_THRESH.keys():
         if cls not in valid_classes:
             errors.append(f"CLASS_THRESH references unknown class: '{cls}'")
-    
-    for cls in NMS_THRESHOLDS.keys():
-        if cls not in valid_classes and cls != "default":
-            errors.append(f"NMS_THRESHOLDS references unknown class: '{cls}'")
-    
+
     for cls in LINK_RULES.keys():
         if cls not in valid_classes:
             errors.append(f"LINK_RULES references unknown class: '{cls}'")

@@ -10,7 +10,6 @@ Usage:
     from paths import get_model_path, get_database_path, BUNDLED_DIR
     model = YOLO(str(get_model_path("wienschwarz.pt")))
 """
-import os
 import sys
 from pathlib import Path
 
@@ -44,18 +43,6 @@ def get_user_data_dir() -> Path:
         return Path(sys.executable).parent / "RailDocStudio_Data"
     # Development mode - use project root
     return Path(__file__).parent
-
-
-def get_app_data_dir() -> Path:
-    """
-    Alternative: Use Windows AppData for user data.
-    %LOCALAPPDATA%\\RailDocStudio\\
-    """
-    if sys.platform == 'win32':
-        app_data = Path(os.environ.get('LOCALAPPDATA', ''))
-        if app_data.exists():
-            return app_data / "RailDocStudio"
-    return get_user_data_dir()
 
 
 # ============================================================================
@@ -125,11 +112,6 @@ def get_database_path() -> Path:
     data_dir = USER_DATA_DIR / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir / "gleisplanextraktor.db"
-
-
-def get_track_layouts_db_path() -> Path:
-    """Get path to track layouts database."""
-    return USER_DATA_DIR / "track_layouts.db"
 
 
 def get_custom_symbols_path() -> Path:

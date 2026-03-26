@@ -14,9 +14,9 @@ from PIL import Image, ImageFile
 # Disable decompression bomb check for large railway plans
 Image.MAX_IMAGE_PIXELS = None  #  Allow unlimited size
 ImageFile.LOAD_TRUNCATED_IMAGES = True  #  Handle corrupted images
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtWidgets
 from ui.setup_window import SetupAndRunWindow
-from typing import List, Dict, Tuple, Optional, Any
+from typing import Optional
 from ui.auditing_window import AuditingWindow
 from utils.dpi_utils import get_adaptive_window_size, center_window
 from utils.helpers import _is_deleted
@@ -73,10 +73,12 @@ class MainWindow(QtWidgets.QMainWindow):
                             workspace.tree.header().style().polish(workspace.tree.header())
                             
                             # Ask the header to repaint
-                            workspace.tree.header().update() 
+                            workspace.tree.header().update()
                             # --- END FIX ---
 
     def _get_theme_colors(self):
+        """Return theme colors for UI elements."""
+        from PyQt5 import QtGui
         if self._current_theme == "dark":
             return (QtGui.QColor("#00cc00"), QtGui.QColor("#cc0000"),
                     QtGui.QColor("#00ffff"), QtGui.QColor("#ffffff"),

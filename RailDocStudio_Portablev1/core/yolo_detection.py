@@ -34,7 +34,6 @@ import math
 # Type hint for LayoutConfig without circular import
 if TYPE_CHECKING:
     from core.config_models import LayoutConfig
-from PyQt5 import QtCore, QtGui, QtWidgets
 from PIL import Image
 from core.image_processing import _normalize_xywhr,obb_xywhr_to_polygon,polygon_to_aabb_xyxy
 from utils.helpers import (_is_near, _norm_angle, get_params_for_angle, _debug_angle,
@@ -49,20 +48,6 @@ OVERLAP_PCT = 40
 def pil_to_bgr(im: Image.Image) -> np.ndarray:
     return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
 
-def bgr_to_qpix(bgr: np.ndarray) -> QtGui.QPixmap:
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    h, w, ch = rgb.shape
-    qt_img = QtGui.QImage(rgb.data, w, h, ch * w, QtGui.QImage.Format_RGB888)
-    return QtGui.QPixmap.fromImage(qt_img)
-
-def to_gray3(bgr: np.ndarray) -> np.ndarray:
-    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
-
-def draw_box(bgr, x1, y1, x2, y2, color=(0, 255, 0), label=""):
-    cv2.rectangle(bgr, (x1, y1), (x2, y2), color, 2)
-    if label:
-        cv2.putText(bgr, label, (x1, max(0, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
 def tile_image(bgr: np.ndarray, config: 'LayoutConfig' = None, tile: int = None, overlap_pct: int = None):
     """

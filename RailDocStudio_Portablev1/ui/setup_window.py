@@ -2179,8 +2179,6 @@ class SetupAndRunWindow(QtWidgets.QMainWindow):
 
     def on_add_new_symbol(self):
         """Open the New Symbol Dialog to define a new symbol without retraining YOLO."""
-        import cv2
-
         current_page_bgr = None
 
         # Check if we have an image loaded

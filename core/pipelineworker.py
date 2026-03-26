@@ -31,7 +31,6 @@ import pandas as pd
 import time
 import os
 from PIL import Image
-import cv2
 import re
 from typing import TYPE_CHECKING
 from pdf2image import convert_from_path, pdfinfo_from_path
@@ -51,7 +50,6 @@ from core.linking import (
 )
 import numpy as np
 import gc
-import uuid  # Keep for backward compatibility
 from utils.uuid_utils import generate_deterministic_uuid, extract_base_layout_name
 import logging
 
@@ -129,29 +127,6 @@ logger = logging.getLogger(__name__)
 # Defaults for backward compatibility when no config provided
 NO_OCR_CLASSES = []  # Will be populated from config.classes where requires_ocr=False
 FIXED_TEXT_CLASSES = {}  # Will be populated from config.classes where fixed_text is set
-
-
-def convert_colors_to_black_for_yolo(bgr_image, sat_threshold=30):
-    """
-    Convert ALL colored pixels to black so YOLO sees uniform black symbols.
-    Uses saturation threshold - any pixel with saturation > threshold is "colored".
-
-    This catches: Red, Yellow, Green, Blue, Violet, Brown, Orange
-    This preserves: Black, White, Gray (document background/lines)
-
-    Colors in railway documents:
-    - ROT (Red), GELB (Yellow), GRÜN (Green), BLAU (Blue)
-    - VIOLETT (Violet), BRAUN (Brown), ORANGE, GRAU (Gray)
-    """
-    hsv = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2HSV)
-
-    # Saturation channel - high = colored, low = grayscale
-    saturation = hsv[:, :, 1]
-    color_mask = saturation > sat_threshold
-
-    result = bgr_image.copy()
-    result[color_mask] = [0, 0, 0]  # Convert to black
-    return result
 
 
 class PipelineWorker(QtCore.QThread):
