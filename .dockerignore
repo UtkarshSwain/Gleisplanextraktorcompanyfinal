@@ -26,9 +26,10 @@ venv_new/
 
 # Documentation
 *.md
-*.txt
 *.docx
 installation_guide.txt
+# Allow requirements-docker.txt (needed for build)
+!requirements-docker.txt
 
 # GUI files (not needed in headless Docker)
 ui/
