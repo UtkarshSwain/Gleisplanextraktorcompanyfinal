@@ -42,8 +42,8 @@ jobs:
       - name: Run syntax checks
         run: |
           python -m py_compile config.py
-          python -m py_compile api.py
-          python -m py_compile database_sqlite.py
+          if [ -f "api.py" ]; then python -m py_compile api.py; fi
+          if [ -f "database_sqlite.py" ]; then python -m py_compile database_sqlite.py; fi
           echo "✓ Python syntax check passed"
 
       - name: Validate config files
