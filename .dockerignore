@@ -1,0 +1,92 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+.venv/
+venv_new/
+.venv2/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation
+*.md
+*.txt
+*.docx
+installation_guide.txt
+
+# GUI files (not needed in headless Docker)
+ui/
+main.py
+table_editor.py
+pdfcomparison/
+
+# User validation
+uservalidation/
+
+# Models (mounted externally)
+yolomodel/
+*.pt
+*.pth
+*.onnx
+Gleisplanextraktoryolomodel/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+track_layouts.db
+
+# Debug and output files
+debug.txt
+output.txt
+*.log
+
+# Test files
+test_*.py
+*_test.py
+tests/
+
+# Portable versions
+RailDocStudio_Portable/
+RailDocStudio_Portablev1/
+
+# Custom symbols
+custom_symbol_templates/
+custom_symbols.json
+
+# Data files
+data/
+
+# Large dependencies (handled by requirements)
+*.whl
+
+# Environment files
+.env
+.env.*
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Docker artifacts
+.dockerignore
+Dockerfile
+docker-compose.yml
