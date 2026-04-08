@@ -1,4 +1,5 @@
 name: Docker CI/CD
+# Workflow for automated Docker builds and deployment
 
 on:
   push:
