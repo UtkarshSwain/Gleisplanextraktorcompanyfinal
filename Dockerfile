@@ -49,11 +49,12 @@ COPY api.py database_sqlite.py ./
 RUN mkdir -p ./config ./profiles
 
 # Patch PyQt5 imports and usages (replace with dummy imports for headless operation)
-RUN sed -i 's/^from PyQt5.*$/# PATCHED: PyQt5 not available in Docker/' core/*.py && \
-    sed -i 's/^from PyQt5.*$/# PATCHED: PyQt5 not available in Docker/' utils/*.py && \
+RUN sed -i 's/^from PyQt5.*$/# PATCHED: PyQt5 not available in Docker/' core/*.py utils/*.py && \
     sed -i 's/^import sip$/# PATCHED: sip not available/' utils/*.py 2>/dev/null || true && \
-    sed -i 's/QtCore\.QObject/object/g' utils/*.py && \
-    sed -i 's/QtCore\.QObject/object/g' core/*.py
+    sed -i 's/QtCore\.QObject/object/g' utils/*.py core/*.py && \
+    sed -i 's/QtGui\.QPixmap/object/g' utils/*.py core/*.py && \
+    sed -i 's/QtGui\.QImage/object/g' utils/*.py core/*.py && \
+    sed -i 's/QtWidgets\.[A-Za-z_]*/object/g' utils/*.py core/*.py
 
 # Create model directory (mount externally)
 RUN mkdir -p /app/yolomodel
