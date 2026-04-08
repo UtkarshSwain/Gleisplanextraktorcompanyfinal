@@ -11,6 +11,9 @@ cd /d "%~dp0"
 :: This ensures it works the same way on any computer
 set PATH=%~dp0python;%~dp0python\Scripts;%SystemRoot%\System32;%SystemRoot%
 
+:: Set PYTHONPATH to include the application directory
+set PYTHONPATH=%~dp0
+
 :: Add PyTorch DLLs to PATH (prevents DLL load errors)
 set PATH=%~dp0python\Lib\site-packages\torch\lib;%PATH%
 
