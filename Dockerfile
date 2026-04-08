@@ -45,9 +45,11 @@ COPY utils/ ./utils/
 # API and database
 COPY api.py database_sqlite.py ./
 
-# Profile configurations (if needed)
+# Create config and profiles directories
+RUN mkdir -p ./config ./profiles
+
+# Copy config files (if any exist)
 COPY config/ ./config/
-RUN mkdir -p ./profiles
 
 # Patch PyQt5 imports (replace with dummy imports for headless operation)
 RUN sed -i 's/^from PyQt5.*$/# PATCHED: PyQt5 not available in Docker/' core/*.py && \
