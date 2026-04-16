@@ -17,6 +17,9 @@ import numpy as np
 import cv2
 from PIL import Image
 
+# Disable PIL decompression bomb limit for large railway PDFs
+Image.MAX_IMAGE_PIXELS = None
+
 # PDF processing
 from pdf2image import convert_from_bytes
 
