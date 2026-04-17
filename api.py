@@ -207,17 +207,18 @@ async def detect_symbols(
 
             # Parse detections
             for det in detections:
-                # Extract detection info
-                class_name = det.get('class', 'unknown')
-                confidence = det.get('confidence', 0.0)
+                # Extract detection info (keys from yolo_detection.py)
+                class_name = det.get('name', 'unknown')
+                confidence = det.get('conf', 0.0)
 
-                # Get OBB coordinates (8 values: x1,y1,x2,y2,x3,y3,x4,y4)
-                if 'obb' in det:
-                    bbox = det['obb']
-                elif 'bbox' in det:
-                    # Fallback to regular bbox if OBB not available
-                    x1, y1, x2, y2 = det['bbox']
-                    bbox = [x1, y1, x2, y1, x2, y2, x1, y2]  # Convert to OBB format
+                # Get OBB coordinates from 'poly' key (list of 4 points)
+                if 'poly' in det:
+                    poly = det['poly']  # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                    bbox = [coord for point in poly for coord in point]  # Flatten to [x1,y1,x2,y2,...]
+                elif 'x1' in det:
+                    # Fallback to regular bbox
+                    x1, y1, x2, y2 = det['x1'], det['y1'], det['x2'], det['y2']
+                    bbox = [x1, y1, x2, y1, x2, y2, x1, y2]
                 else:
                     continue  # Skip if no bbox
 
