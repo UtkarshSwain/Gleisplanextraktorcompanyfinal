@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     # PDF processing
     poppler-utils \
+    poppler-data \
     # OCR
     tesseract-ocr \
     tesseract-ocr-deu \

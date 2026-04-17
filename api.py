@@ -194,6 +194,11 @@ async def detect_symbols(
             # Convert PIL to BGR numpy array
             page_bgr = pil_to_bgr(pil_img)
 
+            # DEBUG: Save the rendered image to your mounted yolomodel folder
+            # so you can verify on your host machine if it is blank/white.
+            debug_path = f"/app/yolomodel/debug_page_{page_idx + 1}.jpg"
+            cv2.imwrite(debug_path, page_bgr)
+
             # Run YOLO detection
             detections = run_yolo_on_page(
                 model=model,
