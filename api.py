@@ -197,8 +197,7 @@ async def detect_symbols(
             # Run YOLO detection
             detections = run_yolo_on_page(
                 model=model,
-                page_bgr=page_bgr,
-                config=layout_config
+                page_bgr=page_bgr
             )
 
             # Parse detections
