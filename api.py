@@ -142,6 +142,16 @@ async def get_classes():
     )
 
 
+@app.get("/version")
+async def get_version():
+    """Get API version and build info"""
+    return {
+        "api_version": config.__version__,
+        "model_loaded": model is not None,
+        "build": "docker-automated"
+    }
+
+
 @app.post("/detect", response_model=DetectionResponse)
 async def detect_symbols(
     file: UploadFile = File(...),
