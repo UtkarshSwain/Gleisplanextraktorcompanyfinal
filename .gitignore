@@ -71,3 +71,7 @@ docker-compose.yml
 config/
 custom_symbol_templates/
 custom_symbols.json/
+
+# Large local folders (not for git)
+Gleisplanextraktoryolomodel/
+RailDocStudio_Portablev1/
