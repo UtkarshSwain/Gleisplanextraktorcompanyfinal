@@ -5,17 +5,20 @@ Provides endpoints for PDF processing and YOLO-based symbol detection
 
 import os
 import io
+import sys
+import time
 import tempfile
 from typing import List, Optional
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 import numpy as np
 import cv2
 from PIL import Image
+from loguru import logger
 
 # Disable PIL decompression bomb limit for large railway PDFs
 Image.MAX_IMAGE_PIXELS = None
@@ -29,6 +32,24 @@ import config
 from core.yolo_detection import run_yolo_on_page
 from core.config_models import LayoutConfig
 
+# Configure Loguru Logger
+logger.remove()  # Remove default handler
+logger.add(
+    sys.stdout,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> | <level>{message}</level>",
+    level="INFO",
+    colorize=True
+)
+logger.add(
+    "logs/api_{time:YYYY-MM-DD}.log",
+    rotation="00:00",  # Rotate at midnight
+    retention="30 days",  # Keep logs for 30 days
+    compression="zip",  # Compress old logs
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function} | {message}",
+    level="DEBUG"
+)
+logger.info("Logger configured successfully")
+
 # Initialize FastAPI
 app = FastAPI(
     title="Railway Symbol Detection API",
@@ -39,6 +60,28 @@ app = FastAPI(
 # Global model instance and config
 model: Optional[YOLO] = None
 layout_config: Optional[LayoutConfig] = None
+
+
+# Request Logging Middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all API requests with timing"""
+    start_time = time.time()
+
+    # Log incoming request
+    logger.info(f"→ {request.method} {request.url.path}")
+
+    # Process request
+    response = await call_next(request)
+
+    # Log response with timing
+    process_time = time.time() - start_time
+    logger.info(
+        f"← {request.method} {request.url.path} "
+        f"Status={response.status_code} Time={process_time:.3f}s"
+    )
+
+    return response
 
 
 # Response Models
@@ -84,23 +127,24 @@ async def load_model():
     model_path = os.environ.get("YOLO_MODEL_PATH", "yolomodel/best.pt")
 
     if not os.path.exists(model_path):
-        print(f"Warning: Model not found at {model_path}")
-        print("API will start but /detect endpoint will fail until model is provided")
+        logger.warning(f"Model not found at {model_path}")
+        logger.warning("API will start but /detect endpoint will fail until model is provided")
         return
 
     try:
         # Load YOLO model
+        logger.info(f"Loading YOLO model from {model_path}...")
         model = YOLO(model_path)
         config.set_classes_from_model(model)
-        print(f"Model loaded successfully from {model_path}")
-        print(f"Classes: {config.CLASSES}")
+        logger.success(f"Model loaded successfully from {model_path}")
+        logger.info(f"Detected {len(config.CLASSES)} classes: {config.CLASSES}")
 
         # Create default layout configuration
         layout_config = LayoutConfig()
-        print("Layout configuration initialized")
+        logger.info("Layout configuration initialized")
 
     except Exception as e:
-        print(f"Error loading model: {e}")
+        logger.error(f"Error loading model: {e}")
         model = None
         layout_config = None
 
@@ -253,7 +297,7 @@ async def detect_symbols(
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
-        print(f"Error processing PDF: {error_details}")
+        logger.error(f"Error processing PDF: {error_details}")
         raise HTTPException(
             status_code=500,
             detail=f"Error processing PDF: {str(e)}"
