@@ -47,6 +47,7 @@ cache/
 *.pth
 best.pt
 yolov8n.pt
+Gleisplanextraktoryolomodel/
 
 # Archive folder with old versions
 archive_old_versions/
@@ -64,6 +65,17 @@ gleisplanextraktor/
 # Debug files
 debug.txt
 output.txt
+debug_crops/
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Test PDF files
+*.pdf
+
+# Windows null file
+nul
 
 # Docker (if not using)
 docker-compose.yml
@@ -71,3 +83,12 @@ docker-compose.yml
 config/
 custom_symbol_templates/
 custom_symbols.json/
+
+# Distribution archives
+*.zip
+# Exception: Allow Python standard library archive
+!python311.zip
+
+# Portable distribution folder
+RailDocStudio_v1/
+RailDocStudio_Portable/
