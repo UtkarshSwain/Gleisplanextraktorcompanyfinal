@@ -169,6 +169,10 @@ async def health_check():
     """Check API health and model status"""
     model_path = os.environ.get("YOLO_MODEL_PATH", "yolomodel/best.pt")
 
+    # Get pod/hostname for Kubernetes
+    pod_name = os.environ.get("HOSTNAME", "local")
+    logger.info(f"Health check from pod: {pod_name}")
+
     return HealthResponse(
         status="healthy" if model is not None else "degraded",
         model_loaded=model is not None,
@@ -189,10 +193,13 @@ async def get_classes():
 @app.get("/version")
 async def get_version():
     """Get API version and build info"""
+    pod_name = os.environ.get("HOSTNAME", "local")
     return {
         "api_version": config.__version__,
         "model_loaded": model is not None,
-        "build": "docker-automated"
+        "build": "docker-automated",
+        "pod_name": pod_name,  # Shows which Kubernetes pod handled this request
+        "deployment": "kubernetes" if "gleisplan-api" in pod_name else "docker"
     }
 
 
