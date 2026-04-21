@@ -83,3 +83,8 @@ docker-compose.yml
 config/
 custom_symbol_templates/
 custom_symbols.json/
+
+# Distribution archives
+*.zip
+# Exception: Allow Python standard library archive
+!python311.zip
