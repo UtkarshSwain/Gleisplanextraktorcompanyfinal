@@ -57,8 +57,11 @@ RUN sed -i 's/^from PyQt5.*$/# PATCHED: PyQt5 not available in Docker/' core/*.p
     sed -i 's/QtGui\.QImage/object/g' utils/*.py core/*.py && \
     sed -i 's/QtWidgets\.[A-Za-z_]*/object/g' utils/*.py core/*.py
 
-# Create model directory (mount externally)
-RUN mkdir -p /app/yolomodel
+# Create model directory and download model from GitHub Releases
+RUN mkdir -p /app/yolomodel && \
+    curl -L -o /app/yolomodel/best.pt \
+    "https://github.com/utkarshswain/GleisplanextraktorCompanyFinal/releases/download/v1.0.0/best.pt" || \
+    echo "Model download failed - will need to be mounted at runtime"
 
 # Expose API port
 EXPOSE 8000
