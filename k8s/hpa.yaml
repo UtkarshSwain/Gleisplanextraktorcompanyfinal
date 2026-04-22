@@ -1,0 +1,34 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gleisplan-api-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gleisplan-api
+  minReplicas: 2    # Never go below 2 pods
+  maxReplicas: 10   # Never exceed 10 pods
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 10  # Scale up if CPU > 10% (easier to trigger!)
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0  # Scale up immediately
+      policies:
+      - type: Percent
+        value: 100  # Double the pods each time
+        periodSeconds: 15
+      - type: Pods
+        value: 2    # Or add 2 pods at a time
+        periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 60  # Wait 60 sec before scaling down
+      policies:
+      - type: Percent
+        value: 50  # Remove 50% of pods
+        periodSeconds: 15
