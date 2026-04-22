@@ -60,7 +60,7 @@ RUN sed -i 's/^from PyQt5.*$/# PATCHED: PyQt5 not available in Docker/' core/*.p
 # Create model directory and download model from GitHub Releases
 RUN mkdir -p /app/yolomodel && \
     curl -L -o /app/yolomodel/best.pt \
-    "https://github.com/utkarshswain/GleisplanextraktorCompanyFinal/releases/download/v1.0.0/best.pt" || \
+    "https://github.com/utkarshswain/GleisplanextraktorCompanyFinal/releases/download/v1.0.0/wienschwarz.pt" || \
     echo "Model download failed - will need to be mounted at runtime"
 
 # Expose API port
