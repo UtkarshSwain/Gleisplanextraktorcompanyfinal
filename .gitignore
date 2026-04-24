@@ -88,3 +88,8 @@ custom_symbols.json/
 *.zip
 # Exception: Allow Python standard library archive
 !python311.zip
+
+# Portable distribution folder
+RailDocStudio_v1/
+RailDocStudio_Portable/
+RailDocStudio_Portablev1/
