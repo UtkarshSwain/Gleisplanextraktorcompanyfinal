@@ -489,7 +489,10 @@ class EnhancedDataValidator:
 
         for _, row in signals.iterrows():
             fahrt = row.get('fahrtrichtung')
-            anchor_text = row.get('anchor_text', '') or ''
+            anchor_text = row.get('anchor_text', '')
+            # Handle NaN values (float) - convert to empty string
+            if pd.isna(anchor_text) or not isinstance(anchor_text, str):
+                anchor_text = ''
             anchor_text_upper = anchor_text.upper().strip()
 
             #  Signals that DON'T require Fahrtrichtung:
