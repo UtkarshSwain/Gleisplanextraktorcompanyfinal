@@ -5,6 +5,10 @@ __pycache__/
 *.so
 .Python
 
+# Working/draft requirement files
+requirements-working.txt
+requirements-draft.txt
+
 # Virtual Environment
 venv/
 env/
